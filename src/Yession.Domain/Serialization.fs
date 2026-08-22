@@ -971,6 +971,24 @@ module Codec =
                   WorkSandboxStopped.Sandbox = get.Required.Field "sandbox" sandboxName.Decode
                   WorkSandboxStopped.Actor = get.Required.Field "actor" actor.Decode }) }
 
+    let private shellProfileSet : Codec<ShellProfileSet> =
+        { Encode =
+            fun (p: ShellProfileSet) ->
+                Encode.object
+                    [ "messageId", messageId.Encode p.MessageId
+                      "sandbox", sandboxName.Encode p.Sandbox
+                      // The CLEAR rides as an absent value, which is what makes it
+                      // indistinguishable from a line an older build wrote — and that is the
+                      // right answer for both: no profile.
+                      "workingDirectory", Encode.option Encode.string p.WorkingDirectory
+                      "actor", actor.Encode p.Actor ]
+          Decode =
+            Decode.object (fun get ->
+                { ShellProfileSet.MessageId = get.Required.Field "messageId" messageId.Decode
+                  ShellProfileSet.Sandbox = get.Required.Field "sandbox" sandboxName.Decode
+                  ShellProfileSet.WorkingDirectory = get.Optional.Field "workingDirectory" Decode.string
+                  ShellProfileSet.Actor = get.Required.Field "actor" actor.Decode }) }
+
     let private commandRefused : Codec<CommandRefused> =
         { Encode =
             fun (p: CommandRefused) ->
@@ -1122,6 +1140,8 @@ module Codec =
                     Encode.object [ "type", Encode.string "workSandboxStarted"; "payload", workSandboxStarted.Encode p ]
                 | WorkSandboxStopped p ->
                     Encode.object [ "type", Encode.string "workSandboxStopped"; "payload", workSandboxStopped.Encode p ]
+                | ShellProfileSet p ->
+                    Encode.object [ "type", Encode.string "shellProfileSet"; "payload", shellProfileSet.Encode p ]
                 | SessionEvent.CommandRefused p ->
                     Encode.object [ "type", Encode.string "commandRefused"; "payload", commandRefused.Encode p ]
                 | ToolUseStarted p ->
@@ -1175,6 +1195,7 @@ module Codec =
                 | "repoBranchSwitched" -> Decode.field "payload" repoBranchSwitched.Decode |> Decode.map RepoBranchSwitched
                 | "workSandboxStarted" -> Decode.field "payload" workSandboxStarted.Decode |> Decode.map WorkSandboxStarted
                 | "workSandboxStopped" -> Decode.field "payload" workSandboxStopped.Decode |> Decode.map WorkSandboxStopped
+                | "shellProfileSet" -> Decode.field "payload" shellProfileSet.Decode |> Decode.map ShellProfileSet
                 | "commandRefused" -> Decode.field "payload" commandRefused.Decode |> Decode.map SessionEvent.CommandRefused
                 | "toolUseStarted" -> Decode.field "payload" toolUseStarted.Decode |> Decode.map ToolUseStarted
                 | "toolUseFinished" -> Decode.field "payload" toolUseFinished.Decode |> Decode.map ToolUseFinished

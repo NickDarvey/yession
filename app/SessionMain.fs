@@ -332,6 +332,11 @@ let mutable private queryRegistry : Queries.QueryRegistry = Queries.empty
 // which no turn can run, because nothing is listening.
 let mutable private workSandboxes : WorkSandboxes.WorkSandboxes = WorkSandboxes.unavailable
 
+// The terminal manager (Plan 25 needs it here for the `shell_profile` query and the command
+// that changes it). Filled from the Host beside the sandboxes above, and for the same
+// reason: the Host owns the log both are built over.
+let mutable private terminals : SessionTerminals.SessionTerminals = SessionTerminals.unavailable
+
 // The MCP servers this session was given (Plan 17). Composed HERE rather than by the Host,
 // unlike the other reverse legs, because what arrives on that leg has two consumers: a
 // turn's registry, which the Host builds, and the `mcp_servers` query, which is this
@@ -418,6 +423,7 @@ let private reportGitHubNetworkFailure (credentialActor: ActorRef) (_gitSaid: st
 let private commandServices : Commands.CommandServices =
     { Repos = fun () -> reposService
       Sandboxes = fun () -> workSandboxes
+      Terminals = fun () -> terminals
       Invalidate = fun name -> queryRegistry.Invalidate name }
 
 /// The credential a party's calls on the provider run on (Plan 08): the session's own
@@ -609,6 +615,7 @@ Async.StartImmediate (
                   // Reads the cell rather than a value: the registry is the Host's, and
                   // the Host has not been started yet. By the time anyone reads it, it is.
                   WorkSandboxes.query (fun () -> workSandboxes)
+                  ShellProfile.query (fun () -> terminals)
                   McpClient.query (fun () -> mcpServers) ]
             match Queries.create registrations with
             | Ok registry -> queryRegistry <- registry
@@ -690,6 +697,7 @@ Async.StartImmediate (
         // capabilities and the `work_sandboxes` query read is filled here — before the
         // readiness line, and therefore before any turn or any browser can ask.
         workSandboxes <- host.Sandboxes
+        terminals <- host.Terminals
         // How each gated command is carried out, handed to the gate the Host owns. Here —
         // and not closed over a turn — because the table is built from the services, and the
         // services are composed here.

@@ -60,6 +60,16 @@ module private ToolArgs =
                 get.Optional.Field "forward" (Decode.list Decode.string) |> Option.defaultValue []))
             json
 
+    /// `set_shell_profile`'s pair, both optional: where shells opened from now on start,
+    /// and whose sandbox. An absent `cwd` is the CLEAR, and an absent `sandbox` is the
+    /// default one — so a bare call means "put the default sandbox back the way it was".
+    let cwdSandbox (json: string) : Result<string option * string, string> =
+        read
+            (Decode.object (fun get ->
+                get.Optional.Field "cwd" Decode.string,
+                get.Optional.Field "sandbox" Decode.string |> Option.defaultValue ""))
+            json
+
     let two (first: string) (second: string) (json: string) : Result<string * string, string> =
         read
             (Decode.object (fun get ->
@@ -396,6 +406,20 @@ module AgentTools =
                 | Error e -> return sprintf "could not stop the sandbox: %s" e
             })
 
+    /// Where terminals opened from now on start (Plan 25). The sandbox defaults, so the
+    /// common call is one argument.
+    let private setShellProfile (capabilities: AgentCapabilities) (raw: string) (cwd: string option) : Async<string> =
+        let raw = if raw = "" then SandboxName.value SandboxName.defaultName else raw
+        // An empty string is the CLEAR, like an absent one: a model that computed a path and
+        // got nothing must not be told it set the profile to "".
+        let cwd = cwd |> Option.map (fun path -> path.Trim ()) |> Option.filter (fun path -> path <> "")
+        withSandbox raw (fun name ->
+            async {
+                match! capabilities.SetShellProfile name cwd with
+                | Ok outcome -> return renderCommandOutcome outcome
+                | Error e -> return sprintf "could not set the shell profile: %s" e
+            })
+
     let private readQuery (capabilities: AgentCapabilities) (def: QueryDef) () : Async<string> =
         async {
             match! capabilities.ReadQuery def.Name with
@@ -648,6 +672,21 @@ module AgentTools =
                       match ToolArgs.string "name" args with
                       | Error e -> return Error e
                       | Ok name -> return! ok (stopWorkSandbox capabilities name)
+                  })
+
+          tool
+              "set_shell_profile"
+              "Say where terminals opened from now on should start. Use it once after add_repo, with the path add_repo gave you, and stop putting `cd` at the front of every command — every terminal opened afterwards starts there, yours and the people's, and it survives a restart. It takes a DIRECTORY, not a script: there is nothing to run here, and execute_command is still the only way to run anything. The directory must already exist inside that sandbox, and be absolute — this checks, and says so rather than leaving you a terminal that opens nowhere. Omit `cwd` to put it back the way it was. Terminals that are already open keep the directory they are in; the one exception is the terminal your plain execute_command runs in, which is reopened for you."
+              [ ToolField.optional
+                    "cwd"
+                    "string"
+                    "an absolute path inside the sandbox, e.g. \"/repos/hello-world\"; omit it to clear the profile"
+                ToolField.optional "sandbox" "string" "the work sandbox this is about; omit for the default one" ]
+              (fun args ->
+                  async {
+                      match ToolArgs.cwdSandbox args with
+                      | Error e -> return Error e
+                      | Ok (cwd, sandbox) -> return! ok (setShellProfile capabilities sandbox cwd)
                   }) ]
 
     /// The session's QUERIES (Plan 15), generated from the registry rather than written out

@@ -224,6 +224,27 @@ module ConversationProjection =
                           Kind = ConversationItemKind.ActNote
                           Offset = envelope.Offset
                           Woke = None } ] }
+        // Where new terminals start (Plan 25) folds in for the repo notes' reason: it is a
+        // session-shaping act everyone is affected by — the next terminal a PERSON opens
+        // lands there too — and the timeline is the only place they would learn it.
+        | SessionEvent.ShellProfileSet p ->
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = p.MessageId
+                          Author = p.Actor
+                          Body =
+                            match p.WorkingDirectory with
+                            | Some cwd ->
+                                sprintf "new terminals in %s start in %s" (SandboxName.value p.Sandbox) cwd
+                            | None ->
+                                sprintf
+                                    "new terminals in %s start where the sandbox puts them"
+                                    (SandboxName.value p.Sandbox)
+                          Status = Complete
+                          Kind = ConversationItemKind.ActNote
+                          Offset = envelope.Offset
+                          Woke = None } ] }
         // A refusal reads in the timeline beside the acts that happened, attributed to the
         // person who said no rather than to the agent that asked (Plan 15, stage 3). Same
         // reason `BlockRejected` renders in the terminal: an act that simply vanishes is

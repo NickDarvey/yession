@@ -706,6 +706,15 @@ module SessionTerminals =
           /// Type the instrumentation into the shell that is there now. Refused when the
           /// terminal is not lost, or has no persistent shell to type into.
           Rearm : TerminalId -> Async<Result<unit, string>>
+          /// Set (or clear) where a shell opened in one sandbox starts, from now on (Plan 25).
+          ///
+          /// ONE verb, because the three things it does cannot be separated: an actor able to
+          /// append without validating is an actor who can point every future terminal at a
+          /// directory that is not there, and an actor able to validate without appending has
+          /// only asked a question. `None` clears it.
+          SetProfile : ActorRef -> SandboxName -> string option -> Async<Result<string, string>>
+          /// Every sandbox's profile as it stands — what the `shell_profile` query reads.
+          Profiles : unit -> ShellProfileProjection
           /// Reclaim any lease that has gone idle with something queued behind it (Plan 13,
           /// stage 3c). Called on a beat; a no-op when nothing qualifies, which is the usual
           /// case. `holdOf` is passed in rather than computed here because it needs the doc,
@@ -749,6 +758,8 @@ module SessionTerminals =
           Lost = fun () -> Set.empty
           Interactive = fun _ -> false
           Rearm = fun _ -> async { return Error "this session has no terminals" }
+          SetProfile = fun _ _ _ -> async { return Error "this session has no terminals" }
+          Profiles = fun () -> ShellProfileProjection.empty
           ReclaimIdle = fun _ -> async { return () }
           IsOpen = fun _ -> false
           Lengths = fun () -> []
@@ -784,6 +795,10 @@ module SessionTerminals =
         // a guessable nonce is no nonce at all — the whole point is that output nobody
         // trusted cannot forge a block's outcome.
         (mintNonce: unit -> string)
+        // The timeline note a profile change lands as (Plan 25). Injected like every other
+        // mint, for the reason all of them are: a test that cannot predict an id cannot
+        // assert on the record it appears in.
+        (mintMessageId: unit -> MessageId)
         (onRecord: TerminalId -> int -> TranscriptRecord -> unit)
         // A terminal now exists. Separate from `onRecord` rather than folded into it because
         // the two are different facts arriving at different times — "here is a line" and
@@ -806,6 +821,11 @@ module SessionTerminals =
         // close — and an async decision taken before the busy mark could reorder the queue.
         (classifier: Classifier)
         (openAtBoot: TerminalId list)
+        // Where a shell opened in each sandbox starts, folded from the same durable replay
+        // that produced `openAtBoot` (Plan 25). Taken at creation rather than read from the
+        // log here, because the log is read once at boot and this is one of the things that
+        // read produced — and it is what makes the profile survive a restart.
+        (profilesAtBoot: ShellProfileProjection)
         : SessionTerminals =
 
         let live = Collections.Generic.Dictionary<string, LiveTerminal> ()
@@ -859,6 +879,10 @@ module SessionTerminals =
         let mutable busy : Set<string> = Set.empty
         let mutable lost : Set<string> = Set.empty
         let mutable leases = TerminalLeases.empty
+        /// Where a shell opened in each sandbox starts (Plan 25). Held HERE, with the code
+        /// that opens shells, rather than above it: a profile a caller had to remember to
+        /// apply would not be a profile.
+        let mutable profiles = profilesAtBoot
         let mutable leftOpen : Set<string> = openAtBoot |> List.map TerminalId.value |> Set.ofList
 
         /// The sandbox a terminal's shell lives in. `default` for one this process has no
@@ -1116,15 +1140,45 @@ module SessionTerminals =
                                         note (clean.Length - kept.Length)
                                         emit id current TranscriptOutput kept
                                 | _ -> emit id current TranscriptOutput clean
-                    let! spawned =
+                    // The profile is applied by the SPAWN, never as a `cd` typed at the
+                    // prompt (Plan 25). A typed one would echo into the transcript on the
+                    // re-arm path below — which re-types this bootstrap into whatever shell
+                    // is there NOW — so the audit trail would carry a command nobody ran; it
+                    // would need quoting for a path this code did not choose; and it cannot
+                    // fail visibly, because `cd /gone` prints into a terminal that carries on
+                    // regardless. The OS answers a spawn's cwd at the one moment something
+                    // is listening.
+                    let profileCwd = ShellProfileProjection.workingDirectory sandbox profiles
+                    let spawnPty (cwd: string option) =
                         (environmentFor sandbox).SpawnPty
                             { Executable = shell.Executable
                               Arguments = shell.InteractiveArguments
                               Env = Map.empty
-                              WorkingDirectory = None }
+                              WorkingDirectory = cwd }
                             80
                             24
                             onOutput
+                    let! attempted = spawnPty profileCwd
+                    // The directory can go away between being set and being opened in — an
+                    // `rm -rf` in a terminal, an unmounted volume. A terminal that refuses to
+                    // open because of a DEFAULT is a worse failure than the default being
+                    // wrong, so fall back once and say why where everyone reads it. The
+                    // profile is left alone: it is a person's to fix, not ours to guess at.
+                    let! spawned =
+                        match attempted, profileCwd with
+                        | Error reason, Some path ->
+                            async {
+                                emit
+                                    id
+                                    terminal
+                                    TranscriptStderr
+                                    (sprintf
+                                        "yession: could not start a shell in %s (%s) — starting where the sandbox puts them instead\r\n"
+                                        path
+                                        reason)
+                                return! spawnPty None
+                            }
+                        | _ -> async { return attempted }
                     match spawned with
                     | Error _ -> return ()
                     | Ok pty ->
@@ -1520,7 +1574,19 @@ module SessionTerminals =
                                             { Executable = shell.Executable
                                               Arguments = shell.Arguments @ [ command ]
                                               Env = Map.empty
-                                              WorkingDirectory = None }
+                                              // The profile applies here TOO (Plan 25). This
+                                              // path gets a fresh process per block and carries
+                                              // nothing between them, so it is applied per
+                                              // block — the same promise, kept by the only
+                                              // means this path has. Wiring only the pty would
+                                              // make a degraded terminal silently ignore the
+                                              // profile, and the difference between the two
+                                              // would surface as "the same command answers
+                                              // differently in two terminals".
+                                              WorkingDirectory =
+                                                terminal.Sandbox
+                                                |> Option.bind (fun sandbox ->
+                                                    ShellProfileProjection.workingDirectory sandbox profiles) }
                                             onChunk
                                     match spawned with
                                     | Error reason -> return CommandExecutionFailed reason
@@ -1885,6 +1951,114 @@ module SessionTerminals =
             }
 
 
+        /// Set (or clear) where a shell opened in this sandbox starts, from now on (Plan 25).
+        ///
+        /// Validate, append, apply, answer — one verb, because a caller that could do the
+        /// second without the first is a caller that can point every future terminal at a
+        /// directory that is not there.
+        let setProfile (actor: ActorRef) (sandbox: SandboxName) (cwd: string option) : Async<Result<string, string>> =
+            async {
+                let name = SandboxName.value sandbox
+                match cwd with
+                // Relative paths are refused outright: a shell's idea of "relative to what" is
+                // precisely the thing being configured, so the answer would depend on the
+                // setting it is meant to establish.
+                | Some path when not (path.StartsWith "/") ->
+                    return
+                        Error (
+                            sprintf
+                                "'%s' is not an absolute path. A relative one would be relative to whatever a shell already had, which is the thing this sets — pass a checkout path from add_repo or the repos query."
+                                path)
+                | _ ->
+                    // Checked INSIDE the sandbox, by asking it. A host-side existence check
+                    // would be wrong twice over: under docker the path is in a container this
+                    // process cannot see, and under srt the sandbox's read scope is not ours.
+                    // The path rides as an argv element and is never interpolated into a
+                    // command line — the one place this feature could become a second door.
+                    let! ensured =
+                        match cwd with
+                        | Some _ -> (environmentFor sandbox).Ensure None "the shell profile was set"
+                        | None -> async { return EnvironmentAvailable }
+                    let! checked' =
+                        match ensured, cwd with
+                        | EnvironmentUnavailable reason, _ -> async { return Error reason }
+                        | EnvironmentAvailable, None -> async { return Ok () }
+                        | EnvironmentAvailable, Some path ->
+                            async {
+                                let! spawned =
+                                    (environmentFor sandbox).Spawn
+                                        { Executable = shell.Executable
+                                          Arguments = shell.Arguments @ [ "test -d \"$1\""; "sh"; path ]
+                                          Env = Map.empty
+                                          WorkingDirectory = None }
+                                        ignore
+                                match spawned with
+                                | Error reason -> return Error reason
+                                | Ok handle ->
+                                    match! handle.Exited with
+                                    | SandboxExited 0 -> return Ok ()
+                                    | SandboxExited _ ->
+                                        return
+                                            Error (
+                                                sprintf
+                                                    "there is no directory %s in the %s sandbox. The paths add_repo and the repos query answer with are what this takes."
+                                                    path
+                                                    name)
+                                    | SandboxRunFailed reason -> return Error reason
+                            }
+                    match checked' with
+                    | Error reason -> return Error reason
+                    | Ok () ->
+                        // ONE event, appended and then folded — rather than a durable write
+                        // beside a separate assignment, which is two mechanisms for one fact
+                        // and free to disagree the moment a replay disagrees with a live set.
+                        let event =
+                            SessionEvent.ShellProfileSet
+                                { MessageId = mintMessageId ()
+                                  Sandbox = sandbox
+                                  WorkingDirectory = cwd
+                                  Actor = actor }
+                        do! appendAs actor event
+                        profiles <- ShellProfileProjection.applyEvent profiles event
+                        // The agent's GENERAL-PURPOSE terminal in this sandbox is retired, and
+                        // only that one. Left alone, a profile change would be invisible in
+                        // exactly the flow that motivates it: set the profile, run `pwd`, get
+                        // the old directory, conclude the tool did nothing. It is the manager's
+                        // own — minted on demand, never named by anyone — so the next command
+                        // reopens it in the new directory and nothing is lost but a shell's
+                        // history. Terminals the agent NAMED, and the people's, were asked for:
+                        // taking somebody's shell away because a default changed is not a
+                        // default's business. A BUSY one is left alone too, because killing a
+                        // running command to change a default is the wrong trade in the one
+                        // direction that cannot be undone.
+                        let retired =
+                            match agentTerminals.TryGetValue name with
+                            | true, id when isOpen id -> Some (id, not (Set.contains (TerminalId.value id) busy))
+                            | _ -> None
+                        match retired with
+                        | Some (id, true) ->
+                            let! _ = closeTerminal id "the shell profile changed"
+                            ()
+                        | _ -> ()
+                        let where =
+                            match cwd with
+                            | Some path -> sprintf "new terminals in %s start in %s." name path
+                            | None -> sprintf "new terminals in %s start where the sandbox puts them." name
+                        let mine =
+                            match retired with
+                            | Some (_, true) -> [ "Your command terminal was closed and reopens there on your next command." ]
+                            | Some (_, false) ->
+                                [ "Your command terminal has a command running, so it was left alone and keeps the directory it is in." ]
+                            | None -> []
+                        return
+                            Ok (
+                                String.concat
+                                    " "
+                                    ([ where ]
+                                     @ mine
+                                     @ [ "Terminals you opened, and the people's, keep the directory they are in." ]))
+            }
+
         { Open = openTerminal
           AgentTerminal = agentTerminal
           OpenAgentTerminal = openAgentTerminal
@@ -1904,6 +2078,8 @@ module SessionTerminals =
           Lost = fun () -> lost
           Interactive = fun id -> TerminalLeases.autoHeld id leases
           Rearm = rearm
+          SetProfile = setProfile
+          Profiles = fun () -> profiles
           ReclaimIdle = reclaimIdle
           IsOpen = isOpen
           Lengths =
