@@ -122,7 +122,7 @@ let private writeOnly (schema: string) : (string * bool) list =
 /// `read_terminal` against a capability that answers with exactly this tail.
 let private readingTerminal (tail: TerminalTail) =
     let registry =
-        AgentTools.registry { AgentCapabilities.none with ReadTerminal = fun _ -> async { return Ok tail } }
+        AgentTools.registry { AgentCapabilities.none with ReadTerminal = fun _ _ -> async { return Ok tail } }
     registry.Invoke (call "yession" "read_terminal" """{"terminal":"t1"}""")
 
 let private sessionTests =
@@ -199,11 +199,29 @@ let private sessionTests =
                     "the call happened; it is the command that did not"
             }
 
-        // Reading a terminal with no blocks (Plan 19).
-        testCaseAsync "a tail that left nothing out comes back as it came" <|
+        // Reading a terminal with no blocks (Plan 19), paged in Plan 25. Every answer says
+        // where it read, because a model told only the text cannot tell "this is everything"
+        // from "this is the last 2000 characters of a day" — and it reads it as the first.
+        testCaseAsync "a read that reached the live edge says it is up to date" <|
             async {
-                let! answer = readingTerminal { Text = "U-Boot 2024.01\n=> "; Elided = 0 }
-                Expect.equal answer (Ok (ToolAnswer.text "U-Boot 2024.01\n=> ")) "all of it, unannotated"
+                let! answer =
+                    readingTerminal { Text = "U-Boot 2024.01\n=> "; Elided = 0; From = 0; Through = 2; Length = 2 }
+                Expect.equal
+                    answer
+                    (Ok (ToolAnswer.text "lines 0-2 of 2, up to date\nU-Boot 2024.01\n=> "))
+                    "the text, and the fact that there is no more of it"
+            }
+
+        // The cursor is the whole point of a page: a reader that cannot say where it stopped
+        // cannot read on, and a model that is not handed the number will not invent it.
+        testCaseAsync "a read with more behind it hands back the line to carry on from" <|
+            async {
+                let! answer =
+                    readingTerminal { Text = "boot\n"; Elided = 0; From = 0; Through = 500; Length = 1200 }
+                Expect.equal
+                    answer
+                    (Ok (ToolAnswer.text "lines 0-500 of 1200 — read on with from: 500\nboot\n"))
+                    "where it got to, and how to continue"
             }
 
         // What matters is the SAME thing that matters for a block's output: a model that
@@ -211,16 +229,16 @@ let private sessionTests =
         // confidently.
         testCaseAsync "a tail that left something out says how much" <|
             async {
-                let! answer = readingTerminal { Text = "=> "; Elided = 4096 }
+                let! answer = readingTerminal { Text = "=> "; Elided = 4096; From = 700; Through = 1200; Length = 1200 }
                 Expect.equal
                     answer
-                    (Ok (ToolAnswer.text "[4096 earlier characters omitted]\n=> "))
+                    (Ok (ToolAnswer.text "lines 700-1200 of 1200, up to date\n[4096 earlier characters omitted]\n=> "))
                     "in the words a block's output already uses"
             }
 
         testCaseAsync "a terminal that has said nothing says so, rather than answering blank" <|
             async {
-                let! answer = readingTerminal { Text = ""; Elided = 0 }
+                let! answer = readingTerminal { Text = ""; Elided = 0; From = 0; Through = 0; Length = 0 }
                 Expect.equal answer (Ok (ToolAnswer.text "terminal t1 has said nothing")) "silence is an answer"
             }
 
@@ -232,7 +250,7 @@ let private sessionTests =
                     AgentTools.registry
                         { AgentCapabilities.none with
                             ReadTerminal =
-                                fun _ ->
+                                fun _ _ ->
                                     async {
                                         return Error "this terminal runs commands as blocks — what one printed comes back from execute_command"
                                     } }

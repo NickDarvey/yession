@@ -66,6 +66,14 @@ module private ToolArgs =
                 get.Required.Field first Decode.string, get.Required.Field second Decode.string))
             json
 
+    /// `read_terminal`'s pair: which terminal, and where to read from. An absent `from` is
+    /// the tail, which is what the optional parameter degrades to.
+    let terminalFrom (json: string) : Result<string * int option, string> =
+        read
+            (Decode.object (fun get ->
+                get.Required.Field "terminal" Decode.string, get.Optional.Field "from" Decode.int))
+            json
+
     let repoBranchCreate (json: string) : Result<string * string * bool, string> =
         read
             (Decode.object (fun get ->
@@ -232,14 +240,31 @@ module AgentTools =
     /// Read a live-only terminal (Plan 19). Same rendering as a block's output, because it is
     /// the same question — what did this print — and a model should not have to learn two
     /// shapes for one answer.
-    let private readTerminal (capabilities: AgentCapabilities) (id: TerminalId) : Async<string> =
+    let private readTerminal (capabilities: AgentCapabilities) (id: TerminalId) (from: int option) : Async<string> =
         async {
-            match! capabilities.ReadTerminal id with
+            match! capabilities.ReadTerminal id from with
             | Error reason -> return sprintf "could not read terminal %s: %s" (TerminalId.value id) reason
-            | Ok tail when tail.Text = "" -> return sprintf "terminal %s has said nothing" (TerminalId.value id)
-            | Ok tail when tail.Elided > 0 ->
-                return sprintf "[%d earlier characters omitted]\n%s" tail.Elided tail.Text
-            | Ok tail -> return tail.Text
+            | Ok tail when tail.Text = "" && tail.Length = 0 ->
+                return sprintf "terminal %s has said nothing" (TerminalId.value id)
+            | Ok tail ->
+                // The bounds are stated on EVERY answer, not only when something was lost. A
+                // model told the text alone cannot tell "this is everything" from "this is
+                // the last 2000 characters of a day", and it will read it as the first —
+                // which is how an agent concludes a boot log is three lines long.
+                let where =
+                    if tail.Through >= tail.Length then
+                        sprintf "lines %d-%d of %d, up to date" tail.From tail.Through tail.Length
+                    else
+                        sprintf
+                            "lines %d-%d of %d — read on with from: %d"
+                            tail.From
+                            tail.Through
+                            tail.Length
+                            tail.Through
+                let omitted =
+                    if tail.Elided > 0 then sprintf "\n[%d earlier characters omitted]" tail.Elided else ""
+                if tail.Text = "" then return sprintf "%s%s\n(nothing printed in these lines)" where omitted
+                else return sprintf "%s%s\n%s" where omitted tail.Text
         }
 
     let private setSecret (capabilities: AgentCapabilities) (name: string) (value: string) : Async<string> =
@@ -467,16 +492,20 @@ module AgentTools =
 
           tool
               "read_terminal"
-              "Read what a terminal has said, when its answer does not come back as a command's output — one streaming something live, or a shell terminal where a command has opened a full-screen program and is waiting for a keystroke. Returns the tail of it, saying how much it left out. Reading takes nothing from anybody: whoever is typing keeps the terminal. Refused on a shell terminal running ordinary commands, where what one printed comes back from execute_command instead."
-              [ ToolField.required "terminal" "string" "the terminal id, from the terminal that was opened for the stream" ]
+              "Read what a terminal has said, when its answer does not come back as a command's output — one streaming something live, or a shell terminal where a command has opened a full-screen program and is waiting for a keystroke. With no `from` you get the tail: what it is saying now, capped, saying how much it left out. With `from` you get a page starting at that line and the line to carry into the next call, which is how you read what a terminal said BEFORE you arrived, however long ago. Every answer says which lines it covers and how many the terminal has, so you can tell a whole answer from the end of a long one. Reading takes nothing from anybody: whoever is typing keeps the terminal. Refused on a shell terminal running ordinary commands, where what one printed comes back from execute_command instead."
+              [ ToolField.required "terminal" "string" "the terminal id, from the terminal that was opened for the stream"
+                ToolField.optional
+                    "from"
+                    "integer"
+                    "the line to read forward from, as reported by a previous read; omit for the tail" ]
               (fun args ->
                   async {
-                      match ToolArgs.string "terminal" args with
+                      match ToolArgs.terminalFrom args with
                       | Error e -> return Error e
-                      | Ok terminal ->
+                      | Ok (terminal, from) ->
                           match TerminalId.create terminal with
                           | Error e -> return Error (sprintf "not a terminal id: %s" e)
-                          | Ok id -> return! ok (readTerminal capabilities id)
+                          | Ok id -> return! ok (readTerminal capabilities id from)
                   })
 
           tool

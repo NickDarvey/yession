@@ -98,6 +98,37 @@ module Transcript =
         |> List.map (fun r -> r.Data)
         |> String.concat ""
 
+    /// The longest run of `records` starting at line `first` that fits BOTH bounds, and the
+    /// line one past the last one taken.
+    ///
+    /// Counted together in one pass rather than one bound after the other, because a caller
+    /// that took lines first and trimmed characters second would report a cursor for text it
+    /// did not return — and the whole value of a cursor is that reading on from it loses
+    /// nothing. So a record is taken whole or not at all: a page holding half of one is a
+    /// page whose next read starts mid-escape-sequence.
+    ///
+    /// A record that is on its own larger than `chars` is still taken when it would be the
+    /// first, because a page that refused it would return nothing for ever and the caller
+    /// would have no way past it.
+    let page (first: int) (lines: int) (chars: int) (records: TranscriptRecord list) : string * int =
+        let rec take (taken: string list) (length: int) (at: int) (remaining: TranscriptRecord list) =
+            match remaining with
+            | [] -> taken, at
+            | record :: rest ->
+                if at - first >= lines then taken, at
+                else
+                    let printable = record.Kind = TranscriptOutput || record.Kind = TranscriptStderr
+                    let addition = if printable then record.Data.Length else 0
+                    if printable && length + addition > chars && not (List.isEmpty taken) then taken, at
+                    else
+                        take
+                            (if printable then record.Data :: taken else taken)
+                            (length + addition)
+                            (at + 1)
+                            rest
+        let taken, through = take [] 0 first records
+        String.concat "" (List.rev taken), through
+
 /// The terminal queue's drain decision, as a pure function (Plan 13). The Session Process
 /// is the single consumer of the terminal queue exactly as it is of the message queue,
 /// and this is the whole policy: what runs next, and what is merely left over.
@@ -658,13 +689,16 @@ module SessionTerminals =
           /// write tool can be refused while its stream is attached, which is what keeps one
           /// device to one door.
           Write : TerminalId -> ActorRef -> string -> Async<Result<unit, string>>
-          /// The tail of what such a terminal has SAID (Plan 19) — `Write`'s other half, and
-          /// beside it because the rule that admits one admits the other: blocks or bytes.
+          /// What such a terminal has SAID (Plan 19) — `Write`'s other half, and beside it
+          /// because the rule that admits one admits the other: blocks or bytes.
           ///
           /// Not its mirror image, though. A write has to be arbitrated, which is what the
           /// lease is for; a reader is not a second writer, so this takes nothing and blocks
           /// nobody — a person can be typing while the agent reads over their shoulder.
-          Tail : TerminalId -> Async<Result<TerminalTail, string>>
+          ///
+          /// `None` is the live tail; `Some line` reads FORWARD from a line a previous read
+          /// handed back. The two are bounded differently on purpose — see `TerminalTail`.
+          Tail : TerminalId -> int option -> Async<Result<TerminalTail, string>>
           /// The lease holder's viewport size, applied to the pty and the emulator. `false`
           /// when dropped, on the same terms as `Input`.
           Resize : TerminalId -> ActorRef -> int -> int -> bool
@@ -724,7 +758,7 @@ module SessionTerminals =
           PeerGone = fun _ -> async { return () }
           Input = fun _ _ _ -> false
           Write = fun _ _ _ -> async { return Error "this session has no terminals" }
-          Tail = fun _ -> async { return Error "this session has no terminals" }
+          Tail = fun _ _ -> async { return Error "this session has no terminals" }
           Resize = fun _ _ _ _ -> false
           ApplySize = fun _ _ -> ()
           Busy = fun () -> Set.empty
@@ -1654,7 +1688,7 @@ module SessionTerminals =
         /// window. A CLOSED terminal has no live length to count back from, so it reads what
         /// the store still holds — already bounded by the per-terminal retention cap, and
         /// still worth answering, because a device's recording outlives its stream.
-        let tail (id: TerminalId) : Async<Result<TerminalTail, string>> =
+        let tail (id: TerminalId) (from: int option) : Async<Result<TerminalTail, string>> =
             async {
                 let key = TerminalId.value id
                 // Refused where a command's own answer carries what it printed — and that is
@@ -1669,16 +1703,43 @@ module SessionTerminals =
                         Error
                             "this terminal's output comes back as blocks — run it with execute_command, whose answer carries what it printed"
                 else
-                    let from =
+                    // The live edge, whether or not the terminal is still open: a closed one
+                    // reads back from its recording, and its length stopped moving with it.
+                    let length =
                         match live.TryGetValue key with
-                        | true, terminal -> max 0 (terminal.Transcript.NextSeq () - tailWindow)
-                        | _ -> 0
-                    let printed = readTranscript id from None |> Transcript.printed
-                    let elided = max 0 (printed.Length - TerminalDigest.tailCap)
-                    return
-                        Ok
-                            { Text = (if elided > 0 then printed.Substring elided else printed)
-                              Elided = elided }
+                        | true, terminal -> terminal.Transcript.NextSeq ()
+                        | _ -> readTranscript id 0 None |> List.length
+                    match from with
+                    | None ->
+                        // The tail, bounded by CHARACTERS, because what it is for is fitting
+                        // in a context window. It reaches the live edge by construction, so
+                        // `Through` is the length.
+                        let start = max 0 (length - tailWindow)
+                        let printed = readTranscript id start None |> Transcript.printed
+                        let elided = max 0 (printed.Length - TerminalDigest.tailCap)
+                        return
+                            Ok
+                                { Text = (if elided > 0 then printed.Substring elided else printed)
+                                  Elided = elided
+                                  From = start
+                                  Through = length
+                                  Length = length }
+                    | Some requested ->
+                        // A page, bounded by where it STOPPED, because what it is for is
+                        // being resumed. Nothing is elided from a page: `Through` says where
+                        // to carry on, and a page that dropped part of itself would make that
+                        // number a lie about what comes next.
+                        let start = max 0 requested
+                        let text, through =
+                            readTranscript id start None
+                            |> Transcript.page start tailWindow TerminalDigest.tailCap
+                        return
+                            Ok
+                                { Text = text
+                                  Elided = 0
+                                  From = start
+                                  Through = max start through
+                                  Length = length }
             }
 
         let resize (id: TerminalId) (by: ActorRef) (cols: int) (rows: int) : bool =
