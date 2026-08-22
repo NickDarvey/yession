@@ -686,13 +686,20 @@ let private liveClone =
                 // missing note there says "too early to tell" and not "broken". Printed rather
                 // than asserted until a run that waits for the turn says which it is.
                 let verb =
-                    match
+                    let note =
                         model.Conversation.Items
                         |> List.tryFind (fun i ->
                             i.Kind = ConversationItemKind.ActNote && i.Body.StartsWith "added repo")
-                        with
-                    | Some note -> note.Body
-                    | None -> "(no `added repo` act-note — the verb has not reported success)"
+                    let turnInFlight =
+                        model.Conversation.Items
+                        |> List.exists (fun i -> i.Author = ActorRef.Agent && i.Status = Streaming)
+                    match note, turnInFlight with
+                    | Some note, _ -> note.Body
+                    // The distinction the last two release runs turned on, and neither could
+                    // state: a missing note WHILE the agent is still talking is this case
+                    // settling early, not a verb that failed. Only the second line is a finding.
+                    | None, true -> "(not yet — the turn is still in flight, which is what settling on the checkout means)"
+                    | None, false -> "(no `added repo` act-note, and the turn is over — the verb did not report success)"
                 sprintf
                     "CLONE: %s\n  environment: %A\n  conversation:\n%s\n  terminal blocks:\n%s\n  session dir: %s\n  repos dir: %s\n  owner dir: %s\n  checkout whole: %b\n  add_repo said: %s"
                     why
