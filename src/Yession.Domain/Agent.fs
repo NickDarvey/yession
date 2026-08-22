@@ -418,6 +418,14 @@ type StartWorkSandbox = SandboxName -> string list -> Async<Result<CommandOutcom
 /// forwarding, and stated as such wherever the change is refused.
 type StopWorkSandbox = SandboxName -> Async<Result<CommandOutcome, string>>
 
+/// Set (or clear) where a shell opened in one sandbox starts (Plan 25). `None` clears it,
+/// back to the sandbox's own default — one verb, because "what does a new terminal do" has
+/// one answer at a time.
+///
+/// A DIRECTORY and not a script: each field of a profile is applied by the spawn, so this
+/// can never become a second way to run something. See `ShellProfile`.
+type SetShellProfile = SandboxName -> string option -> Async<Result<CommandOutcome, string>>
+
 /// Answer one of the session's registered queries (Plan 15). The agent reaches the SAME
 /// registry the humans' settings surface streams from — that is the whole point of a
 /// query being a declaration rather than a tool body: one declaration, two audiences, no
@@ -473,6 +481,10 @@ type AgentCapabilities =
       // these decide which sandboxes exist, not what runs in them.
       StartWorkSandbox : StartWorkSandbox
       StopWorkSandbox : StopWorkSandbox
+      /// Where terminals opened in a sandbox from now on start (Plan 25). A command like
+      /// the two above: it changes what every future terminal does — the people's as much
+      /// as the agent's — which is exactly the kind of act the gate exists for.
+      SetShellProfile : SetShellProfile
       /// Where every tool call this turn makes is recorded (Plan 16, part C). ONE seam,
       /// bound to the turn by whoever built these capabilities, and wrapped around the
       /// WHOLE registry rather than around each tool — so a provider added later cannot
@@ -519,6 +531,7 @@ module AgentCapabilities =
           ReadQuery = fun _ -> async { return Error "no query capability" }
           StartWorkSandbox = fun _ _ -> async { return Error "no sandbox capability" }
           StopWorkSandbox = fun _ -> async { return Error "no sandbox capability" }
+          SetShellProfile = fun _ _ -> async { return Error "no terminal capability" }
           RecordToolUse = ToolUseLog.none
           ForeignTools = [] }
 

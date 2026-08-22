@@ -135,7 +135,7 @@ let private sessionTests =
                 [ "execute_command"; "check_pending"; "set_secret"; "list_secrets"
                   "delete_secret"; "add_repo"; "switch_branch"; "fetch_repo"
                   "repo_status"; "repo_log"; "repo_diff"
-                  "start_work_sandbox"; "stop_work_sandbox" ]
+                  "start_work_sandbox"; "stop_work_sandbox"; "set_shell_profile" ]
                 |> List.map (sprintf "mcp__yession__%s")
             Expect.containsAll allowed expected "every verb the agent had before is still declared"
             Expect.equal (List.length allowed) (List.length (List.distinct allowed)) "no name is declared twice"
@@ -151,6 +151,63 @@ let private sessionTests =
             Expect.equal repos.Title (Some "repos") "and the title the settings surface shows"
             Expect.equal (writeOnly repos.InputSchema) [] "a query is nullary"
         }
+
+        // The shell profile (Plan 25). What matters at this seam is that the tool's
+        // arguments reach the capability as the capability's own vocabulary — a directory
+        // or its absence — because "no directory" is the CLEAR and not a missing argument.
+        testCaseAsync "set_shell_profile hands the capability a directory" <|
+            async {
+                let mutable seen : (string * string option) option = None
+                let registry =
+                    AgentTools.registry
+                        { AgentCapabilities.none with
+                            SetShellProfile =
+                              fun name cwd ->
+                                async {
+                                    seen <- Some (SandboxName.value name, cwd)
+                                    return Ok { Status = CommandRan "set"; Tool = "set_shell_profile"; Summary = "s"; Handle = None }
+                                } }
+                let! _ =
+                    registry.Invoke (call "yession" "set_shell_profile" """{"cwd":"/repos/octo/hello"}""")
+                Expect.equal seen (Some ("default", Some "/repos/octo/hello")) "the default sandbox, and the path"
+            }
+
+        testCaseAsync "a set_shell_profile with no directory is the clear" <|
+            async {
+                let mutable seen : (string * string option) option = None
+                let registry =
+                    AgentTools.registry
+                        { AgentCapabilities.none with
+                            SetShellProfile =
+                              fun name cwd ->
+                                async {
+                                    seen <- Some (SandboxName.value name, cwd)
+                                    return Ok { Status = CommandRan "cleared"; Tool = "set_shell_profile"; Summary = "s"; Handle = None }
+                                } }
+                let! _ = registry.Invoke (call "yession" "set_shell_profile" """{"sandbox":"test"}""")
+                Expect.equal seen (Some ("test", None)) "an absent directory is the clear, not a missing argument"
+            }
+
+        testCaseAsync "a refused shell profile reads as a refusal, not a failure" <|
+            async {
+                let registry =
+                    AgentTools.registry
+                        { AgentCapabilities.none with
+                            SetShellProfile =
+                              fun _ _ ->
+                                async {
+                                    return
+                                        Ok
+                                            { Status = CommandRefusedBy (PeerRef (PeerId.create "ada" |> expect), Some "not there")
+                                              Tool = "set_shell_profile"
+                                              Summary = "set_shell_profile default -> /gone"
+                                              Handle = None }
+                                } }
+                let! answer = registry.Invoke (call "yession" "set_shell_profile" """{"cwd":"/gone"}""")
+                match answer with
+                | Ok answer -> Expect.isTrue (answer.Text.StartsWith "REFUSED by") "the model reads a decision, not a malfunction"
+                | Error e -> failwithf "expected an answer, got %s" e
+            }
 
         // The mechanism the tool-use record will rely on: secrecy is a property of the
         // FIELD, declared in the schema, so renaming an argument cannot leave the

@@ -138,6 +138,7 @@ let private reposAnswering (add: RepoRef -> Async<Result<RepoListing, string>>) 
 let private servicesOver (service: Repos.ReposService) : Commands.CommandServices =
     { Repos = fun () -> Some service
       Sandboxes = fun () -> WorkSandboxes.unavailable
+      Terminals = fun () -> SessionTerminals.unavailable
       Invalidate = ignore }
 
 /// A session whose `add_repo` succeeds at once.

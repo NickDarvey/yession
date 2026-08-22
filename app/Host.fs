@@ -234,6 +234,11 @@ let startFull
             replayed.Events
             |> List.fold (fun proj e -> TerminalProjection.applyEvent proj e.Event) TerminalProjection.empty
         terminalProjection <- replayedTerminals
+        // Where a shell opened in each sandbox starts (Plan 25), from the same replay — which
+        // is what makes a restarted session open its next terminal where the last one started.
+        let replayedProfiles =
+            replayed.Events
+            |> List.fold (fun proj e -> ShellProfileProjection.applyEvent proj e.Event) ShellProfileProjection.empty
 
         // The session's WorkSandboxes (Plan 15, stage 2): a registry keyed by name, each
         // entry lazily created on first need. `default` is the one every session has had,
@@ -307,6 +312,7 @@ let startFull
                 // at all, since the whole point is that output nobody trusted cannot forge a
                 // block's outcome.
                 Interop.randomSecret
+                mintMessageId
                 broadcastTerminalRecord
                 broadcastTerminalOpened
                 // Re-arm the terminal drain when a lease ends (Plan 13, stage 2e). The
@@ -322,6 +328,7 @@ let startFull
                 // classifier exists; this root supplies it and computes nothing.
                 Classifier.approveAll
                 (replayedTerminals |> TerminalProjection.openTerminals |> List.map (fun t -> t.TerminalId))
+                replayedProfiles
 
         // The agent's ONE execution path (Plan 13, stage 3b). It queues a command where
         // people can see it and then WAITS — bounded by the command timeout — so the agent
@@ -518,6 +525,7 @@ let startFull
               // dispatcher knows who that is.
               StartWorkSandbox = AgentCapabilities.none.StartWorkSandbox
               StopWorkSandbox = AgentCapabilities.none.StopWorkSandbox
+              SetShellProfile = AgentCapabilities.none.SetShellProfile
               RecordToolUse = toolUseLogFor turnId
               // Snapshotted HERE, which is what makes a turn's tool list stable: a set
               // change mid-turn lands on the next turn, never underneath the model. Each is

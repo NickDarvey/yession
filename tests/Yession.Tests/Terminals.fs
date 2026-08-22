@@ -1582,7 +1582,7 @@ let private mintFrom (ids: string list) =
         if remaining.Count > 1 then remaining.RemoveAt 0
         next
 
-let private makeTerminalsGated attach classifier (log: EventLog<SessionEvent>) environment openTranscript readTranscript openAtBoot =
+let private makeTerminalsFrom attach classifier (log: EventLog<SessionEvent>) environment openTranscript readTranscript openAtBoot profilesAtBoot =
     let mintTerminal = mintFrom [ "term-a"; "term-b"; "term-c"; "term-d"; "term-e"; "term-f" ]
     let mintBlock = mintFrom [ "b-1"; "b-2"; "b-3" ]
     let records = ResizeArray<TerminalId * int * TranscriptRecord> ()
@@ -1606,6 +1606,7 @@ let private makeTerminalsGated attach classifier (log: EventLog<SessionEvent>) e
             (fun () -> BlockId.create (mintBlock ()) |> expect)
             // Fixed, because a test that cannot predict the nonce cannot assert on a mark.
             (fun () -> "test-nonce")
+            (mintFrom [ "m-1"; "m-2"; "m-3" ] >> (fun raw -> MessageId.create raw |> expect))
             (fun id seq record -> records.Add (id, seq, record))
             (fun id -> opens.Add id)
             // No scheduler in these tests: the drain's re-arm is exercised where the drain is
@@ -1615,7 +1616,13 @@ let private makeTerminalsGated attach classifier (log: EventLog<SessionEvent>) e
             attach
             classifier
             openAtBoot
+            profilesAtBoot
     terminals, records, opens
+
+/// No shell profile (Plan 25) — what a session that has never set one replays as, and what
+/// every case here but the profile ones is about.
+let private makeTerminalsGated attach classifier log environment openTranscript readTranscript openAtBoot =
+    makeTerminalsFrom attach classifier log environment openTranscript readTranscript openAtBoot ShellProfileProjection.empty
 
 /// The bypass classifier, which is what ships (Plan 23). A case about the classifier's
 /// verdict passes its own.
@@ -2832,6 +2839,354 @@ let private agentTerminalTests =
 
     ]
 
+// --- The shell profile (Plan 25) -----------------------------------------------------------
+//
+// One durable fact about a sandbox's terminals: where a shell opened in it starts. What is
+// worth pinning here is the SPAWN — the profile is applied by it and never as a `cd` typed at
+// a prompt, so the assertions are about the exec the sandbox was handed.
+
+/// A latch: something that has happened, and an async that resolves when it has. Both orders
+/// work, which is what makes it a latch rather than a race — no clock, no sleep, no ordering
+/// luck.
+let private latch () : (unit -> unit) * Async<unit> =
+    let mutable fired = false
+    let mutable resume : unit -> unit = ignore
+    (fun () ->
+        if not fired then
+            fired <- true
+            resume ()),
+    Async.FromContinuations (fun (cont, _, _) -> if fired then cont () else resume <- cont)
+
+/// The argv `SetProfile` validates a directory with, as this fixture reads it back.
+let private validatedPath (exec: SandboxExec) : string option =
+    match exec.Arguments with
+    | [ "-c"; body; "sh"; path ] when body.StartsWith "test -d" -> Some path
+    | _ -> None
+
+/// A sandbox that CAN host an instrumented shell, and that knows which directories it has.
+/// `present` is read on every call rather than captured, so a test can make a directory go
+/// away between the profile being set and a terminal being opened in it — which is the one
+/// thing the fallback exists for.
+let private profileEnvironment (present: unit -> Set<string>) =
+    let ptySpawned = ResizeArray<SandboxExec> ()
+    let exists path = Set.contains path (present ())
+    let environment : SessionEnvironment.SessionEnvironment =
+        { Ensure = fun _ _ -> async { return EnvironmentAvailable }
+          Spawn =
+            fun exec _ ->
+                async {
+                    let code =
+                        match validatedPath exec with
+                        | Some path -> if exists path then 0 else 1
+                        | None -> 0
+                    return
+                        Ok
+                            { WriteStdin = ignore
+                              CloseStdin = ignore
+                              Kill = ignore
+                              Exited = async { return SandboxExited code } }
+                }
+          SpawnPty =
+            fun exec _ _ onOutput ->
+                async {
+                    ptySpawned.Add exec
+                    match exec.WorkingDirectory with
+                    | Some path when not (exists path) -> return Error (sprintf "chdir %s: no such directory" path)
+                    | _ ->
+                        return
+                            Ok
+                                // The shell's own prompt hook, as this fixture's shell runs it:
+                                // the rc bootstrap is typed in, and the next prompt carries the
+                                // `A` mark that makes the terminal instrumented.
+                                { Write = fun _ -> onOutput "\u001b]133;A;y=test-nonce\u0007"
+                                  Resize = fun _ _ -> ()
+                                  Kill = ignore
+                                  Exited = async { return SandboxExited 0 } }
+                }
+          Stop = fun () -> async { return () }
+          CurrentRef = fun () -> Some "scripted" }
+    environment, ptySpawned
+
+/// A sandbox whose BLOCKS do not finish until the test says so — the only way to hold a
+/// terminal busy without a clock. Its `test -d` still answers, because the profile verb has to
+/// be able to validate while a block runs.
+let private blockingEnvironment () =
+    let release, finished = latch ()
+    let spawned = ResizeArray<SandboxExec> ()
+    let environment : SessionEnvironment.SessionEnvironment =
+        { Ensure = fun _ _ -> async { return EnvironmentAvailable }
+          Spawn =
+            fun exec _ ->
+                async {
+                    spawned.Add exec
+                    let exited =
+                        match validatedPath exec with
+                        | Some _ -> async { return SandboxExited 0 }
+                        | None ->
+                            async {
+                                do! finished
+                                return SandboxExited 0
+                            }
+                    return Ok { WriteStdin = ignore; CloseStdin = ignore; Kill = ignore; Exited = exited }
+                }
+          SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
+          Stop = fun () -> async { return () }
+          CurrentRef = fun () -> Some "scripted" }
+    environment, spawned, release
+
+let private shellProfileTests =
+    let checkout = "/repos/octo/hello"
+    /// A manager over a sandbox that has the checkout and can host a shell.
+    let fixture () =
+        let log = newLog ()
+        let mutable present = Set.singleton checkout
+        let environment, ptySpawned = profileEnvironment (fun () -> present)
+        let openTranscript, linesOf, _, _, readTranscript = recordingTranscripts ()
+        let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
+        terminals, log, ptySpawned, linesOf, (fun () -> present <- Set.empty)
+    let ptyDirectories (ptySpawned: ResizeArray<SandboxExec>) =
+        ptySpawned |> Seq.map (fun e -> e.WorkingDirectory) |> List.ofSeq
+    testList "The shell profile" [
+
+        testCaseAsync "a terminal opened afterwards starts its shell there" <|
+            async {
+                // The invariant the whole plan exists for, and it is asserted on the SPAWN:
+                // a `cd` typed at the prompt would echo into the audit trail on the re-arm
+                // path, need quoting for a path this code did not choose, and fail invisibly.
+                let terminals, _, ptySpawned, _, _ = fixture ()
+                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                Expect.isOk set "the directory is there, so the profile takes"
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                Expect.equal (ptyDirectories ptySpawned) [ Some checkout ] "the shell is spawned in the profile's directory"
+            }
+
+        testCaseAsync "a terminal opened BEFORE it keeps the directory it is in" <|
+            async {
+                // A shell's cwd is state its user is relying on. The one terminal that does
+                // move is the one nobody named, and it moves by being reopened.
+                let terminals, _, ptySpawned, _, _ = fixture ()
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                Expect.equal (ptyDirectories ptySpawned) [ None ] "nothing is re-spawned under a terminal already open"
+            }
+
+        testCaseAsync "the degraded per-block path runs its blocks there too" <|
+            async {
+                // A terminal with no pty gets a fresh process per block and carries nothing
+                // between them, so the profile is applied per block — the same promise, kept
+                // by the only means that path has. Wiring only the pty would make a degraded
+                // terminal silently ignore the profile.
+                let log = newLog ()
+                let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
+                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                Expect.isOk set "this fixture answers `test -d` with success"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let id = opened |> expect
+                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "pwd" ignore
+                Expect.equal
+                    (spawned
+                     |> Seq.filter (fun e -> validatedPath e |> Option.isNone)
+                     |> Seq.map (fun e -> e.WorkingDirectory)
+                     |> List.ofSeq)
+                    [ Some checkout ]
+                    "the block's own process starts in the profile's directory"
+            }
+
+        testCaseAsync "a directory the sandbox does not have is refused" <|
+            async {
+                // Asked of the SANDBOX, not of this process: under docker the path is inside a
+                // container we cannot see, and under srt the sandbox's read scope is not ours.
+                let terminals, _, _, _, _ = fixture ()
+                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some "/repos/gone")
+                match set with
+                | Ok _ -> failwith "a directory that is not there must not become the profile"
+                | Error reason -> Expect.isTrue (reason.Contains "/repos/gone") "the refusal names the path"
+            }
+
+        testCaseAsync "a refused directory leaves the profile as it was" <|
+            async {
+                let terminals, _, _, _, _ = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some "/repos/gone")
+                Expect.equal
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    (Some checkout)
+                    "a refusal changes nothing"
+            }
+
+        testCaseAsync "a relative path is refused without asking the sandbox" <|
+            async {
+                // A shell's idea of "relative to what" is precisely the thing being configured,
+                // so the answer would depend on the setting it is meant to establish.
+                let terminals, _, _, _, _ = fixture ()
+                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some "repos/octo/hello")
+                Expect.isError set "a relative path is not a place"
+            }
+
+        testCaseAsync "a clear returns new terminals to wherever the sandbox puts them" <|
+            async {
+                let terminals, _, ptySpawned, _, _ = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName None
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                Expect.equal (ptyDirectories ptySpawned) [ None ] "back to what every terminal did before there were profiles"
+            }
+
+        testCaseAsync "a profile set in one sandbox does not move another's terminals" <|
+            async {
+                let terminals, _, ptySpawned, _, _ = fixture ()
+                let other = SandboxName.create "test" |> expect
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell other) "build"
+                Expect.equal (ptyDirectories ptySpawned) [ None ] "a path is only a path inside the filesystem that has it"
+            }
+
+        testCaseAsync "a session that restarts still opens terminals where it left off" <|
+            async {
+                // The restart promise: the profile is folded from the durable log, exactly as
+                // the terminals left open are.
+                let log = newLog ()
+                let environment, ptySpawned = profileEnvironment (fun () -> Set.singleton checkout)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let replayed =
+                    [ SessionEvent.ShellProfileSet
+                        { MessageId = MessageId.create "m-old" |> expect
+                          Sandbox = SandboxName.defaultName
+                          WorkingDirectory = Some checkout
+                          Actor = ActorRef.Agent } ]
+                    |> List.fold ShellProfileProjection.applyEvent ShellProfileProjection.empty
+                let terminals, _, _ =
+                    makeTerminalsFrom
+                        AttachTerminal.unavailable
+                        Classifier.approveAll
+                        log
+                        environment
+                        openTranscript
+                        readTranscript
+                        []
+                        replayed
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                Expect.equal
+                    (ptyDirectories ptySpawned)
+                    [ Some checkout ]
+                    "a restarted session opens its next terminal where the last one started"
+            }
+
+        testCaseAsync "the agent's idle command terminal is retired, so its next command lands there" <|
+            async {
+                // Left alone, the change would be invisible in exactly the flow that motivates
+                // it: set the profile, run `pwd`, get the old directory, conclude the tool did
+                // nothing. It is the manager's own, so nothing is lost but a shell's history.
+                let terminals, _, _, _, _ = fixture ()
+                let! first = terminals.AgentTerminal SandboxName.defaultName "git status"
+                let before = first |> expect
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! next = terminals.AgentTerminal SandboxName.defaultName "git status"
+                Expect.notEqual (next |> expect) before "the next command runs in a shell opened under the new profile"
+            }
+
+        testCaseAsync "a terminal the agent NAMED is left alone" <|
+            async {
+                // It was asked for. Taking somebody's shell away because a default changed is
+                // not a default's business.
+                let terminals, _, _, _, _ = fixture ()
+                let! opened = terminals.OpenAgentTerminal SandboxName.defaultName "tests"
+                let id = opened |> expect
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                Expect.isTrue (terminals.IsOpen id) "a named terminal keeps its shell"
+            }
+
+        testCaseAsync "a terminal a person opened is left alone" <|
+            async {
+                let terminals, _, _, _, _ = fixture ()
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "mine"
+                let id = opened |> expect
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                Expect.isTrue (terminals.IsOpen id) "a human's shell is not a default's to end"
+            }
+
+        testCaseAsync "a BUSY command terminal is left alone" <|
+            async {
+                // Killing a running command to change a default is the wrong trade in the one
+                // direction that cannot be undone.
+                let log = newLog ()
+                let environment, _, release = blockingEnvironment ()
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
+                let! opened = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let id = opened |> expect
+                let started, awaitStarted = latch ()
+                Async.StartImmediate (terminals.RunBlock id (entry "a1" id ActorRef.Agent 1.0) "npm test" started)
+                do! awaitStarted
+                Expect.isTrue (terminals.Busy () |> Set.contains (TerminalId.value id)) "the block is running"
+                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                Expect.isOk set "the profile still changes"
+                Expect.isTrue (terminals.IsOpen id) "but the running command is not killed for it"
+                release ()
+            }
+
+        testCaseAsync "a shell that cannot start there opens anyway, and says why" <|
+            async {
+                // The directory can go away between being set and being opened in. A terminal
+                // that refuses to open because of a DEFAULT is a worse failure than the default
+                // being wrong, so it falls back once and records the reason where people read.
+                let terminals, _, _, linesOf, vanish = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                vanish ()
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let id = opened |> expect
+                Expect.isTrue (terminals.IsOpen id) "the terminal opens"
+                let printed =
+                    linesOf id
+                    |> List.choose (function TranscriptRecordLine r -> Some r.Data | _ -> None)
+                    |> String.concat ""
+                Expect.isTrue (printed.Contains checkout) "and the transcript names the directory it could not use"
+            }
+
+        testCaseAsync "the query reports where each sandbox's terminals start" <|
+            async {
+                // One registration reaches the agent as a read-only tool and the people as a
+                // settings section. Nobody writes a panel; what is pinned is that the rows say
+                // what the manager holds.
+                let terminals, _, _, _, _ = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let registration = Yession.Host.ShellProfile.query (fun () -> terminals)
+                match! registration.Read () with
+                | Error e -> failwithf "the query failed: %s" e
+                | Ok (RowsOf [ row ]) ->
+                    Expect.equal
+                        (row |> List.tryFind (fst >> (=) "cwd") |> Option.map snd)
+                        (Some (CellText checkout))
+                        "the row names the directory"
+                | Ok other -> failwithf "expected one row, got %A" other
+            }
+
+        testCaseAsync "the query answers in the shape it declares" <|
+            async {
+                let terminals, _, _, _, _ = fixture ()
+                let registration = Yession.Host.ShellProfile.query (fun () -> terminals)
+                match! registration.Read () with
+                | Error e -> failwithf "the query failed: %s" e
+                | Ok value -> Expect.isTrue (QueryValue.fits registration.Def.Shape value) "the registry would accept it"
+            }
+
+        testCaseAsync "the profile survives a shell that could not start there" <|
+            async {
+                // Left alone for a person to fix: a manager that cleared it on one failed spawn
+                // would silently undo a decision nobody revisited.
+                let terminals, _, _, _, vanish = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                vanish ()
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                Expect.equal
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    (Some checkout)
+                    "a failed spawn is not a decision"
+            }
+    ]
+
 // The agent's own terminal verbs (Plan 20, stage 3): the same ones a person has, over the
 // same terminals. The cap is a refusal rather than a hold, because only the agent knows which
 // of its terminals it has finished with.
@@ -2930,6 +3285,7 @@ let tests =
         transcriptTests
         agentTerminalTests
         agentVerbTests
+        shellProfileTests
         codecTests
         orderTests
         managerTests
