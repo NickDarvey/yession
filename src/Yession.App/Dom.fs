@@ -274,8 +274,8 @@ module Dom =
         /// One row, carrying its terminal's id — and the control that shows that terminal,
         /// so a row is keyboard-operable by construction rather than by a handler on a div.
         let terminalListRow = "data-terminal-list-row"
-        /// The rewind, on a row. Its own hook because the pane keeps a DVR rewind of its own
-        /// (`terminalRewind`) for the terminal it is showing, and the two are different
+        /// The rewind, on a row. Its own hook because the pane keeps a watch toggle of its own
+        /// (`terminalWatch`) for the terminal it is showing, and the two are different
         /// controls in different places — unlike the kill and the attach-again, which the
         /// list is now the ONLY home of (Plan 20, stage 1) and which therefore keep the names
         /// they have always had: `terminalClose`, `terminalReattach`.

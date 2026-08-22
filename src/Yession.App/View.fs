@@ -2454,9 +2454,9 @@ module View =
                           @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>+ new</button>
                 </div>"""
         // ONE control with two faces rather than a pair that swap places: it never leaves the
-        // document, so pressing it can never strand the focus that is on it — the stranded-focus
-        // case the DVR's pair needs `FocusDvr` to answer. Its value is the face it will show,
-        // which is the same contract `data-nav-toggle` and `data-settings-toggle` carry.
+        // document, so pressing it can never strand the focus that is on it. Its value is the
+        // face it will show, which is the same contract `data-nav-toggle`,
+        // `data-settings-toggle` and the terminal's own `data-terminal-watch` carry.
         let listToggle =
             let showingList = ClientModel.showsList model
             html $"""
