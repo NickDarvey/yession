@@ -237,4 +237,32 @@ let tests =
                 Expect.equal code 0 "the confined process exited cleanly"
                 Expect.equal out "round-trip" "stdin reached it and its stdout came back"
             })
+
+            // srt probes ripgrep by forking `which` under a one-second timeout, and reports
+            // every way that fork can fail as `ripgrep (<path>) not found`. Taking a PATH
+            // away is the deterministic member of that family — the others (a box too busy
+            // to hand out a fork, EMFILE, ENOMEM) arrive by luck, which is how this cost a
+            // whole tier twice in four runs while the file it named sat there, executable.
+            testCaseAsync "a probe that could not run is not an answer, and is not remembered" (async {
+                let workspace = mkdtemp nodeFs nodeOs
+                // A manager is already up by now, and `initialize` returns early once srt
+                // has one — probe included. So the question can only be asked of a process
+                // that has none, which is what forgetting both halves leaves behind.
+                do! Sandboxes.SrtSandbox.forgetManager ()
+                let! refused =
+                    Support.withEnv [ "PATH", Some "" ] (fun () ->
+                        Sandboxes.SrtSandbox.create (srtTools ()) (policyIn workspace []))
+                match refused with
+                | Ok _ -> failwith "srt started with no `which` to probe with, which it cannot do"
+                | Error reason ->
+                    Expect.isTrue
+                        (reason.Contains "executable in this process")
+                        (sprintf "the refusal contradicts srt's `not found` rather than repeating it: %s" reason)
+                // And the box is itself again: the next sandbox starts, because nothing was
+                // remembered from a question that never got an answer.
+                let! sandbox = startSandbox (policyIn workspace [])
+                let! run, _, _ = shell sandbox "true"
+                Expect.equal (exitCode run) 0 "the sandbox after the refusal runs commands"
+                do! sandbox.Dispose ()
+            })
         ])
