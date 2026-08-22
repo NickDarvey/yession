@@ -261,15 +261,21 @@ module PaneTab =
 /// What a pane tab's player should be handed (Plan 14, stage 4) — a whole recording, or a
 /// range of one, plus the things the stock player already knows how to do with it.
 type PaneReplay =
-    { /// The `.cast` text, ready to mount.
+    { /// The `.cast` text, ready to mount — chapters included, as `"m"` events written into
+      /// the recording (`TranscriptReplay.castWithMarkers`) rather than handed to the player
+      /// beside it. The player compresses idle time in the EVENTS it loads and would leave a
+      /// marker list on the uncompressed clock; in the file, a chapter moves with the
+      /// records around it.
       Cast : string
-      /// Chapter marks, in the recording's own clock: one per block, labelled with its
-      /// command. A whole-terminal recording becomes navigable by what ran in it.
-      Markers : (float * string) list
-      /// Where to start playing — how "play whole terminal" from a chip lands on that block
-      /// in full context, without slicing anything.
+      /// Where to start playing — how a watch entered from a command lands on that command
+      /// in full context, without slicing anything. In the recording's own clock: the player
+      /// maps it onto the compressed one itself.
       StartAt : float option
       /// The time whose frame becomes the still shown before anyone presses play.
+      ///
+      /// Fed by replaying events while `time < poster`, so a poster asking for the frame at
+      /// time T shows the one BEFORE it. Every poster here means "the screen as it stood
+      /// after that record", so each is nudged past its record rather than landing on it.
       Poster : float option
       /// Set when this cast is a LIVE terminal watched from behind its edge (Plan 14,
       /// stage 7): it ends where the rewind pinned it, not where the terminal is, so
@@ -815,6 +821,15 @@ module ClientModel =
         |> Option.filter (fun block -> match block.Status with BlockRejected _ -> false | _ -> true)
         |> Option.bind (fun block -> block.ToSeq |> Option.map (fun toSeq -> block.FromSeq, toSeq))
 
+    /// How far past a record's own time a poster asking for THAT record's screen must sit.
+    ///
+    /// The player paints a poster by replaying events while `time < poster`, so a poster at
+    /// a record's exact time stops just short of it and shows the screen as it stood BEFORE
+    /// that record — one frame early, in the still whose whole job is to be the last thing
+    /// that happened. Smaller than any interval a recording can distinguish, so it can never
+    /// reach into the next record.
+    let private posterNudge = 0.001
+
     /// What a tab's player should be handed (Plan 14, stage 4).
     ///
     /// Assembled here rather than in the browser entry because every part of it is a
@@ -835,8 +850,6 @@ module ClientModel =
                 blockRange terminal blockId model
                 |> Option.map (fun (fromSeq, toSeq) ->
                     { Cast = rangedCastFrom header feed model terminal fromSeq toSeq
-                      // One command is one chapter; there is nothing to mark.
-                      Markers = []
                       StartAt = None
                       Poster = None
                       BehindLive = None })
@@ -849,12 +862,11 @@ module ClientModel =
                     let origin = timeOf fromSeq |> Option.defaultValue 0.0
                     Some
                         { Cast = rangedCastFrom header feed model stretch.TerminalId fromSeq toSeq
-                          Markers = []
                           StartAt = None
                           // A still of the FINAL screen, so the item has a face before anyone
                           // presses play. It costs nothing extra: the player builds it by
                           // replaying internally to that time.
-                          Poster = timeOf (toSeq - 1) |> Option.map (fun at -> at - origin)
+                          Poster = timeOf (toSeq - 1) |> Option.map (fun at -> at - origin + posterNudge)
                           BehindLive = None }
             | TerminalTab terminal ->
                 // A REWOUND live terminal plays what it has recorded so far, up to the
@@ -883,8 +895,7 @@ module ClientModel =
                 let pinnedEdge =
                     pin |> Option.bind (fun _ -> records |> List.tryLast |> Option.map (fun (_, r) -> r.At))
                 Some
-                    { Cast = TranscriptReplay.cast header records
-                      Markers = markers
+                    { Cast = TranscriptReplay.castWithMarkers header records markers
                       StartAt =
                         match pinnedEdge with
                         | Some at -> Some at
@@ -893,7 +904,7 @@ module ClientModel =
                             |> Option.filter (fun (playing, _) -> PaneTab.key playing = PaneTab.key tab)
                             |> Option.bind snd
                             |> Option.bind timeOf
-                      Poster = pinnedEdge
+                      Poster = pinnedEdge |> Option.map (fun at -> at + posterNudge)
                       BehindLive = pin |> Option.map (fun _ -> terminal) }
 
     /// The keyframe a tab's replay needs and this client does not have (Plan 14, stage 4).

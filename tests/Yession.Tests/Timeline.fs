@@ -574,14 +574,27 @@ let private withRecords (model: ClientModel) =
 let private videoTests =
     testList "The video item (Plan 14, stage 4)" [
         testCase "a whole recording is chaptered by the commands that ran in it" <| fun () ->
-            // `markers` is the player's own option, which is why the step-out needs no second
-            // recording: a whole cast with chapters and a start position expresses everything
-            // a slice can.
+            // Chapters ride IN the cast as `"m"` events (Plan 25, stage 1), which is what puts
+            // them on the same idle-compressed clock the player runs the records on. As the
+            // player's own option they stayed on the raw clock and landed in the dead air the
+            // compression had just removed.
             let model = withRecords (clientOf recordedTerminal)
             match ClientModel.paneReplay (TerminalTab terminalA) model with
             | Some replay ->
-                Expect.equal replay.Markers [ 10.0, "make"; 40.0, "make test" ] "one chapter per block, at its first line"
-                Expect.isNone replay.StartAt "and it starts at the start until somebody steps out to it"
+                Expect.stringContains replay.Cast "[10,\"m\",\"make\"]" "a chapter at the first block's first line"
+                Expect.stringContains replay.Cast "[40,\"m\",\"make test\"]" "and one at the second's"
+                Expect.isNone replay.StartAt "and it starts at the start until somebody asks for a command"
+            | None -> failwith "the header is known, so there is a recording"
+
+        testCase "a chapter is written before the record it names" <| fun () ->
+            // The order the player's own multiplex picks, and the one a reader means: a
+            // chapter names the command whose first byte follows it, never the silence before.
+            let model = withRecords (clientOf recordedTerminal)
+            match ClientModel.paneReplay (TerminalTab terminalA) model with
+            | Some replay ->
+                let marker = replay.Cast.IndexOf "[10,\"m\",\"make\"]"
+                let record = replay.Cast.IndexOf "building"
+                Expect.isTrue (marker >= 0 && marker < record) "the chapter line comes first"
             | None -> failwith "the header is known, so there is a recording"
 
         testCase "'play whole terminal' lands on the block it stepped out from" <| fun () ->
@@ -623,7 +636,10 @@ let private videoTests =
             let model = withRecords (clientOf recordedTerminal)
             match ClientModel.paneReplay (StretchTab stretch) model with
             | Some replay ->
-                Expect.equal replay.Poster (Some 30.0) "the last frame of the range, from its own zero"
+                // Nudged past the record rather than landing on it: the player feeds events
+                // while `time < poster`, so asking for exactly 30.0 would show the screen as
+                // it stood BEFORE the frame this still exists to show.
+                Expect.equal replay.Poster (Some 30.001) "the last frame of the range, from its own zero"
                 Expect.isTrue (replay.Cast.Contains "testing") "and the recording is the range"
             | None -> failwith "the header is known, so there is a recording"
 
@@ -839,7 +855,9 @@ let private dvrTests =
             match ClientModel.paneReplay (TerminalTab terminalA) (ClientModel.update (RewindTerminalMsg terminalA) before) with
             | Some replay ->
                 Expect.equal replay.StartAt (Some 43.5) "starts at the last pinned record's time"
-                Expect.equal replay.Poster (Some 43.5) "whose frame is the still shown before play"
+                // Nudged past that record: the still is the screen the reader was just
+                // watching, and a poster landing ON the pinned time paints the one before it.
+                Expect.equal replay.Poster (Some 43.501) "whose frame is the still shown before play"
                 Expect.equal replay.BehindLive (Some terminalA) "and playing off this end means the reader caught up"
             | None -> failwith "the header is known, so there is a recording"
 

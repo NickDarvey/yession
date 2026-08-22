@@ -30,6 +30,9 @@ let private host : obj = jsNative
 [<Emit("document.getElementById('replay')")>]
 let private replayHost : Browser.Types.Element = jsNative
 
+[<Emit("document.getElementById('replay-gappy')")>]
+let private gappyReplayHost : Browser.Types.Element = jsNative
+
 [<Emit("(function(f){ window.__md = f; })($0)")>]
 let private exposeMd (f: unit -> string) : unit = jsNative
 
@@ -80,19 +83,48 @@ do
     // is the one part of stage 3e no DOM-free test can reach: whether `asciinema-player`'s
     // named export actually resolves through the bundle and renders the recording.
     let cast =
-        TranscriptReplay.cast
+        TranscriptReplay.castWithMarkers
             { Width = 80; Height = 24; Timestamp = 0L }
             [ 0, { At = 0.0; Kind = TranscriptInput; Data = "ls -la\r\n" }
               1, { At = 0.1; Kind = TranscriptOutput; Data = "total 0\r\n" } ]
-    // Markers and a poster ride the same mount (Plan 14, stage 4): they are the player's own
-    // options, and whether they resolve through this bundle is the same question the import
-    // itself is. A `startAt` is deliberately absent here — it would skip past the very frame
-    // the replay assertion below waits for.
+            [ 0.0, "ls -la" ]
+    // The chapter rides IN the cast (Plan 25, stage 1) — `castWithMarkers` above — because
+    // that is how the client builds one, and whether chapters survive the bundle is the same
+    // question the import itself is. A `startAt` is deliberately absent here: it would skip
+    // past the very frame the replay assertion waits for.
     Replay.mount
         replayHost
         { Cast = cast
-          Markers = [ 0.0, "ls -la" ]
           StartAt = None
+          Poster = None
+          BehindLive = None }
+        None
+    |> ignore
+
+    // The same machinery over a recording with DEAD AIR in it, which is the shape the pane
+    // actually replays and the one the mount above cannot fail in: thirty seconds of nothing
+    // between the first command and the second, a chapter on the far side of the gap, and a
+    // start position naming it.
+    //
+    // Under the player's `markers` option all three disagree — the option list stays on the
+    // recording's raw clock while the events are idle-compressed as they load, so the chapter
+    // past the gap becomes the last event (and is dropped from the chapter list by its
+    // `time < duration` filter), the duration reads uncompressed, and `startAt` lands short.
+    // With the chapters written into the cast they are all one clock, and a reader reaches
+    // the second command in about as long as it takes to press play.
+    let gappy =
+        TranscriptReplay.castWithMarkers
+            { Width = 80; Height = 24; Timestamp = 0L }
+            [ 0, { At = 0.0; Kind = TranscriptInput; Data = "echo first\r\n" }
+              1, { At = 0.1; Kind = TranscriptOutput; Data = "first\r\n" }
+              2, { At = 30.0; Kind = TranscriptInput; Data = "echo second\r\n" }
+              3, { At = 30.1; Kind = TranscriptOutput; Data = "second\r\n" } ]
+            [ 0.0, "echo first"
+              30.0, "echo second" ]
+    Replay.mount
+        gappyReplayHost
+        { Cast = gappy
+          StartAt = Some 30.0
           Poster = None
           BehindLive = None }
         None
