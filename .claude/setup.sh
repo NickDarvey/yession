@@ -121,13 +121,27 @@ fi
 #
 # A clean filter states what is actually true — that node is not part of the file's TRACKED
 # content — so git hashes the working copy without it and the file matches HEAD. Nothing to
-# see, and nothing to commit even by accident: the node cannot reach the index at all. Local
-# to this clone (`.git/info/attributes`, never the committed `.gitattributes`), so a laptop or
-# CI checkout is untouched by any of it. An upstream nixpkgs bump still shows, still merges.
+# see, and nothing to commit even by accident: with `required` below, the node cannot reach
+# the index at all. Local to this clone (`.git/info/attributes`, never the committed
+# `.gitattributes`), so a laptop or CI checkout is untouched by any of it. An upstream
+# nixpkgs bump still shows, still merges.
 mkdir -p "$repo/.git/info"
 grep -qs '^devenv\.lock filter=devenv-lock$' "$repo/.git/info/attributes" \
   || echo 'devenv.lock filter=devenv-lock' >> "$repo/.git/info/attributes"
 git -C "$repo" config filter.devenv-lock.clean "python3 -c 'import json,sys; d=json.load(sys.stdin); d[\"nodes\"].pop(\"devenv\",None); d[\"nodes\"].get(\"root\",{}).get(\"inputs\",{}).pop(\"devenv\",None); json.dump(d,sys.stdout,indent=2); sys.stdout.write(chr(10))'"
+# A clean filter that FAILS is IGNORED by default: git prints `error: external filter ...
+# failed` into the middle of its output and stages the unfiltered content anyway — the store
+# path, in the index, from a run that looked like it worked. That is the same bug arriving by
+# a different route, and the route is real: this runs before Nix exists, so the filter's
+# `python3` is whatever the image has. `required` makes the failure fatal instead, so the
+# guard fails closed rather than open.
+#
+# It governs BOTH directions, and an UNDEFINED smudge counts as a failure — so the identity
+# one has to be spelled out. Without it, `required` turns every checkout of this file into
+# `fatal: devenv.lock: smudge filter devenv-lock failed` and the file is not written at all.
+# `cat` writes exactly what git already wrote when no smudge was defined.
+git -C "$repo" config filter.devenv-lock.smudge cat
+git -C "$repo" config filter.devenv-lock.required true
 
 # Git re-hashes through the filter but does not record the result, so the file keeps reporting
 # as modified until something stages it. Staging it is a no-op once filtered — and it is done
