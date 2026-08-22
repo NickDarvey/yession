@@ -42,7 +42,8 @@ without GitHub (the sandbox proxy blocks devenv's normal `github:cachix/devenv` 
 input is repointed at devenv's own source substituted from `cache.nixos.org`; on a laptop/CI
 the committed `devenv.yaml` with the normal github input is used), puts the `devenv` CLI on
 PATH, and warm-builds. The SessionStart hook (`.claude/settings.json`) re-runs it with
-`--hook`, which only refreshes `devenv.local.yaml`.
+`--hook`, which refreshes `devenv.local.yaml` and settles `devenv.lock` (the local override
+makes devenv rewrite that committed file on every run; `.gitignore` says how it is handled).
 
 Then use the task scripts (`devenv shell -- <task>`, or bare inside the shell): `check` /
 `build` / `verify`. `restore`
