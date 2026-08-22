@@ -224,7 +224,10 @@ module OidcHttp =
 
     let newJar () : Jar = { Cookies = Map.empty }
 
-    let private cookieHeader (jar: Jar) : string =
+    /// The jar as a `cookie` request header. Public because a caller that has been through
+    /// the sign-in bounce and then wants a plain request — an SSE stream, say — needs the
+    /// same string this module sends, not its own spelling of it.
+    let cookieHeader (jar: Jar) : string =
         jar.Cookies |> Map.toList |> List.map (fun (k, v) -> sprintf "%s=%s" k v) |> String.concat "; "
 
     type private ManualReply =

@@ -634,6 +634,112 @@ let private srtTests =
         }
     ]
 
+[<Emit("process.execPath")>]
+let private nodeExecutable : string = jsNative
+
+// --- [Ports; Native; Srt]: the session's own composition, without a model -------------------
+//
+// The verbs above are driven against a config this file writes. What that cannot reach is the
+// one the SESSION writes — and that is where the fault lived: a relative data directory
+// flowed from the composition root into `Repos.create`, `git -C` resolved every path twice,
+// and every verb reported a failure about a checkout sitting right there.
+//
+// The live case below could not catch it either. It settles the moment the checkout appears,
+// which is while the agent is still streaming, so it never observes what the VERB said. This
+// one does, deterministically: a real Session Process over its real composition, a data
+// directory that is relative on purpose, a checkout planted where the session will look, and
+// the answer read off the `repos` query — the same projection a person's settings surface
+// shows. No model, so nothing here turns on what a model decides to call.
+
+let private reposQueryDeadlineMs = 30_000
+
+let private compositionTests =
+    testList "the repos the session itself reports" [
+        testCaseAsync "a session reads back a checkout in its own repos directory" <| async {
+            // RELATIVE on purpose: this is the condition the harness above never had, and the
+            // one that broke every verb. `Fs.absolute` at the root and at `Repos.create` is
+            // what this is holding down.
+            let dataDir =
+                sprintf "tests/Yession.Tests/out/.data/repos-query-%s" (string (Guid.NewGuid ()))
+            let! pm =
+                ProcessManager.create
+                    { ProcessManager.Options.defaults dataDir nodeExecutable [ "app/SessionMain.js" ] with
+                        Strategy = Some Strategy.localhost }
+            let record = pm.CreateSession "repos-query" "Repos" |> expect
+
+            // Planted BEFORE the launch, so the session finds it rather than races it. A real
+            // repository, because the answer under test is git's: the branch it is on.
+            let sessionDir = sprintf "%s/%s" dataDir record.DataDir
+            let checkout = sprintf "%s/octo/hello" (Sandboxes.SessionLayout.reposDir sessionDir)
+            mkdir nodeFs checkout
+            hostGit childProcess [| "init"; "-b"; "main" |] checkout
+            writeFile nodeFs (sprintf "%s/README.md" checkout) "planted\n"
+            hostGit childProcess [| "add"; "." |] checkout
+            hostGit childProcess [| "commit"; "-m"; "planted" |] checkout
+
+            let! launched = pm.Launch record.SessionId
+            let port = launched |> expect
+            let sessionUrl = sprintf "http://127.0.0.1:%d" port
+            let! opened = OidcHttp.openSession sessionUrl
+
+            let frames = ResizeArray<QueryFrame> ()
+            let subscription =
+                Sse.subscribe
+                    (sessionUrl + "/queries")
+                    [ "cookie", OidcHttp.cookieHeader opened.Jar ]
+                    (fun data ->
+                        match Codec.fromString Codec.queryFrame data with
+                        | Ok frame -> frames.Add frame
+                        | Error _ -> ())
+
+            let reposRows () =
+                frames
+                |> Seq.tryPick (fun frame ->
+                    match frame with
+                    | QueryValued (name, RowsOf rows) when QueryName.value name = "repos" -> Some rows
+                    | _ -> None)
+
+            let! _ = settledWithin reposQueryDeadlineMs (fun () -> (reposRows ()).IsSome)
+
+            // A query that FAILS to read sends nothing — there is no error frame — so a red
+            // here is a silence, and silence has three causes worth telling apart: the stream
+            // never connected, the repos capability never started (no declaration), or it
+            // started and git could not read the checkout (declared, never valued). That last
+            // one is the fault this case exists for, and without this line all three print
+            // the same timeout.
+            let declared =
+                frames
+                |> Seq.tryPick (fun frame ->
+                    match frame with
+                    | QueriesDeclared defs -> Some (defs |> List.map (fun d -> QueryName.value d.Name))
+                    | _ -> None)
+            let arrived =
+                sprintf
+                    "%d frame(s); declared: %s; repos valued: %b"
+                    frames.Count
+                    (match declared with
+                     | Some names -> String.concat ", " names
+                     | None -> "(the stream never declared anything)")
+                    (reposRows ()).IsSome
+
+            match reposRows () with
+            | Some [ row ] ->
+                let cell key = row |> List.tryPick (fun (k, v) -> if k = key then Some v else None)
+                Expect.equal (cell "repo") (Some (CellText "octo/hello")) "the checkout it was given"
+                // The assertion the fault would have failed: this is git's answer about the
+                // checkout, and getting it means `git -C` reached it.
+                Expect.equal (cell "branch") (Some (CellText "main")) "on the branch git says it is on"
+            | Some other -> failwithf "expected exactly the planted repo, got %A (%s)" other arrived
+            | None ->
+                failwithf
+                    "the repos query never said what is checked out here — %s. A declared query that never values is one whose read failed, which is what a relative repos directory does to every verb."
+                    arrived
+
+            subscription.Stop ()
+            do! pm.StopAll ()
+        }
+    ]
+
 // --- [LiveAgent]: the clone path, as somebody actually asks for it -------------------------
 //
 // The verbs above are driven directly, against local fixtures. This one is the whole path a
@@ -653,9 +759,6 @@ let private srtTests =
 // broken, and the report is what says which way: no turn ran at all (no agent item), a turn ran
 // and the clone was refused (the agent's words carry git's), or the clone hung (a turn in
 // flight, nothing on disk).
-
-[<Emit("process.execPath")>]
-let private nodeExecutable : string = jsNative
 
 [<Emit("(() => { try { return $0.readdirSync($1).join(', ') || '<empty>' } catch (e) { return '<' + (e.code || e.message) + '>' } })()")>]
 let private listDir (fs: obj) (path: string) : string = jsNative
@@ -713,30 +816,8 @@ let private liveClone =
                         |> List.collect (fun t ->
                             t.Blocks |> List.map (fun b -> sprintf "    %s -> %A" b.Command b.Status))
                         |> function [] -> "    (terminals, no blocks)" | ls -> String.concat "\n" ls
-                // Did the VERB succeed, or did bytes merely arrive? `add_repo` appends
-                // `RepoAdded`, which folds into the timeline as an act-note — so its absence
-                // beside a whole checkout means the clone landed and the verb still reported a
-                // failure. The case cannot assert this yet: it settles the moment the checkout
-                // appears, which on a green run is while the agent is still streaming, so a
-                // missing note there says "too early to tell" and not "broken". Printed rather
-                // than asserted until a run that waits for the turn says which it is.
-                let verb =
-                    let note =
-                        model.Conversation.Items
-                        |> List.tryFind (fun i ->
-                            i.Kind = ConversationItemKind.ActNote && i.Body.StartsWith "added repo")
-                    let turnInFlight =
-                        model.Conversation.Items
-                        |> List.exists (fun i -> i.Author = ActorRef.Agent && i.Status = Streaming)
-                    match note, turnInFlight with
-                    | Some note, _ -> note.Body
-                    // The distinction the last two release runs turned on, and neither could
-                    // state: a missing note WHILE the agent is still talking is this case
-                    // settling early, not a verb that failed. Only the second line is a finding.
-                    | None, true -> "(not yet — the turn is still in flight, which is what settling on the checkout means)"
-                    | None, false -> "(no `added repo` act-note, and the turn is over — the verb did not report success)"
                 sprintf
-                    "CLONE: %s\n  environment: %A\n  conversation:\n%s\n  terminal blocks:\n%s\n  session dir: %s\n  repos dir: %s\n  owner dir: %s\n  checkout whole: %b\n  add_repo said: %s"
+                    "CLONE: %s\n  environment: %A\n  conversation:\n%s\n  terminal blocks:\n%s\n  session dir: %s\n  repos dir: %s\n  owner dir: %s\n  checkout whole: %b"
                     why
                     model.Environment
                     items
@@ -745,7 +826,6 @@ let private liveClone =
                     (listDir nodeFs reposDir)
                     (listDir nodeFs (sprintf "%s/octocat" reposDir))
                     (checkoutWhole nodeFs checkout)
-                    verb
 
             do! compose ada ada.Hello.PeerId (sprintf "Clone %s" liveRepo)
             ada.Connection.SendDraft ada.Hello.PeerId
@@ -776,6 +856,10 @@ let tests =
         pureTests
         layoutTests
         Tag.needs "Repo verbs (srt)" [ Tag.Srt ] (fun () -> srtTests)
+        Tag.needs
+            "Repos the session reports"
+            [ Tag.Ports; Tag.Native; Tag.Srt ]
+            (fun () -> compositionTests)
         Tag.needs
             "add_repo (live model, real GitHub)"
             [ Tag.LiveAgent; Tag.Ports; Tag.Native; Tag.Srt ]
