@@ -151,12 +151,9 @@ let private representativeModel : ClientModel =
       TerminalKeyframes = Map.empty
       TerminalScreens = Map.empty
       Pins = []
-      PaneChoice = None
-      PanePlaying = None
-      PaneRewound = None
+      Pane = None
       TerminalsOpen = true
       // The pane shows a TAB by default; the list is what the cases below turn on.
-      TerminalList = false
       Claude =
         { Status = { SessionCredential = None; MineCredential = None; Owner = None; AgentAvailable = Some false }
           Flow = ClaudeIdle }
@@ -259,7 +256,7 @@ let private closedTerminalModel : ClientModel =
             { Terminals =
                 representativeModel.Terminals.Terminals
                 |> List.map (fun t -> { t with IsOpen = false; ClosedReason = Some "closed by a peer" }) }
-        PaneChoice = Some (TerminalTab terminalId) }
+        Pane = Some (OnTab (Reading (TerminalTab terminalId))) }
 
 /// A closed terminal whose bytes came from a provider that said its stream can be asked for
 /// again (Plan 19, step 4) — the one case where a closed terminal has a way back.
@@ -629,7 +626,7 @@ let private uiChecklistTests =
                   // its result.
                   "the commands it ran are listed", Dom.attr Dom.Hooks.terminalBlock "block-ui"
                   "and the way to its recording is offered",
-                  Dom.attr Dom.Hooks.terminalPlay (TerminalId.value terminalId) ] do
+                  Dom.attr Dom.Hooks.terminalWatch "watch" ] do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
             // Nothing can be run in a closed terminal, so nothing offers to: a command line
             // that queues into a terminal with no shell behind it is the misleading half.
@@ -920,7 +917,7 @@ let private uiChecklistTests =
 // next improvement while saying the design was wrong.
 let private terminalListTests =
     testList "The terminal list" [
-        let listed (model: ClientModel) = Support.render { model with TerminalList = true }
+        let listed (model: ClientModel) = Support.render { model with Pane = Some (OnList (model.Pane |> Option.bind PaneMode.onTab)) }
         let id = TerminalId.value terminalId
 
         // Every case below is the same shape deliberately: the verb where it works, and its
@@ -1247,7 +1244,7 @@ let private chromeTests =
         // contains its controls. Scanned HERE rather than pinned again beside the list's own
         // tests: the accessibility floor is asserted once and centrally, and a surface that
         // is invisible to the scan is a surface the floor does not cover.
-        let listShell = Support.render { representativeModel with TerminalList = true }
+        let listShell = Support.render { representativeModel with Pane = Some (OnList None) }
 
         // Every input either wears the ONE field face (a ring that goes blue on focus) or
         // wears nothing at all, because the row around it carries the stroke. What is ruled

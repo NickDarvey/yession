@@ -1126,6 +1126,39 @@ let private recorded (records: int) : Yession.Host.TranscriptStore.TranscriptSto
         transcript.Append { At = 0.0; Kind = TranscriptOutput; Data = string i } |> ignore
     store
 
+let private onlcrTests =
+    testList "ONLCR at capture (Plan 25, stage 1)" [
+        // What a tty's line discipline does to a bare LF on the way out, applied to the
+        // sources that never had a tty. Without it a VT — the player, and the emulator the
+        // keyframes are serialized from — starts every line where the last one ended.
+        testCase "a lone newline becomes a carriage return and a newline" <| fun () ->
+            Expect.equal (Onlcr.normalize false "total 4\nfile\n" |> fst) "total 4\r\nfile\r\n" "each LF gains its CR"
+
+        testCase "a newline that already has its carriage return is left alone" <| fun () ->
+            // Which is what lets pty bytes pass through untouched, and what makes normalizing
+            // twice the same as normalizing once.
+            Expect.equal (Onlcr.normalize false "done\r\n" |> fst) "done\r\n" "no second CR"
+
+        testCase "a carriage return split across two chunks does not gain a second one" <| fun () ->
+            // The one thing a chunk cannot see for itself. A progress bar rewriting its line
+            // reads back at exactly this boundary, and a doubled CR is a byte the terminal
+            // never printed sitting in the record whose purpose is fidelity.
+            let first, carry = Onlcr.normalize false "done\r"
+            Expect.equal first "done\r" "the CR passes through"
+            Expect.isTrue carry "and is remembered"
+            Expect.equal (Onlcr.normalize carry "\nnext" |> fst) "\nnext" "so the LF that follows is already paired"
+
+        testCase "a carriage return without a newline is not a line ending" <| fun () ->
+            // `\r` alone returns the cursor and keeps the row: how a progress bar overwrites
+            // itself. Treating it as a line ending would insert breaks a reader never saw.
+            Expect.equal (Onlcr.normalize false "50%\r100%" |> fst) "50%\r100%" "untouched"
+
+        testCase "an empty chunk keeps the carry it was given" <| fun () ->
+            // A stream can be read empty at any moment; forgetting the carry there would let
+            // the next chunk double a CR that arrived before it.
+            Expect.equal (Onlcr.normalize true "") ("", true) "nothing in, nothing changed"
+    ]
+
 let private transcriptTests =
     testList "Transcript" [
         // Plan 22. A client numbers an answer from what it ASKED, because a transcript line
@@ -1647,9 +1680,9 @@ let private managerTests =
                 let recordsOf kind =
                     transcript
                     |> List.choose (function TranscriptRecordLine r when r.Kind = kind -> Some r.Data | _ -> None)
-                Expect.equal (recordsOf TranscriptInput) [ "echo hello\n" ] "what was typed is recorded too"
-                Expect.equal (recordsOf TranscriptOutput) [ "hello\n" ] "stdout"
-                Expect.equal (recordsOf TranscriptStderr) [ "warn\n" ] "and stderr, still told apart"
+                Expect.equal (recordsOf TranscriptInput) [ "echo hello\r\n" ] "what was typed is recorded too"
+                Expect.equal (recordsOf TranscriptOutput) [ "hello\r\n" ] "stdout"
+                Expect.equal (recordsOf TranscriptStderr) [ "warn\r\n" ] "and stderr, still told apart"
                 match transcript with
                 | TranscriptHeaderLine _ :: _ -> ()
                 | other -> failwithf "a transcript starts with its header, got %A" other
@@ -1658,6 +1691,28 @@ let private managerTests =
                     (records |> Seq.map (fun (_, seq, _) -> seq) |> List.ofSeq)
                     [ 1; 2; 3 ]
                     "every record is broadcast with the line index it was written at"
+            }
+
+        testCaseAsync "output captured off a pipe is recorded as a tty would have shown it" <|
+            // Plan 25, stage 1. A block on an uninstrumented shell runs through pipes, so
+            // nothing puts a line discipline between the program and us and its `\n` arrives
+            // bare. Fed to a VT that is the staircase: every line starting where the last one
+            // ended. The transcript is what both the player and the keyframe emulator read,
+            // so the conversion belongs at capture and this is where it is pinned.
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "total 4\nfile\n" ], 0)
+                let openTranscript, linesOf, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let id = opened |> expect
+                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "ls" ignore
+                let output =
+                    linesOf id
+                    |> List.choose (function
+                        | TranscriptRecordLine r when r.Kind = TranscriptOutput -> Some r.Data
+                        | _ -> None)
+                Expect.equal output [ "total 4\r\nfile\r\n" ] "every line ending is one a terminal would have written"
             }
 
         testCaseAsync "a failing command keeps its output and reports the exit code" <|
@@ -2392,6 +2447,7 @@ let tests =
         waitTests
         digestTests
         ansiTests
+        onlcrTests
         transcriptTests
         agentTerminalTests
         agentVerbTests
