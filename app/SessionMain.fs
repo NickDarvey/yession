@@ -113,6 +113,18 @@ let private secretsCapabilitiesFor (sessionId: SessionId) =
 // workspace a terminal opens in and not something this file can decide alone.
 let private reposDir = Sandboxes.SessionLayout.prepareReposDir dataDir
 
+/// Where a work sandbox works. Host-family sandboxes work under the session's own data
+/// directory; a docker sandbox's workspace is the image's, which nothing here composes.
+///
+/// Module level because two things need it and they are not near each other: the sandboxes
+/// themselves, and the path a repo verb ANSWERS with — which is relative to the terminal's
+/// working directory or it is not relative to anything.
+let private workspaceFor (sandbox: SandboxName) =
+    match workBackend with
+    | HostBackend
+    | SrtBackend -> Some (Sandboxes.SessionLayout.workspaceFor dataDir sandbox)
+    | DockerBackend -> EnvironmentSpec.defaults.WorkingDirectory
+
 /// The session's WorkSandboxes (Plan 15, stage 2), by name — each in the workspace
 /// `SessionLayout` gives it, all of them sharing the one repos directory, which is what
 /// it is for. `credentials` is a parameter rather than a module value because resolving
@@ -136,13 +148,6 @@ let private makeSandboxes
                         Mode = ReadWrite } ] }
         | HostBackend
         | SrtBackend -> EnvironmentSpec.defaults
-    // Host-family sandboxes work under the session's own data directory; a docker
-    // sandbox's workspace lives at the spec/backend default inside the container.
-    let workspaceFor (sandbox: SandboxName) =
-        match workBackend with
-        | HostBackend
-        | SrtBackend -> Some (Sandboxes.SessionLayout.workspaceFor dataDir sandbox)
-        | DockerBackend -> workSpec.WorkingDirectory
     let sharedRepos =
         match workBackend with
         | HostBackend
@@ -591,7 +596,13 @@ Async.StartImmediate (
                       ReposDir = reposDir
                       // What the verbs SAY a checkout is at is the work sandbox's view of
                       // it, not the git sandbox's: nobody runs a build in the git sandbox.
-                      VisibleAt = Sandboxes.reposVisibleAt workBackend reposDir
+                      // Relative to where a terminal starts, when it can be: `repos/…` is
+                      // what anyone here can act on, and `set_shell_profile` resolves it
+                      // against the same root. The absolute path stays the sandbox's.
+                      VisibleAt =
+                        Sandboxes.reposReachedFrom
+                            (workspaceFor SandboxName.defaultName)
+                            (Sandboxes.reposVisibleAt workBackend reposDir)
                       ExtraReadPaths = []
                       Git = Repos.gitExecutable (Sandboxes.ambientEnv ())
                       AllowedDomains = [ "github.com" ]

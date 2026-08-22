@@ -2857,11 +2857,20 @@ let private latch () : (unit -> unit) * Async<unit> =
             resume ()),
     Async.FromContinuations (fun (cont, _, _) -> if fired then cont () else resume <- cont)
 
-/// The argv `SetProfile` validates a directory with, as this fixture reads it back.
+/// The argv `SetProfile` validates a directory with, as this fixture reads it back. The verb
+/// asks the sandbox to `cd` there and say where it landed, so this is also where a RELATIVE
+/// path acquires its meaning.
 let private validatedPath (exec: SandboxExec) : string option =
     match exec.Arguments with
-    | [ "-c"; body; "sh"; path ] when body.StartsWith "test -d" -> Some path
+    | [ "-c"; body; "sh"; path ] when body.StartsWith "cd " -> Some path
     | _ -> None
+
+/// This fixture's sandbox opens in `/ws`, so that is what a relative path resolves against —
+/// standing in for the workspace a real terminal starts in.
+let private fixtureWorkspace = "/ws"
+
+let private resolvedIn (path: string) : string =
+    if path.StartsWith "/" then path else sprintf "%s/%s" fixtureWorkspace path
 
 /// A sandbox that CAN host an instrumented shell, and that knows which directories it has.
 /// `present` is read on every call rather than captured, so a test can make a directory go
@@ -2873,11 +2882,18 @@ let private profileEnvironment (present: unit -> Set<string>) =
     let environment : SessionEnvironment.SessionEnvironment =
         { Ensure = fun _ _ -> async { return EnvironmentAvailable }
           Spawn =
-            fun exec _ ->
+            fun exec onChunk ->
                 async {
                     let code =
                         match validatedPath exec with
-                        | Some path -> if exists path then 0 else 1
+                        | Some path ->
+                            let resolved = resolvedIn path
+                            if exists resolved then
+                                // What `pwd` prints once `cd` has landed: the absolute answer,
+                                // which is the only thing the verb stores.
+                                onChunk (Stdout, resolved + "\n")
+                                0
+                            else 1
                         | None -> 0
                     return
                         Ok
@@ -2916,12 +2932,14 @@ let private blockingEnvironment () =
     let environment : SessionEnvironment.SessionEnvironment =
         { Ensure = fun _ _ -> async { return EnvironmentAvailable }
           Spawn =
-            fun exec _ ->
+            fun exec onChunk ->
                 async {
                     spawned.Add exec
                     let exited =
                         match validatedPath exec with
-                        | Some _ -> async { return SandboxExited 0 }
+                        | Some path ->
+                            onChunk (Stdout, resolvedIn path + "\n")
+                            async { return SandboxExited 0 }
                         | None ->
                             async {
                                 do! finished
@@ -2935,7 +2953,7 @@ let private blockingEnvironment () =
     environment, spawned, release
 
 let private shellProfileTests =
-    let checkout = "/repos/octo/hello"
+    let checkout = "/ws/repos/octo/hello"
     /// A manager over a sandbox that has the checkout and can host a shell.
     let fixture () =
         let log = newLog ()
@@ -2977,11 +2995,14 @@ let private shellProfileTests =
                 // by the only means that path has. Wiring only the pty would make a degraded
                 // terminal silently ignore the profile.
                 let log = newLog ()
-                let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
+                // The profile probe asks the sandbox to `cd` there and say where it landed;
+                // everything else this fixture runs says nothing.
+                let environment, spawned =
+                    scriptedEnvironment (fun arg -> (if arg = checkout then [ Stdout, checkout + "\n" ] else []), 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
                 let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
-                Expect.isOk set "this fixture answers `test -d` with success"
+                Expect.isOk set "this fixture answers the probe with the directory it landed in"
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "pwd" ignore
@@ -3016,13 +3037,30 @@ let private shellProfileTests =
                     "a refusal changes nothing"
             }
 
-        testCaseAsync "a relative path is refused without asking the sandbox" <|
+        // A path from `add_repo` is relative to where a terminal starts, and that is exactly
+        // the root the sandbox resolves against — so what the repo tools answer with can be
+        // passed straight here. What gets STORED is always the absolute answer, so nothing
+        // downstream ever holds a path whose meaning depends on where somebody stood.
+        testCaseAsync "a relative path is resolved by the sandbox, and stored absolute" <|
             async {
-                // A shell's idea of "relative to what" is precisely the thing being configured,
-                // so the answer would depend on the setting it is meant to establish.
                 let terminals, _, _, _, _ = fixture ()
                 let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some "repos/octo/hello")
-                Expect.isError set "a relative path is not a place"
+                Expect.isOk set "the path the repo tools answer with is a path this takes"
+                // Asserted on what is STORED, not on where a shell then opened: a relative
+                // string kept in the projection would still open the right shell in this
+                // fixture, and would be a path whose meaning moves the moment anything else
+                // reads it — Plan 26's tree matching, or a restart replaying the log.
+                Expect.equal
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    (Some checkout)
+                    "what the sandbox resolved, not what the caller typed"
+            }
+
+        testCaseAsync "a relative path that is nowhere in the sandbox is still refused" <|
+            async {
+                let terminals, _, _, _, _ = fixture ()
+                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some "repos/octo/absent")
+                Expect.isError set "resolving is not the same as accepting"
             }
 
         testCaseAsync "a clear returns new terminals to wherever the sandbox puts them" <|
@@ -3152,7 +3190,7 @@ let private shellProfileTests =
                 // exists.
                 let terminals, _, _, _, _ = fixture ()
                 let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
-                let! _ = terminals.ClearProfilesUnder ActorRef.Agent "/repos/octo"
+                let! _ = terminals.ClearProfilesUnder ActorRef.Agent "/ws/repos/octo"
                 Expect.equal
                     (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
                     None
@@ -3173,7 +3211,7 @@ let private shellProfileTests =
             async {
                 let terminals, _, _, _, _ = fixture ()
                 let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
-                let! cleared = terminals.ClearProfilesUnder ActorRef.Agent "/repos/octo/hell"
+                let! cleared = terminals.ClearProfilesUnder ActorRef.Agent "/ws/repos/octo/hell"
                 Expect.isEmpty cleared "a prefix is not a parent"
                 Expect.equal
                     (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)

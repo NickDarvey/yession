@@ -92,6 +92,33 @@ let private pureTests =
             Expect.equal (Sandboxes.reposVisibleAt SrtBackend "/data/repos") "/data/repos" "srt binds the same path"
             Expect.equal (Sandboxes.reposVisibleAt DockerBackend "/data/repos") "/repos" "docker reaches its mount target"
 
+        // What a verb ANSWERS with is a path somebody can act on from where they are, and one
+        // `set_shell_profile` takes as given — not the same fact plus the operator's home
+        // directory. Relative only where that is TRUE.
+        testCase "a checkout is reported from where a terminal stands, when it stands over it" <| fun () ->
+            Expect.equal
+                (Sandboxes.reposReachedFrom (Some "/data/s/workspace") "/data/s/workspace/repos")
+                "repos"
+                "the whole path an agent needs, and it survives a long data directory"
+            Expect.equal
+                (Sandboxes.reposReachedFrom (Some "/data/s/workspace/") "/data/s/workspace/repos")
+                "repos"
+                "a trailing slash on the workspace is the same workspace"
+
+        testCase "a checkout a terminal does not stand over is reported in full" <| fun () ->
+            Expect.equal
+                (Sandboxes.reposReachedFrom None "/repos")
+                "/repos"
+                "docker: the workspace is the image's, so nothing here knows what to relate to"
+            Expect.equal
+                (Sandboxes.reposReachedFrom (Some "/data/s/sandboxes/review/workspace") "/data/s/workspace/repos")
+                "/data/s/workspace/repos"
+                "a named sandbox reaches the shared directory from outside its own workspace"
+            Expect.equal
+                (Sandboxes.reposReachedFrom (Some "/data/s/work") "/data/s/workspace/repos")
+                "/data/s/workspace/repos"
+                "a shared prefix is not containment — `/work` does not contain `/workspace`"
+
         // The listing scan walks the repos directory treating every entry as an OWNER. The
         // staging area lives in there too (it must: the git sandbox may only write under the
         // repos dir), so what keeps a clone in progress out of the listing is that its
@@ -774,6 +801,12 @@ let private compositionTests =
                 // The assertion the fault would have failed: this is git's answer about the
                 // checkout, and getting it means `git -C` reached it.
                 Expect.equal (cell "branch") (Some (CellText "main")) "on the branch git says it is on"
+                // Where it says the checkout is: relative to where a terminal starts, which is
+                // also what `set_shell_profile` resolves against.
+                Expect.equal
+                    (cell "path")
+                    (Some (CellText "repos/octo/hello"))
+                    "reported from where a terminal stands, not from the filesystem root"
             | Some other -> failwithf "expected exactly the planted repo, got %A (%s)" other arrived
             | None ->
                 failwithf

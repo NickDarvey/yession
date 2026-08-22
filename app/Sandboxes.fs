@@ -145,6 +145,31 @@ let reposVisibleAt (backend: SandboxBackend) (hostReposDir: string) : string =
     | SrtBackend -> hostReposDir
     | DockerBackend -> "/repos"
 
+/// The checkout path a repo verb ANSWERS with: relative to where a terminal starts, when the
+/// repos directory is under it.
+///
+/// `repos/octo/hello` is the whole path anybody in the session can act on, and it stays the
+/// same length however long the operator's data directory is. The absolute form is the same
+/// fact wearing the operator's home directory —
+/// `/Users/someone/.yession/sessions/40V9FY6MT534HDMBX6W5HS8PGR/workspace/repos/…` — which
+/// every answer then carries and nobody here can do anything with.
+///
+/// It is passable straight to `set_shell_profile`, which resolves it against the sandbox's
+/// own working directory: the same root a terminal opens in, which is what makes a relative
+/// path mean anything. That is the abstraction — the absolute path is the SANDBOX's business
+/// and never has to leave it.
+///
+/// Falls back to the absolute path when the repos directory is NOT under the terminal's
+/// working directory: the docker backend, whose workspace is the image's and whose repos
+/// arrive on a bind mount at `/repos`, and any named sandbox reaching the shared directory
+/// from its own workspace. A relative path that is only true somewhere else is worse than a
+/// long one.
+let reposReachedFrom (workingDirectory: string option) (visibleAt: string) : string =
+    match workingDirectory with
+    | Some cwd when visibleAt.StartsWith (cwd.TrimEnd '/' + "/") ->
+        visibleAt.Substring ((cwd.TrimEnd '/').Length + 1)
+    | _ -> visibleAt
+
 let policyFor
     (backend: SandboxBackend)
     (ambient: Map<string, string>)
