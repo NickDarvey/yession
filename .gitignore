@@ -52,9 +52,15 @@ devenv.local.nix
 # Generated in github-restricted sandboxes (points the devenv input at the
 # cache-substituted source); never committed.
 devenv.local.yaml
-# The lock is environment-generated (the sandbox override pins a store path, a laptop pins
-# the github rev), so it is not committed; nixpkgs is pinned via the tarball URL in devenv.yaml.
-devenv.lock
+# devenv.lock IS committed, for its nixpkgs node: `channels.nixos.org/nixos-unstable` is a
+# moving target, so an unlocked CI run resolved whatever it pointed at that minute — two jobs
+# in one pull request could build against different nixpkgs, and our cachix missed every time.
+# The committed lock carries nixpkgs ONLY. devenv's own input is left out on purpose: its rev
+# comes from the devenv CLI (2.2.2 asks for 5844e78, which devenv.yaml never names), and in a
+# github-restricted sandbox devenv.local.yaml replaces that input with a store path — neither
+# is a fact about this repository. devenv re-adds that node itself, so `devenv.lock` shows as
+# MODIFIED after any devenv run: do not commit that back. A store path from somebody's box in
+# here breaks every other checkout.
 
 # Browser E2E scratch data
 tests/browser/.data*
