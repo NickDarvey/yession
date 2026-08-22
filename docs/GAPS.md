@@ -655,11 +655,19 @@ Items are roughly ordered by how much they matter.
   happened and the timeline says a terminal appeared, and nothing joins them. A
   `Terminal : TerminalId option` beside `Block` is the obvious symmetry and was deliberately
   not smuggled into the step that would have needed it.
-- **The jumpstarter console has an echo floor of one drain interval**
-  ([Plan 19](plans/19-provider-streams.md), step 5; `DRAIN_SECONDS` in
-  `examples/jumpstarter`). Its stream is a drain loop over a `pexpect` handle rather than
-  ownership of the fd, so a person typing sees their own echo up to ~200ms late. Inherent to
-  teeing a handle the SDK owns: the serial provider, which owns its fd, has no such floor.
+- **The jumpstarter console has an echo floor of one quiet period** (~50ms measured at 61-67ms
+  round trip; `QUIET_SECONDS` in `examples/jumpstarter`). Its stream is a drain loop over a
+  `pexpect` handle rather than ownership of the fd, so a person typing sees their own echo that
+  much late. The serial provider, which owns its fd, has no such floor.
+
+  This entry used to say the floor was one DRAIN interval (~200ms) and was inherent to teeing a
+  handle the SDK owns. Both halves were wrong, and the reason is worth keeping: the read under
+  the drain was `console.expect([pexpect.TIMEOUT])`, which always waits its timeout out and —
+  because pexpect consumes what it MATCHED and a timeout matches nothing — returned the whole
+  buffer every time without ever clearing it. So the floor was the timeout rather than the
+  device, and the stream re-sent the console's entire history five times a second. Now the
+  drain matches a real pattern, returns on the first byte, and waits only long enough not to
+  split a line. What is left is a coalescing window we chose, not a cost of teeing.
 - **An agent holds a lease where its own block has taken the screen, and nowhere else it
   could have run a block instead.** Closed in two steps, and what is left is a boundary
   rather than a shortfall. [Plan 19](plans/19-provider-streams.md) step 3 was the first: a
