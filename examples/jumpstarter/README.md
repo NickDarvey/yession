@@ -1,8 +1,9 @@
 # A Jumpstarter provider
 
 An MCP server that lends a [Jumpstarter](https://jumpstarter.dev) exporter — and the hardware
-behind it — to an agent. Point any MCP client at it and the agent gets eight tools: power the
-board, talk to its console, and call anything else the exporter exports.
+behind it — to an agent. Point any MCP client at it and the agent gets five tools: power the
+board and call anything else the exporter exports. Its console is not a tool — it is offered
+as a stream, and Yession turns that into a terminal people can watch and type into.
 
 It is here as the counterpart to [serial](../serial/): that one is written in this
 repository's language, longhand, and owns a device. This one is written in **Python** on
@@ -46,7 +47,7 @@ who is asking:
 
 | leg | transport | carries |
 |---|---|---|
-| control | MCP over HTTP at `/mcp` | the eight tools |
+| control | MCP over HTTP at `/mcp` | the five tools |
 | data | WebSocket at `/attach/<token>` | the console's bytes, both ways |
 
 joined one way by a ticket, which `acquire` hands back in the result's `_meta`:
@@ -69,19 +70,25 @@ still gets the prose, and still has the three console tools.
 The contract behind that url — which two rules are load-bearing and which are courtesies — is
 [docs/streams.md](../../docs/streams.md).
 
-`serial_expect` remains the tool that matters on the control leg, with or without a stream:
-request/response cannot stream, but *waiting for a prompt* is a request/response question, and
-that is what console interaction mostly is.
+*Waiting for a prompt* is the thing console interaction is mostly made of, and it is a
+request/response question even though a console is not. This provider used to answer it with
+`serial_expect`; `read_terminal`'s `wait_for` / `wait_for_pattern` answers it on the terminal
+instead, for every backend rather than the one that happened to implement it.
 
-**One drain, two readers; one writer.** This is the part worth stealing. The SDK's console is
-a `pexpect` spawn, so whoever reads it consumes it: a drain loop feeding a socket would starve
-`serial_read`/`serial_expect` of the very bytes they exist to return, and the agent would go
-blind the moment a person opened the terminal. So while a stream is attached, one drain owns
-the console and everything else reads what it has already read.
+**A console is not a tool, and this is the part worth stealing.** This provider used to offer
+`serial_send`, `serial_read` and `serial_expect` beside the stream, and keeping the two in
+step cost real machinery: the SDK's console is a `pexpect` spawn, so whoever reads it consumes
+it, and the drain feeding the socket had to tee every chunk into a capped buffer with an
+arrival event so the tools were not starved of the bytes they existed to return.
 
-Writes go the other way — from two doors down to one. While a terminal is attached,
-`serial_send` refuses and says where to type instead, because two writers on one console is
-exactly what a terminal's write lease exists to arbitrate.
+All of it is gone, and nothing was lost. What an agent reads it reads through
+`read_terminal` on the terminal this stream becomes — against a durable transcript rather
+than a handle consumed by looking at it, anchored to the reader's own position so output it
+has already been given cannot satisfy a later wait, and with the write lease arbitrating who
+types. That is Yession's, not this provider's, and every backend gets it.
+
+The lesson generalises: if you are building a tee so your own tools can read alongside the
+stream you offer, you are reimplementing something the host already does better.
 
 ## The tools
 
@@ -92,9 +99,6 @@ exactly what a terminal's write lease exists to arbitrate.
 | `release` | yes | give it back, closing the console |
 | `power` | yes | `on`, `off`, or `cycle` |
 | `driver_call` | yes | any method on any driver in the tree — the general case. Call it with no method to be told what that driver offers |
-| `serial_send` | yes | write to the console (refused while a terminal is attached — type there) |
-| `serial_read` | yes | everything it has said, up to a pause |
-| `serial_expect` | yes | wait for a pattern; on a timeout, say what WAS seen |
 
 Every answer is prose, because a model is what reads it. A refusal names the holder: "in use,
 not broken" is a different instruction from "unavailable".
@@ -187,6 +191,6 @@ The suite is deliberately two-layered, and the second layer is not here:
 | | |
 |---|---|
 | [src/jumpstarter_provider/main.py](src/jumpstarter_provider/main.py) | argument handling, the environment, and one line of output naming both ends |
-| [src/jumpstarter_provider/provider.py](src/jumpstarter_provider/provider.py) | the eight tools, the claim, and the liveness that ends one |
+| [src/jumpstarter_provider/provider.py](src/jumpstarter_provider/provider.py) | the five tools, the claim, and the liveness that ends one |
 | [src/jumpstarter_provider/exporter.py](src/jumpstarter_provider/exporter.py) | the SDK, behind one seam and on one thread |
 | [src/jumpstarter_provider/stream.py](src/jumpstarter_provider/stream.py) | the data leg: one drain, two readers, one writer |
