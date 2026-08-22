@@ -199,6 +199,10 @@ let private hostGit (cp: obj) (args: string array) (cwd: string) : unit = jsNati
 /// srt skips the re-bind of a path that is itself the write path.
 let private fixturesIn (root: string) : string = sprintf "%s/fixtures" root
 
+/// Where THIS harness's checkouts land — the session's own layout, asked for rather than
+/// spelled out again at each of the ten places below that name a path under it.
+let private reposIn (root: string) : string = Sandboxes.SessionLayout.reposDir root
+
 /// A local bare repo with one commit on `main` — what the service clones from, over the
 /// `file` protocol the test config allows.
 let private makeBareFixture (root: string) (name: string) : string =
@@ -223,7 +227,11 @@ let private serviceSpending
     (root: string)
     (log: EventLog<SessionEvent>)
     : Repos.ReposService =
-    let reposDir = sprintf "%s/repos" root
+    // The session's own layout, not a second guess at it: these verbs run against a repos
+    // directory nested inside a workspace in production, and a harness that flattens that
+    // is a harness testing a shape nothing ships. The fixtures stay a SIBLING of it (see
+    // `fixturesIn`) — that rule is about ancestry, which nesting does not change.
+    let reposDir = reposIn root
     let fixtures = fixturesIn root
     mkdir nodeFs reposDir
     mkdir nodeFs fixtures
@@ -328,7 +336,7 @@ let private srtTests =
             let listing = expect listing
             Expect.equal listing.Branch "main" "on the fixture's default branch"
             Expect.isFalse listing.Dirty "clean checkout"
-            Expect.isTrue (exists nodeFs (sprintf "%s/repos/octo/hello/.git" root)) "checkout landed at owner/repo"
+            Expect.isTrue (exists nodeFs (sprintf "%s/octo/hello/.git" (reposIn root))) "checkout landed at owner/repo"
             let! events = eventsOf log
             match events with
             | [ SessionEvent.RepoAdded added ] ->
@@ -344,7 +352,7 @@ let private srtTests =
             let! listed = service.ListRepos ()
             Expect.equal
                 (expect listed)
-                [ { Repo = repo; Branch = "main"; Dirty = false; Path = sprintf "%s/repos/octo/hello" root } ]
+                [ { Repo = repo; Branch = "main"; Dirty = false; Path = sprintf "%s/octo/hello" (reposIn root) } ]
                 "the listing is the filesystem's answer, and it says where"
         }
 
@@ -432,7 +440,7 @@ let private srtTests =
             // this suite cannot see that failure; what it can see is the flag that avoids
             // it, which is the absence of the directory the copy would have filled.
             Expect.isFalse
-                (exists nodeFs (sprintf "%s/repos/octo/hello/.git/hooks" root))
+                (exists nodeFs (sprintf "%s/octo/hello/.git/hooks" (reposIn root)))
                 "no hooks directory to populate (the clone asks for no templates)"
         }
 
@@ -462,8 +470,8 @@ let private srtTests =
             let service = serviceIn root log
             let repo = RepoRef.create "octo/hello" |> expect
             let! _ = service.AddRepo caller repo
-            let checkout = sprintf "%s/repos/octo/hello" root
-            let marker = sprintf "%s/repos/PWNED" root
+            let checkout = sprintf "%s/octo/hello" (reposIn root)
+            let marker = sprintf "%s/PWNED" (reposIn root)
             // What a poisoned WorkSandbox could plant: an executable hook, and a config
             // pointing fsmonitor at it. Both are inside the sandbox's own write set, so
             // only the per-invocation GIT_CONFIG_* overrides stand between them and
@@ -494,7 +502,7 @@ let private srtTests =
             makeBareFixture root "hello" |> ignore
             let service = serviceIn root (freshLog ())
             let repo = RepoRef.create "octo/hello" |> expect
-            let checkout = sprintf "%s/repos/octo/hello" root
+            let checkout = sprintf "%s/octo/hello" (reposIn root)
             let mutable halfMade = false
             let mutable running = true
             // Watch the visible path for as long as the clone runs. There are only two
@@ -530,9 +538,9 @@ let private srtTests =
             let repo = RepoRef.create "octo/missing" |> expect
             let! added = service.AddRepo caller repo
             Expect.isError added "a clone of something that is not there fails"
-            Expect.isFalse (exists nodeFs (sprintf "%s/repos/octo/missing" root)) "nothing at the visible path"
+            Expect.isFalse (exists nodeFs (sprintf "%s/octo/missing" (reposIn root))) "nothing at the visible path"
             Expect.equal
-                (readDirSafe nodeFs (sprintf "%s/repos/%s" root Repos.stagingDirName))
+                (readDirSafe nodeFs (sprintf "%s/%s" (reposIn root) Repos.stagingDirName))
                 [||]
                 "and nothing left in the staging area"
             let! events = eventsOf log
@@ -547,7 +555,7 @@ let private srtTests =
             // Exactly what a clone that died partway used to leave at the visible path: a
             // repository with no commit in it. Nothing can produce this any more, but a
             // machine that ran the old code still has one.
-            let checkout = sprintf "%s/repos/octo/hello" root
+            let checkout = sprintf "%s/octo/hello" (reposIn root)
             mkdir nodeFs checkout
             hostGit childProcess [| "init"; "-b"; "main" |] checkout
             let! added = service.AddRepo caller repo
@@ -581,7 +589,7 @@ let private srtTests =
             let human : Repos.RepoCaller = { Actor = PeerRef ada; Credential = PeerRef ada }
             let! removed = service.RemoveRepo human repo
             expect removed
-            Expect.isFalse (exists nodeFs (sprintf "%s/repos/octo/hello" root)) "checkout gone"
+            Expect.isFalse (exists nodeFs (sprintf "%s/octo/hello" (reposIn root))) "checkout gone"
             let! events = eventsOf log
             match events |> List.rev |> List.head with
             | SessionEvent.RepoRemoved r -> Expect.equal r.Actor (PeerRef ada) "the human is the acting party"
@@ -643,7 +651,13 @@ let private liveClone =
             let! ada = connectClient (sprintf "http://127.0.0.1:%d/signal" port) opened.PeerToken "ada" "Ada"
 
             let sessionDir = sprintf "%s/%s" dataDir record.DataDir
-            let reposDir = sprintf "%s/repos" sessionDir
+            // ASKED FOR, never re-derived: this is the session's own answer for where its
+            // checkouts live, and a second `sprintf` here is exactly the drift `SessionLayout`
+            // exists to prevent. It had one — the repos directory moved inside the workspace
+            // and this line kept looking beside it, so the case reported "no checkout" about a
+            // checkout sitting one directory away. Only the release gate runs this tier, so the
+            // stale copy could not be caught anywhere it would have been cheap to catch.
+            let reposDir = Sandboxes.SessionLayout.reposDir sessionDir
             let checkout = sprintf "%s/%s" reposDir liveRepo
 
             /// Everything a reader needs to tell the three faults apart, printed whatever happens.
@@ -664,8 +678,30 @@ let private liveClone =
                         |> List.collect (fun t ->
                             t.Blocks |> List.map (fun b -> sprintf "    %s -> %A" b.Command b.Status))
                         |> function [] -> "    (terminals, no blocks)" | ls -> String.concat "\n" ls
+                // Did the VERB succeed, or did bytes merely arrive? `add_repo` appends
+                // `RepoAdded`, which folds into the timeline as an act-note — so its absence
+                // beside a whole checkout means the clone landed and the verb still reported a
+                // failure. The case cannot assert this yet: it settles the moment the checkout
+                // appears, which on a green run is while the agent is still streaming, so a
+                // missing note there says "too early to tell" and not "broken". Printed rather
+                // than asserted until a run that waits for the turn says which it is.
+                let verb =
+                    let note =
+                        model.Conversation.Items
+                        |> List.tryFind (fun i ->
+                            i.Kind = ConversationItemKind.ActNote && i.Body.StartsWith "added repo")
+                    let turnInFlight =
+                        model.Conversation.Items
+                        |> List.exists (fun i -> i.Author = ActorRef.Agent && i.Status = Streaming)
+                    match note, turnInFlight with
+                    | Some note, _ -> note.Body
+                    // The distinction the last two release runs turned on, and neither could
+                    // state: a missing note WHILE the agent is still talking is this case
+                    // settling early, not a verb that failed. Only the second line is a finding.
+                    | None, true -> "(not yet — the turn is still in flight, which is what settling on the checkout means)"
+                    | None, false -> "(no `added repo` act-note, and the turn is over — the verb did not report success)"
                 sprintf
-                    "CLONE: %s\n  environment: %A\n  conversation:\n%s\n  terminal blocks:\n%s\n  session dir: %s\n  repos dir: %s\n  owner dir: %s\n  checkout whole: %b"
+                    "CLONE: %s\n  environment: %A\n  conversation:\n%s\n  terminal blocks:\n%s\n  session dir: %s\n  repos dir: %s\n  owner dir: %s\n  checkout whole: %b\n  add_repo said: %s"
                     why
                     model.Environment
                     items
@@ -674,6 +710,7 @@ let private liveClone =
                     (listDir nodeFs reposDir)
                     (listDir nodeFs (sprintf "%s/octocat" reposDir))
                     (checkoutWhole nodeFs checkout)
+                    verb
 
             do! compose ada ada.Hello.PeerId (sprintf "Clone %s" liveRepo)
             ada.Connection.SendDraft ada.Hello.PeerId
