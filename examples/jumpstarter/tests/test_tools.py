@@ -77,6 +77,29 @@ def test_the_console_carries_bytes_both_ways(provider: str):
     assert "hello console" in client.tool("serial_read", timeout_seconds=2)
 
 
+def test_a_read_does_not_say_again_what_it_already_said(provider: str):
+    client = Client(provider)
+    client.tool("acquire")
+    client.tool("serial_send", data="said once\n")
+    assert "said once" in client.tool("serial_read", timeout_seconds=2)
+    # "Since you last read it" is the tool's promise, and a read that does not CONSUME what
+    # it returns breaks it silently: every answer grows, and the caller cannot tell what is
+    # new from what it has already been handed.
+    assert "said once" not in client.tool("serial_read", timeout_seconds=2)
+
+
+def test_expect_does_not_match_what_a_read_already_returned(provider: str):
+    client = Client(provider)
+    client.tool("acquire")
+    client.tool("serial_send", data="login: root\n")
+    assert "login: " in client.tool("serial_read", timeout_seconds=2)
+    # The dangerous half of the same fault: output already handed over must not satisfy a
+    # later wait. An agent that power-cycles and waits for a boot prompt would otherwise
+    # match the one from before the reboot, instantly, and carry on as if the board were up.
+    answer = client.tool("serial_expect", pattern="login: ", timeout_seconds=1)
+    assert "did not appear" in answer
+
+
 def test_expect_returns_as_soon_as_it_matches(provider: str):
     client = Client(provider)
     client.tool("acquire")
