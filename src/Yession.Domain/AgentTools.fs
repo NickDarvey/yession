@@ -71,17 +71,35 @@ module private ToolArgs =
     /// is what the optional parameters degrade to. A `timeout_seconds` without a `wait_for` is
     /// nothing to bound, so the wait is only assembled when there is something to wait FOR.
     let terminalRead (json: string) : Result<string * int option * TerminalWait option, string> =
-        read
-            (Decode.object (fun get ->
-                get.Required.Field "terminal" Decode.string,
-                get.Optional.Field "from" Decode.int,
-                get.Optional.Field "wait_for" Decode.string
-                |> Option.filter (fun until -> until <> "")
-                |> Option.map (fun until ->
-                    { Until = until
-                      TimeoutSeconds =
-                        get.Optional.Field "timeout_seconds" Decode.float |> Option.defaultValue 10.0 })))
-            json
+        let decoded =
+            read
+                (Decode.object (fun get ->
+                    get.Required.Field "terminal" Decode.string,
+                    get.Optional.Field "from" Decode.int,
+                    get.Optional.Field "wait_for" Decode.string |> Option.filter (fun s -> s <> ""),
+                    get.Optional.Field "wait_for_pattern" Decode.string |> Option.filter (fun s -> s <> ""),
+                    get.Optional.Field "timeout_seconds" Decode.float |> Option.defaultValue 10.0))
+                json
+        match decoded with
+        | Error e -> Error e
+        | Ok (terminal, from, literal, pattern, timeout) ->
+            // Two fields rather than one and a mode flag, because a flag makes the meaning of
+            // `wait_for` depend on another argument: a caller that sets one and forgets the
+            // other gets a LITERAL match on a regex string, which is wrong, silent, and looks
+            // exactly like a device that never answered. Two fields make that a refusal.
+            match literal, pattern with
+            | Some _, Some _ ->
+                Error "wait_for and wait_for_pattern are two ways to say the same thing — give one"
+            | None, None -> Ok (terminal, from, None)
+            | Some literal, None ->
+                Ok (terminal, from, Some { Until = MatchLiteral literal; TimeoutSeconds = timeout })
+            | None, Some source ->
+                // Compiled HERE, so a pattern outside the subset is an answer to this call
+                // rather than something discovered part-way through a wait that then has to
+                // explain itself.
+                TerminalPattern.compile source
+                |> Result.map (fun compiled ->
+                    terminal, from, Some { Until = MatchPattern (compiled, source); TimeoutSeconds = timeout })
 
     let repoBranchCreate (json: string) : Result<string * string * bool, string> =
         read
@@ -282,7 +300,10 @@ module AgentTools =
                 let waited =
                     match tail.Matched, waitFor with
                     | Some false, Some wait ->
-                        sprintf "\n(%s did not appear within %gs — this is what it said instead)" wait.Until wait.TimeoutSeconds
+                        sprintf
+                            "\n(%s did not appear within %gs — this is what it said instead)"
+                            (TerminalMatch.describe wait.Until)
+                            wait.TimeoutSeconds
                     | _ -> ""
                 if tail.Text = "" then return sprintf "%s%s%s\n(nothing printed in these lines)" where omitted waited
                 else return sprintf "%s%s%s\n%s" where omitted waited tail.Text
@@ -522,7 +543,11 @@ module AgentTools =
                 ToolField.optional
                     "wait_for"
                     "string"
-                    "hold the read until this exact text appears, e.g. \"login: \". Literal text, not a pattern"
+                    "hold the read until this exact text appears, e.g. \"login: \". Literal text — for a pattern use wait_for_pattern"
+                ToolField.optional
+                    "wait_for_pattern"
+                    "string"
+                    "hold the read until output matches this pattern, e.g. \"[#$>] $\" for a shell prompt. Takes literal text, `.`, `[classes]`, `*`, `+`, `?`, `|`, groups, and `^`/`$` anchored to a LINE. No backreferences, lookaround or non-greedy quantifiers"
                 ToolField.optional
                     "timeout_seconds"
                     "number"

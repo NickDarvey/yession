@@ -43,6 +43,7 @@
     <Compile Include="Jumpstarter.fs" />
     <Compile Include="OtlpStub.fs" />
     <Compile Include="Sync.fs" />
+    <Compile Include="TerminalPattern.fs" />
     <Compile Include="Terminals.fs" />
     <Compile Include="Attach.fs" />
     <Compile Include="Timeline.fs" />
