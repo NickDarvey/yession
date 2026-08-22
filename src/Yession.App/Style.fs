@@ -484,6 +484,22 @@ module Style =
     // off-canvas on mobile; `nav-alt` = the inverse. Expressed with arbitrary variants so it
     // stays plain Tailwind.
 
+    // --- The degradation bar's one number ------------------------------------------------
+    // On a phone the bar is FIXED above all three panes, so the panes leave room for it, so
+    // its height and that room are the same number in three class strings. They cannot be
+    // composed from a shared token: Tailwind generates only classes that appear LITERALLY in
+    // the source, so `"max-md:h-" + n` produces a class the stylesheet never contains — which
+    // fails silently, the bar falling back to its content height and the reservation to
+    // whatever the last edit left. So the number is written out three times, here, together,
+    // and `Phase4`'s theme suite fails if the three ever stop agreeing.
+
+    /// The bar's own height on a phone.
+    let degradedBarHeight = "max-md:h-12"
+    /// The room a pane anchored to the top edge leaves for it (the two off-canvas overlays).
+    let degradedBarRoom = "max-md:[.is-degraded_&]:top-12"
+    /// The same room, paid in padding, by the column that is in normal flow.
+    let degradedBarRoomPad = "max-md:[.is-degraded_&]:pt-12"
+
     /// The 280px column. It holds TWO faces — the workspace nav and settings (`navPane` /
     /// `settingsPane`) — because settings is a place you go, not a thing that covers what you
     /// were reading. Collapsing on desktop animates the column's width shut; on mobile the
@@ -493,7 +509,7 @@ module Style =
         + "md:transition-[width] md:duration-200 md:ease-out "
         + "md:[.nav-alt_&]:w-0 md:[.nav-alt_&]:border-r-0 "
         + "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:w-[min(var(--spacing-side),84vw)] "
-        + "max-md:[.is-degraded_&]:top-9 "
+        + degradedBarRoom + " "
         + "max-md:transition-transform max-md:duration-200 max-md:ease-out max-md:-translate-x-[101%] "
         + "max-md:[.nav-alt_&]:translate-x-0 motion-reduce:transition-none"
 
@@ -572,7 +588,7 @@ module Style =
 
     /// On a phone this column sits under the fixed degradation bar, so it pays for it in
     /// padding — but only while the bar is there (`degradedShell`).
-    let mainColumn = "flex-1 flex flex-col min-w-0 h-full max-md:[.is-degraded_&]:pt-9"
+    let mainColumn = "flex-1 flex flex-col min-w-0 h-full " + degradedBarRoomPad
 
     /// The phone's band is a ROW, not a compressed copy of the desktop's stack: the two
     /// chevrons a phone always has in this band — the sidebar's and the terminals' — and the
@@ -617,12 +633,6 @@ module Style =
     /// the bar fixed above them. A marker, never a look: the two rules that read it are
     /// `sidebar`, `mainColumn` and the terminals column below, and only on a phone.
     let degradedShell = "is-degraded"
-    /// The bar height a phone reserves. One line of `small` plus its padding — the bar GROWS
-    /// when somebody opens its disclosure, and that growth deliberately overlays the pane
-    /// rather than moving it: a notice you opened is a notice you are reading, and reflowing
-    /// the screen under it is how you lose your place.
-    let private degradedBarHeight = "9"
-
     /// The connection report where the nav column cannot be seen. On a desktop with the
     /// column open it is not rendered at all — the column says it, and saying it twice on one
     /// screen is what this whole surface was rebuilt to stop.
@@ -630,12 +640,11 @@ module Style =
     /// A hairline notice, never a modal and never a blocker: the client under it stays fully
     /// usable, which is the promise the words in it make.
     ///
-    /// `flex-wrap`, for the reason `signInPrompt` below carries it — the row is three things
-    /// (a status, what it costs you, the disclosure holding the machinery) and on a phone the
-    /// third has to be able to take the line under the second rather than squeeze it off the
-    /// edge.
+    /// One row that never wraps. `signInPrompt` below wraps because it may hold a sentence;
+    /// this holds three short things — a status, a disclosure, and the way back — and its
+    /// height is a number the panes reserve, so wrapping is the one thing it must not do.
     let degradedBar =
-        cls [ "flex flex-wrap items-baseline gap-x-3 gap-y-1 px-8 py-2 bg-surface"
+        cls [ "flex flex-nowrap items-center gap-3 px-8 py-2 bg-surface"
               Stroke.dividerBottom
               // Where the column IS on screen, the column says it. Where it is not — a
               // collapsed nav, or any phone — this does. Same rule as `headerNoAgent`.
@@ -644,7 +653,20 @@ module Style =
               // the top edge, so this leaves the conversation column's flow and sits over all
               // three. `z-50` clears the overlays (`z-40`) and the scrim between them.
               "max-md:fixed max-md:inset-x-0 max-md:top-0 max-md:z-50 max-md:px-4"
-              "max-md:min-h-" + degradedBarHeight ]
+              // One row, always, tall enough for the control it carries whether or not this
+              // state has one — the panes reserve this number, so a height that tracked the
+              // contents would leave a gap under the bar in some states and overlap the
+              // header in others (it did: a wrapped 73px bar against a 36px reservation).
+              // It still GROWS when somebody opens the disclosure, and that growth overlays
+              // the pane rather than moving it — a notice you opened is one you are reading.
+              degradedBarHeight ]
+
+    /// The status word, and the only thing in the row that may be squeezed: an action is
+    /// useless truncated and the disclosure is one word, so the give has to come from here.
+    let degradedBarStatus = "min-w-0 truncate"
+    /// The way back, at the row's end. `ml-auto` rather than a spacer, so the states with no
+    /// action to offer close the gap instead of leaving a hole where one would be.
+    let degradedBarAction = "ml-auto shrink-0"
 
     /// The sign-in prompt, in the same slot and the same hairline as the degradation strip:
     /// a notice over the timeline, never a modal and never a blocker. It carries a real
@@ -1117,7 +1139,7 @@ module Style =
         + "md:transition-[width] md:duration-200 md:ease-out md:[.term-resizing_&]:transition-none "
         + "md:[.term-closed_&]:w-0 md:[.term-closed_&]:border-l-0 "
         + "max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:w-full max-md:border-l-0 "
-        + "max-md:[.is-degraded_&]:top-9 "
+        + degradedBarRoom + " "
         + "max-md:transition-transform max-md:duration-200 max-md:ease-out "
         + "max-md:[.term-closed_&]:translate-x-[101%] motion-reduce:transition-none"
 

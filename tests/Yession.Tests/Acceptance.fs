@@ -1018,6 +1018,19 @@ let private reconnectOfferTests =
             // The reason itself is not lost — it moves behind the card's disclosure.
             Expect.isTrue (column.Contains "the session did not answer") "the reason still reaches the reader"
 
+        // The report has two mounts and only one is ever visible, so the way back has to be on
+        // BOTH or it is missing from whichever is showing. It went missing from the bar's:
+        // once the column's mount became `max-md:hidden` — the rule that stops the report
+        // being read twice — a phone could be told its session had stopped and offered
+        // nothing whatever to do about it.
+        testCase "the way back is offered at both mounts, since only one is ever seen" <| fun () ->
+            let html = Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId))
+            Expect.equal
+                ((html.Split Dom.Hooks.sessionReopen |> Array.length) - 1)
+                2
+                "the nav column's card, and the bar for where the column cannot be seen"
+            Expect.isTrue ((navConnection html).Contains Dom.Hooks.sessionReopen) "one of them is the column's"
+
         // The three ways the offer must decline to render, each of which would otherwise be
         // a button that cannot work.
         testCase "no manager origin means no offer, just the status" <| fun () ->
@@ -1325,6 +1338,22 @@ let private chromeTests =
         // while breaking nothing, which is the shape this suite does not keep (AGENTS.md,
         // "Writing tests"). That focus is VISIBLE is the invariant, and the cases above are
         // what hold it.
+
+        // The degradation bar is fixed above all three panes on a phone, so its height and the
+        // room the panes leave for it are one number in three class strings — and they cannot
+        // be composed from a shared token, because Tailwind emits only classes that appear
+        // literally in the source. That makes drift between them silent in the worst way: the
+        // stylesheet simply lacks the class, the bar falls back to its content height, and the
+        // result is a bar overlapping the header or a band of dead space under it. Arithmetic,
+        // not design — the number may be any number, so long as it is the same one.
+        testCase "the bar's height and the room the panes leave for it are one number" <| fun () ->
+            let sizeOf (what: string) (token: string) =
+                let n = token.Substring (token.LastIndexOf '-' + 1)
+                Expect.isTrue (n |> Seq.forall System.Char.IsDigit && n <> "") (sprintf "%s ends in a size: %s" what token)
+                n
+            let height = sizeOf "the bar's height" Style.degradedBarHeight
+            Expect.equal (sizeOf "the overlays' inset" Style.degradedBarRoom) height "an overlay leaves exactly the bar"
+            Expect.equal (sizeOf "the column's padding" Style.degradedBarRoomPad) height "and so does the column"
 
         // --- what a notice says first -----------------------------------------------------
 

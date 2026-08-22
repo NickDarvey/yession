@@ -265,10 +265,30 @@ module View =
     /// nothing to reopen), a Manager to ask, and a session to ask for; absent any of them
     /// the ordinary status renders. The view never reads the DOM, so there is no path that
     /// produces a button with nowhere to go — the shell omitting the meta tag is enough.
-    let private reconnectOffer (actions: ViewActions) (model: ClientModel) : TemplateResult option =
+    /// The way back, wherever the report is. ONE definition, because it is one act and it
+    /// now has two homes: the card in the nav column, and the bar for where the column cannot
+    /// be seen. It briefly had only the first — which, once the column's mount became
+    /// `max-md:hidden`, meant a phone could be told its session had stopped and offered
+    /// nothing whatever to do about it.
+    ///
+    /// TOTAL over the model for the same reasons the card always was: reopening needs a
+    /// settled disconnection, a Manager to ask, and a session to ask for. Absent any of them
+    /// there is no link, rather than a button with nowhere to go.
+    let private reopenAction (actions: ViewActions) (model: ClientModel) (extra: string) : TemplateResult option =
         match model.Connection, model.Manager, model.Session with
-        | Disconnected (Some reason), Some origin, Some sessionId ->
+        | Disconnected (Some _), Some origin, Some sessionId ->
             let target = sprintf "%s/sessions/%s/open" origin (SessionId.value sessionId)
+            Some (
+                html $"""
+                    <a class="{Style.cls [ Style.btnPrimary; extra ]}"
+                       href="{target}"
+                       data-session-reopen="{target}"
+                       @click={Ev(fun _ -> actions.ReopenSession ())}>{Dom.Text.reopenSession}</a>""")
+        | _ -> None
+
+    let private reconnectOffer (actions: ViewActions) (model: ClientModel) : TemplateResult option =
+        match model.Connection, reopenAction actions model Style.noAgentAction with
+        | Disconnected (Some reason), Some action ->
             // What reopening actually costs. Under a `{id}` template the session returns to
             // the same address, so the doc in this browser is still its doc and syncs on
             // reconnect. Addressed by port it returns somewhere new, and everything written
@@ -293,10 +313,7 @@ module View =
                         <div class="{Style.noAgentBody}">
                           <span class="{Style.small}">{reopenPromise}</span>
                           {detailNote "session-gone" why}
-                          <a class="{Style.cls [ Style.btnPrimary; Style.noAgentAction ]}"
-                             href="{target}"
-                             data-session-reopen="{target}"
-                             @click={Ev(fun _ -> actions.ReopenSession ())}>{Dom.Text.reopenSession}</a>
+                          {action}
                         </div>
                       </div>
                     </div>"""
@@ -897,14 +914,22 @@ module View =
     /// read from the other two. The panes make room for it through `Style.degradedShell`, a
     /// class this view puts on the shell whenever there is something to say, so nothing
     /// reserves a band of dead space while everything is fine.
-    let private degradedBar (model: ClientModel) : TemplateResult =
+    let private degradedBar (actions: ViewActions) (model: ClientModel) : TemplateResult =
         match connectionReport model with
         | None -> Lit.nothing
         | Some (token, status, why) ->
+            // The way back rides the bar, right-aligned, because this mount is the ONLY thing
+            // a phone reader has: the card that carries it in the column is hidden at that
+            // width by the rule that stops the report being read twice.
+            let action =
+                match reopenAction actions model Style.degradedBarAction with
+                | Some action -> action
+                | None -> Lit.nothing
             html $"""
                 <section class="{Style.degradedBar}" data-degraded="{token}">
-                  {status}
+                  <span class="{Style.degradedBarStatus}">{status}</span>
                   {detailNote "degraded" why}
+                  {action}
                 </section>"""
 
     /// The `(selectionStart, selectionEnd)` of the event's target input, or `None`. Read live
@@ -2541,7 +2566,7 @@ module View =
             <div class="contents {shellState}">
             {sidebar actions dispatch model}
             <div class="{Style.mainColumn}">
-              {degradedBar model}
+              {degradedBar actions model}
               {header actions dispatch model}
               {signInPrompt actions model}
               {chat actions dispatch model}
