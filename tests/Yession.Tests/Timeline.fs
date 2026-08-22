@@ -345,7 +345,7 @@ let private paneTests =
         testCase "opening a tab shows it, and opens the column it is in" <| fun () ->
             let model = clientOf oneBlock
             Expect.isFalse model.TerminalsOpen "the column starts shut"
-            let opened' = ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1"))) model
+            let opened' = ClientModel.update (ShowInPaneMsg (Reading (BlockTab (terminalA, block "1")))) model
             Expect.equal
                 (ClientModel.selectedPane opened' |> Option.map PaneTab.key)
                 (Some "block:term-a:b-1")
@@ -384,7 +384,7 @@ let private paneTests =
             let model =
                 clientOf oneBlock
                 |> ClientModel.update (TerminalRecordMsg (terminalA, 1, { At = 0.0; Kind = TranscriptOutput; Data = "total 0\n" }))
-                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
+                |> ClientModel.update (ShowInPaneMsg (Reading (BlockTab (terminalA, block "1"))))
             let html = Support.render model
             let required =
                 [ "the tab", Dom.attr Dom.Hooks.paneTab "block:term-a:b-1"
@@ -407,7 +407,7 @@ let private paneTests =
 
         testCase "the strip is one tablist, and every tab in it is a real tab" <| fun () ->
             let model =
-                clientOf oneBlock |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
+                clientOf oneBlock |> ClientModel.update (ShowInPaneMsg (Reading (BlockTab (terminalA, block "1"))))
             let html = Support.render model
             Expect.isTrue (html.Contains "role=\"tablist\"") "one tablist"
             // Roving tabindex, ARIA's manual-activation variant: exactly one tab is a Tab
@@ -602,7 +602,7 @@ let private videoTests =
             // print", the whole is "what was going on around it".
             let model =
                 withRecords (clientOf recordedTerminal)
-                |> ClientModel.update (PlayRecordingMsg (TerminalTab terminalA, Some 3))
+                |> ClientModel.update (ShowInPaneMsg (WatchingFrom (terminalA, block "2")))
             Expect.equal
                 (ClientModel.selectedPane model |> Option.map PaneTab.key)
                 (Some "terminal:term-a")
@@ -614,8 +614,8 @@ let private videoTests =
         testCase "a start hint belongs to the step-out that set it, and dies with it" <| fun () ->
             let model =
                 withRecords (clientOf recordedTerminal)
-                |> ClientModel.update (PlayRecordingMsg (TerminalTab terminalA, Some 3))
-                |> ClientModel.update (SelectTerminalMsg terminalA)
+                |> ClientModel.update (ShowInPaneMsg (WatchingFrom (terminalA, block "2")))
+                |> ClientModel.update (ShowInPaneMsg (Reading (TerminalTab terminalA)))
             match ClientModel.paneReplay (TerminalTab terminalA) model with
             | Some replay -> Expect.isNone replay.StartAt "choosing the tab again starts it from the start"
             | None -> failwith "the header is known, so there is a recording"
@@ -685,7 +685,7 @@ let private videoTests =
             let model = withRecords (clientOf rejected)
             Expect.isNone (ClientModel.paneReplay (BlockTab (terminalA, block "no")) model) "it never ran"
             Expect.isNone (ClientModel.missingKeyframe (BlockTab (terminalA, block "no")) model) "so there is no screen to fetch"
-            let html = Support.render (ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "no"))) model)
+            let html = Support.render (ClientModel.update (ShowInPaneMsg (Reading (BlockTab (terminalA, block "no")))) model)
             // By NAME — `ada` is this fixture's local peer, so the refuser is called what
             // every other surface calls them rather than by the id underneath.
             //
@@ -700,13 +700,13 @@ let private videoTests =
             // is the DVR — a different mechanism, not this one pretending.
             let closed =
                 withRecords (clientOf recordedTerminal)
-                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
+                |> ClientModel.update (ShowInPaneMsg (Reading (BlockTab (terminalA, block "1"))))
             Expect.isTrue
                 ((Support.render closed).Contains (Dom.attr Dom.Hooks.panePlayWhole "b-1"))
                 "a closed terminal's block can step out to the whole recording"
             let stillOpen =
                 withRecords (clientOf (recordedTerminal |> List.filter (fun e -> match e.Event with SessionEvent.TerminalClosed _ -> false | _ -> true)))
-                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
+                |> ClientModel.update (ShowInPaneMsg (Reading (BlockTab (terminalA, block "1"))))
             Expect.isFalse
                 ((Support.render stillOpen).Contains Dom.Hooks.panePlayWhole)
                 "a live one does not, because there is no finished recording to step into"
@@ -754,7 +754,7 @@ let private readsTests =
         testCase "asking for the recording swaps the read" <| fun () ->
             let model =
                 withRecords (clientOf recordedTerminal)
-                |> ClientModel.update (PlayRecordingMsg (TerminalTab terminalA, None))
+                |> ClientModel.update (ShowInPaneMsg (Watching (TerminalTab terminalA)))
             Expect.isTrue (ClientModel.playsRecording (TerminalTab terminalA) model) "now it plays"
             Expect.isFalse
                 (ClientModel.playsRecording (TerminalTab terminalB) model)
@@ -770,7 +770,7 @@ let private readsTests =
         testCase "the way back is offered only where there is something behind the player" <| fun () ->
             let played =
                 withRecords (clientOf recordedTerminal)
-                |> ClientModel.update (PlayRecordingMsg (TerminalTab terminalA, None))
+                |> ClientModel.update (ShowInPaneMsg (Watching (TerminalTab terminalA)))
             Expect.isTrue
                 ((Support.render played).Contains (Dom.attr Dom.Hooks.terminalBlocks (TerminalId.value terminalA)))
                 "blocks to go back to"
@@ -806,11 +806,11 @@ let private readsTests =
             // player of the same two lines under it.
             let model =
                 withRecords (clientOf recordedTerminal)
-                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
+                |> ClientModel.update (ShowInPaneMsg (Reading (BlockTab (terminalA, block "1"))))
             Expect.isFalse
                 ((Support.render model).Contains (Dom.attr Dom.Hooks.paneReplay "block:term-a:b-1"))
                 "read as text"
-            let played = ClientModel.update (PlayRecordingMsg (BlockTab (terminalA, block "1"), None)) model
+            let played = ClientModel.update (ShowInPaneMsg (Watching (BlockTab (terminalA, block "1")))) model
             Expect.isTrue
                 ((Support.render played).Contains (Dom.attr Dom.Hooks.paneReplay "block:term-a:b-1"))
                 "and played when asked"
@@ -914,7 +914,7 @@ let private dvrTests =
                 |> ClientModel.update (RewindTerminalMsg terminalA)
                 |> ClientModel.update
                     (TerminalRecordMsg (terminalA, 5, { At = 60.0; Kind = TranscriptOutput; Data = "after\r\n" }))
-                |> ClientModel.update (JumpToLiveMsg terminalA)
+                |> ClientModel.update (ShowInPaneMsg (Reading (TerminalTab terminalA)))
             Expect.isFalse (ClientModel.isRewound terminalA model) "caught back up"
             match ClientModel.paneReplay (TerminalTab terminalA) model with
             | Some replay -> Expect.isTrue ((outputsOf replay.Cast) |> List.contains "after\r\n") "including what arrived while behind"
@@ -927,7 +927,7 @@ let private dvrTests =
             let model =
                 withRecords (clientOf live)
                 |> ClientModel.update (RewindTerminalMsg terminalA)
-                |> ClientModel.update (SelectTerminalMsg terminalA)
+                |> ClientModel.update (ShowInPaneMsg (Reading (TerminalTab terminalA)))
             Expect.isFalse (ClientModel.isRewound terminalA model) "the rewind went with the choice"
 
         testCase "rewind is offered on ANY live terminal, and the screen gives way to it" <| fun () ->
@@ -1122,12 +1122,63 @@ let private listTests =
             let model =
                 clientOf [ at 1L 0.0 (opened terminalA "build"); at 2L 1.0 (opened terminalB "logs") ]
                 |> ClientModel.update ToggleTerminalListMsg
-                |> ClientModel.update (SelectFromListMsg terminalB)
-            Expect.isFalse model.TerminalList "the list stepped aside"
+                |> ClientModel.update (ShowInPaneMsg (Reading (TerminalTab terminalB)))
+            Expect.isFalse (ClientModel.showsList model) "the list stepped aside"
             Expect.equal
                 (ClientModel.selectedPane model |> Option.map PaneTab.key)
                 (Some "terminal:term-b")
                 "showing what was chosen"
+
+        // The four cases below are the tombstones of the states four agreeing fields allowed
+        // (Plan 25, stage 2). Each was a real defect, watched happening in a browser; each is
+        // now unwritable rather than merely unwritten.
+        testCase "a chip tapped over the list shows the block it names" <| fun () ->
+            // It used to retitle the pane and show the census: opening a tab cleared the
+            // playing and rewound fields and left the list flag alone, so the reader tapped a
+            // command and got nothing. A face cannot survive the choice that replaces it.
+            let model =
+                clientOf [ at 1L 0.0 (opened terminalA "build")
+                           at 2L 1.0 (started terminalA "1" (PeerRef ada) "make" 1)
+                           at 3L 2.0 (completed terminalA "1" (CommandSucceeded 0) 3) ]
+                |> ClientModel.update ToggleTerminalListMsg
+                |> ClientModel.update (ShowInPaneMsg (Reading (BlockTab (terminalA, block "1"))))
+            Expect.isFalse (ClientModel.showsList model) "the census stepped aside"
+            Expect.equal
+                (ClientModel.selectedPane model |> Option.map PaneTab.key)
+                (Some "block:term-a:b-1")
+                "and the block is what is showing"
+
+        testCase "the list's rewind is one act, and it watches behind live" <| fun () ->
+            // It used to be a rewind and a select, and the select cleared the pin the rewind
+            // had just taken — a verb whose whole effect was to leave the list.
+            let model =
+                withRecords (clientOf [ at 1L 0.0 (opened terminalA "shell") ])
+                |> ClientModel.update ToggleTerminalListMsg
+                |> ClientModel.update (RewindTerminalMsg terminalA)
+            Expect.isFalse (ClientModel.showsList model) "the census stepped aside"
+            Expect.isTrue (ClientModel.isRewound terminalA model) "and the reader is behind live"
+            Expect.isTrue (ClientModel.playsRecording (TerminalTab terminalA) model) "watching the recording"
+
+        testCase "showing anything else replaces the whole read, pin and all" <| fun () ->
+            // No entry clears a subset and trusts the rest: a rewind on one terminal cannot
+            // survive a reader going somewhere else, whatever they go to.
+            let rewound =
+                withRecords (clientOf [ at 1L 0.0 (opened terminalA "shell"); at 2L 1.0 (opened terminalB "logs") ])
+                |> ClientModel.update (RewindTerminalMsg terminalA)
+            Expect.isTrue (ClientModel.isRewound terminalA rewound) "arranged behind live"
+            let moved = ClientModel.update (ShowInPaneMsg (Reading (TerminalTab terminalB))) rewound
+            Expect.isFalse (ClientModel.isRewound terminalA moved) "the pin died with the read that held it"
+
+        testCase "leaving the list resumes the read it covered" <| fun () ->
+            // The one thing the flag did right, kept: the census is somewhere you GO, and
+            // coming back puts you where you were — a rewind included.
+            let model =
+                withRecords (clientOf [ at 1L 0.0 (opened terminalA "shell") ])
+                |> ClientModel.update (RewindTerminalMsg terminalA)
+                |> ClientModel.update ToggleTerminalListMsg
+                |> ClientModel.update ToggleTerminalListMsg
+            Expect.isFalse (ClientModel.showsList model) "back on the tab"
+            Expect.isTrue (ClientModel.isRewound terminalA model) "still behind live, where they left off"
 
         testCase "reaching the list opens the column it is in" <| fun () ->
             // Looking for a terminal you cannot see is exactly the case where the column is
@@ -1135,7 +1186,7 @@ let private listTests =
             let model = clientOf [ at 1L 0.0 (opened terminalA "build") ]
             Expect.isFalse model.TerminalsOpen "the column starts shut"
             let listed = ClientModel.update ToggleTerminalListMsg model
-            Expect.isTrue listed.TerminalList "the list is showing"
+            Expect.isTrue (ClientModel.showsList listed) "the list is showing"
             Expect.isTrue listed.TerminalsOpen "and the column came with it"
     ]
 
@@ -1189,8 +1240,8 @@ let private pinTests =
             // busy chat used to leave twenty tabs nobody closed.
             let model =
                 clientOf oneBlock
-                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
-                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "2")))
+                |> ClientModel.update (ShowInPaneMsg (Reading (BlockTab (terminalA, block "1"))))
+                |> ClientModel.update (ShowInPaneMsg (Reading (BlockTab (terminalA, block "2"))))
             Expect.equal
                 (stripKeys model |> List.filter (fun key -> key.StartsWith "block:"))
                 [ "block:term-a:b-2" ]
@@ -1200,9 +1251,9 @@ let private pinTests =
             let kept = BlockTab (terminalA, block "1")
             let model =
                 clientOf oneBlock
-                |> ClientModel.update (OpenPaneTabMsg kept)
+                |> ClientModel.update (ShowInPaneMsg (Reading kept))
                 |> ClientModel.update (TogglePinMsg kept)
-                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "2")))
+                |> ClientModel.update (ShowInPaneMsg (Reading (BlockTab (terminalA, block "2"))))
             Expect.equal
                 (stripKeys model |> List.filter (fun key -> key.StartsWith "block:"))
                 [ "block:term-a:b-1"; "block:term-a:b-2" ]
@@ -1214,7 +1265,7 @@ let private pinTests =
             let tab = BlockTab (terminalA, block "1")
             let model =
                 clientOf oneBlock
-                |> ClientModel.update (OpenPaneTabMsg tab)
+                |> ClientModel.update (ShowInPaneMsg (Reading tab))
                 |> ClientModel.update (TogglePinMsg tab)
                 |> ClientModel.update (TogglePinMsg tab)
             Expect.isFalse (ClientModel.isPinned tab model) "no longer kept"
