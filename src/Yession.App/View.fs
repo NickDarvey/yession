@@ -119,10 +119,18 @@ type ViewActions =
       /// back into a selector. Without this, closing a tab strands focus on a control that
       /// has just been removed from the document.
       FocusChat : string -> unit
-      /// Hand focus to whichever DVR control replaced the one just pressed (Plan 14,
-      /// stage 7): Rewind and Jump-to-live each remove the other from the document, so the
-      /// press that swaps them would otherwise strand focus on a control that has gone.
-      FocusDvr : TerminalId -> unit }
+      /// Hand focus to a terminal's watch toggle when the reader has been stranded (Plan 14,
+      /// stage 7; Plan 25, stage 3).
+      ///
+      /// The toggle itself never needs this: it relabels in place, so a press keeps its own
+      /// focus. What does is the AUTOMATIC catch-up — a rewound cast playing off its end
+      /// unmounts the player under whoever was focused inside it — and that is the only
+      /// caller left now the four differently-named exits have become one control.
+      FocusWatch : unit -> unit
+      /// Scroll a terminal's history to one of its commands and mark it (Plan 25, stage 3) —
+      /// the browser's half of "show in terminal". Imperative for the same reason `FocusPane`
+      /// is: the model moves the reader's position, and only the document can scroll.
+      RevealBlock : TerminalId -> BlockId -> unit }
 
 module ViewActions =
     /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
@@ -155,7 +163,8 @@ module ViewActions =
           ResizeTerminal = fun _ _ _ -> ()
           FocusPane = ignore
           FocusChat = ignore
-          FocusDvr = ignore }
+          FocusWatch = ignore
+          RevealBlock = fun _ _ -> () }
 
 module View =
 
@@ -1803,6 +1812,52 @@ module View =
     /// commands has two reads of one history, and printing both at once put a player of the
     /// same two lines under every command and its result. The blocks are the read; the
     /// recording is where you go (`terminalBody`).
+    /// A terminal's one control between its two reads (Plan 14, stage 7; Plan 25, stage 3):
+    /// its TEXT — the live screen, or the blocks it ran — and its RECORDING.
+    ///
+    /// It was four controls with four names: two ways in at the top of the scrollback
+    /// (`↑ replay from the start`, `↑ play the recording`) and two ways out floating over it
+    /// (`Back to blocks`, `Jump to live`). Each removed another from the document, so each
+    /// press had to hand focus on after itself; and each was named after the projection it
+    /// mounted rather than after anything a reader wants. One control that relabels in place
+    /// is the same act with neither problem — the press keeps its own focus, because the
+    /// button it was pressed on is still there saying the other thing.
+    ///
+    /// A surface with only ONE read offers nothing: a recording that is the only read
+    /// (`ReplayIsTheRead`) has no text behind it, and a terminal with nothing recorded has no
+    /// recording to go to. Both are rules about the terminal, asked here rather than decided
+    /// here.
+    let private terminalWatchToggle
+        (dispatch: ClientMsg -> unit)
+        (model: ClientModel)
+        (view: TerminalView)
+        : TemplateResult =
+        let tab = TerminalTab view.TerminalId
+        let feed = ClientModel.terminalFeed view.TerminalId model
+        let rewound = ClientModel.isRewound view.TerminalId model
+        let playing = ClientModel.playsRecording tab model
+        // `None` for the press means the rewind's own message: watching a LIVE terminal is
+        // pinning its edge, and the pin is read off the feed there rather than by whoever
+        // remembered to look it up first.
+        let offer =
+            if rewound then Some ("live", "Live", Some (Reading tab))
+            elif playing then
+                // Back to the text, where there is text to go back to.
+                if List.isEmpty view.Blocks then None else Some ("output", "Show output", Some (Reading tab))
+            elif view.IsOpen then
+                if feed.KnownLength > 0 then Some ("watch", "Watch", None) else None
+            elif ClientModel.playable tab model then Some ("watch", "Watch", Some (Watching tab))
+            else None
+        match offer with
+        | None -> Lit.nothing
+        | Some (face, label, next) ->
+            html $"""
+                <button type="button" class="{Style.terminalBarAct}" data-terminal-watch="{face}"
+                        @click={Ev(fun _ ->
+                                      match next with
+                                      | Some mode -> dispatch (ShowInPaneMsg mode)
+                                      | None -> dispatch (RewindTerminalMsg view.TerminalId))}>{label}</button>"""
+
     let private terminalClosedBand (model: ClientModel) (view: TerminalView) : TemplateResult =
         let feed = ClientModel.terminalFeed view.TerminalId model
         // The per-terminal output cap (stage 3d) can eat a whole recording. Saying so is the
@@ -1889,7 +1944,7 @@ module View =
     ///
     /// The very same renderer the terminal's own history uses — a block read from the chat
     /// must not be a second rendering of a block, free to drift from the first.
-    let private paneBlockView (dispatch: ClientMsg -> unit) (model: ClientModel) (terminalId: TerminalId) (blockId: BlockId) : TemplateResult =
+    let private paneBlockView (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) (terminalId: TerminalId) (blockId: BlockId) : TemplateResult =
         let found =
             TerminalProjection.tryFind terminalId model.Terminals
             |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
@@ -1902,19 +1957,27 @@ module View =
         | Some block ->
             let tab = BlockTab (terminalId, blockId)
             let playing = ClientModel.playsRecording tab model
-            // The step-out, offered only where there is a whole recording to step out INTO.
-            // A live terminal's recording is still being written, and rewinding one of those
-            // is the DVR — a different mechanism, and not this one pretending.
-            let isClosed =
-                TerminalProjection.tryFind terminalId model.Terminals
-                |> Option.map (fun v -> not v.IsOpen)
-                |> Option.defaultValue false
-            let stepOut =
-                if not isClosed then Lit.nothing
+            // The reader's OTHER question about this command: not what it printed, which the
+            // text above already answers, but what was going on around it. That is a question
+            // about POSITION, and the answer is more of the same text — the terminal's own
+            // history, scrolled to this command — not a recording of it.
+            //
+            // It used to be "play whole terminal", which answered a text question with a
+            // video, mounted a player twenty seconds of dead air away from the command it
+            // named, and left the reader with no way back to the block they stepped out of.
+            // Watching from here is still one press away: this moves them, and the toggle
+            // below is then the same toggle, at the command they were sent to.
+            let showInTerminal =
+                if List.isEmpty (TerminalProjection.tryFind terminalId model.Terminals
+                                 |> Option.map (fun v -> v.Blocks)
+                                 |> Option.defaultValue []) then Lit.nothing
                 else
                     html $"""
-                        <button type="button" class="{Style.btn}" data-pane-play-whole="{BlockId.value blockId}"
-                                @click={Ev(fun _ -> dispatch (ShowInPaneMsg (WatchingFrom (terminalId, blockId))))}>Play whole terminal</button>"""
+                        <button type="button" class="{Style.btn}" data-pane-show-in-terminal="{BlockId.value blockId}"
+                                @click={Ev(fun _ ->
+                                              dispatch (ShowInPaneMsg (ReadingAt (terminalId, blockId)))
+                                              actions.RevealBlock terminalId blockId
+                                              actions.FocusPane ())}>Show in terminal</button>"""
             // Text, then the recording behind one press — the same rule the terminal's own
             // panel follows, because a block IS the case that made it: a command and its
             // result, printed, needed no player of the same two lines under it.
@@ -1924,20 +1987,20 @@ module View =
             // Offered only where there is something to play, which for a block means it ran
             // and finished — a refusal never ran, and a recording still being written has no
             // end to replay to.
-            let playToggle =
+            let watchToggle =
                 if not (ClientModel.playable tab model) then Lit.nothing
                 else
-                    let label = if playing then "Back to output" else "Play recording"
+                    let face = if playing then "output" else "watch"
+                    let label = if playing then "Show output" else "Watch"
                     html $"""
-                        <button type="button" class="{Style.btn}" data-pane-play="{BlockId.value blockId}"
+                        <button type="button" class="{Style.btn}" data-pane-watch="{face}"
                                 @click={Ev(fun _ ->
                                               dispatch (ShowInPaneMsg (if playing then Reading tab else Watching tab)))}>{label}</button>"""
             // A bordered strip with nothing in it is a control bar that says there are no
             // controls. An open terminal's block has no whole recording to step out into, and
             // a refusal has nothing to play.
             let actionsRow =
-                if not (isClosed || ClientModel.playable tab model) then Lit.nothing
-                else html $"""<div class="{Style.paneActions}">{playToggle}{stepOut}</div>"""
+                html $"""<div class="{Style.paneActions}">{watchToggle}{showInTerminal}</div>"""
             let body =
                 if playing then replayMount "Command output, played" tab
                 else
@@ -2043,7 +2106,7 @@ module View =
                 else
                     html $"""
                         <button type="button" class="{Style.btnIconBare}" data-terminal-list-rewind="{id}"
-                                aria-label="Rewind {view.Title}"
+                                aria-label="Watch {view.Title} from behind its edge"
                                 @click={Ev(fun _ ->
                                               // ONE message. It used to be this and a select
                                               // beside it, and the second cleared the pin the
@@ -2216,66 +2279,26 @@ module View =
                 if not (List.isEmpty view.Blocks) then view.Blocks |> List.map (terminalBlockView model feed)
                 elif view.IsOpen then []
                 else [ html $"""<div class="{Style.terminalOutputEmpty}"><span class="{Style.terminalPrompt}">$</span></div>""" ]
-            // The DVR (Plan 14, stage 7): step back through what this terminal has recorded so
-            // far while it keeps running, and catch back up. Offered on any LIVE terminal — the
-            // mechanism does not care which mode it is in, and both are one growing byte stream
-            // — but only once something IS recorded: a DVR with nothing behind it is a control
-            // with nothing to do. Each press hands focus to the control that replaces the
-            // pressed one, which leaves the document.
+            // A terminal's two reads, and the ONE control between them (Plan 14, stage 7;
+            // Plan 25, stage 3): its text — the live screen, or the blocks it ran — and its
+            // recording. On a live terminal watching means going behind the edge while it
+            // keeps running, and the way back says `Live`.
             //
-            // The two halves are not one control and no longer share a band. Going back is a
-            // DESTINATION, so in block mode it sits at the top of the scrollback, where the
-            // history runs out — earlier is up, and you get there by scrolling. (In live mode
-            // there is no scrollback to scroll up through, so the bar carries it instead.)
-            // Coming back is TRANSIENT and is about where you are in the scroll, so it floats
-            // over the scroller, in the slot every reader already knows.
+            // It was four controls: two ways in at the top of the scrollback and two ways out
+            // floating over it, each removing another from the document, each needing focus
+            // handed on after it, and each named after the projection it mounted rather than
+            // after anything a reader wants. One control that relabels in place is the same
+            // act with none of that — and because it never leaves, the press keeps its focus
+            // and the reader keeps their place.
             let tab = TerminalTab view.TerminalId
             let rewound = ClientModel.isRewound view.TerminalId model
             let playing = ClientModel.playsRecording tab model
-            // The way INTO the recording, live or closed, in one slot: the top of the
-            // scrollback, where the history runs out. A closed terminal's recording used to
-            // render under its blocks instead of being somewhere you go — a player of the
-            // same two lines beneath every command and its result — and the DVR beside it had
-            // already worked out where the way back belongs.
-            let replayFrom =
-                if playing || Option.isSome view.Lease then Lit.nothing
-                elif view.IsOpen && feed.KnownLength > 0 then
-                    html $"""
-                        <button type="button" class="{Style.terminalReplayFrom}"
-                                data-terminal-rewind="{TerminalId.value view.TerminalId}"
-                                @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>↑ replay from the start</button>"""
-                // Closed, with a recording kept and blocks to read instead of it. The other
-                // way round — a recording that is the only read there is — never reaches
-                // here: that terminal is already playing.
-                elif not view.IsOpen && ClientModel.playable tab model then
-                    html $"""
-                        <button type="button" class="{Style.terminalReplayFrom}"
-                                data-terminal-play="{TerminalId.value view.TerminalId}"
-                                @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Watching tab)); actions.FocusDvr view.TerminalId)}>↑ play the recording</button>"""
-                else Lit.nothing
-            // The way back OUT of a player, in the slot every reader already knows: floating
-            // over the scroller, transient, about where you are rather than what you are
-            // reading. Two destinations because there are two things behind a player — the
-            // live edge of a terminal still running, and the blocks of one that stopped —
-            // and one control that had to say which would say neither well.
-            //
-            // Offered only where there is somewhere to go back TO: a terminal whose recording
-            // is its only read has no blocks behind the player, and "back to blocks" over a
-            // bare `$` is a control that undoes itself.
-            let backToBlocks =
-                if not (playing && not rewound && not (List.isEmpty view.Blocks)) then Lit.nothing
-                else
-                    html $"""
-                        <div class="{Style.terminalLiveFloat}">
-                          <button type="button" class="{Style.btnPrimary}"
-                                  data-terminal-blocks="{TerminalId.value view.TerminalId}"
-                                  @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (TerminalTab view.TerminalId))); actions.FocusDvr view.TerminalId)}>Back to blocks</button>
-                        </div>"""
-            let backToLive =
+            // How far behind the edge a rewound reader is, in the recording's clock, growing
+            // as it moves away from them. A fact rather than a control, so it stays where a
+            // reader parked behind live will see it.
+            let behindLabel =
                 if not (view.IsOpen && rewound) then Lit.nothing
                 else
-                    // Say HOW FAR behind, in the recording's clock, as it grows — a reader
-                    // parked behind live deserves to know the edge is moving away.
                     let behind =
                         match ClientModel.behindLive view.TerminalId model with
                         | Some seconds when seconds >= 1.0 ->
@@ -2284,9 +2307,6 @@ module View =
                     html $"""
                         <div class="{Style.terminalLiveFloat}">
                           <span class="{Style.statusFaint}" data-terminal-behind="{TerminalId.value view.TerminalId}">{behind}</span>
-                          <button type="button" class="{Style.btnPrimary}"
-                                  data-terminal-live="{TerminalId.value view.TerminalId}"
-                                  @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (TerminalTab view.TerminalId))); actions.FocusDvr view.TerminalId)}>Jump to live</button>
                         </div>"""
             // In live mode the block history gives way to the SCREEN (Plan 14, stage 6). A
             // program is running here and what it displays is not a list of commands and
@@ -2303,8 +2323,7 @@ module View =
                     html $"""
                         <div class="{Style.terminalReplayRegion}">
                           {replayMount label tab}
-                          {backToLive}
-                          {backToBlocks}
+                          {behindLabel}
                         </div>"""
                 else
                     match view.Lease with
@@ -2323,7 +2342,6 @@ module View =
                             <div class="{Style.terminalScrollback}" data-terminal-scrollback
                                  data-terminal-id="{TerminalId.value view.TerminalId}">
                               <div class="{Style.terminalStream}">
-                                {replayFrom}
                                 {truncated}
                                 {blocks}
                               </div>
@@ -2332,7 +2350,7 @@ module View =
                 {above}
                 {if not view.IsOpen then terminalClosedBand model view
                  // Behind the live edge there is nothing to type into and nothing to queue
-                 // against what you are watching: the way back is "jump to live", above.
+                 // against what you are watching: the way back is the bar's `Live`.
                  elif rewound then Lit.nothing
                  else terminalComposer actions dispatch model view.TerminalId}"""
         // A thunk, because the list renders INSTEAD of this: a pane body built on every
@@ -2357,7 +2375,7 @@ module View =
                         match TerminalProjection.tryFind id model.Terminals with
                         | Some view -> terminalBody view
                         | None -> Lit.nothing
-                    | BlockTab (terminalId, blockId) -> paneBlockView dispatch model terminalId blockId
+                    | BlockTab (terminalId, blockId) -> paneBlockView actions dispatch model terminalId blockId
                     | StretchTab stretch -> paneStretchView model stretch
                 // `tabindex="-1"` so the panel can take focus programmatically when a chip
                 // opens it, without becoming a Tab stop of its own. A DOM swap that leaves
@@ -2385,19 +2403,13 @@ module View =
                             html $"""
                                 <button type="button" class="{Style.terminalBarAct}" data-terminal-take="{TerminalId.value view.TerminalId}"
                                         @click={Ev(fun _ -> actions.TakeTerminal view.TerminalId)}>take</button>"""
-                    // In LIVE mode the way into the recording has no spatial home: the content
-                    // is a screen, not a scrollback, so there is no top of the history to scroll
-                    // up to. It is an act about this terminal, so it says so from the bar. In
-                    // block mode the stream carries it instead, where the history runs out.
-                    let feed = ClientModel.terminalFeed view.TerminalId model
-                    let rewind =
-                        if view.IsOpen && Option.isSome view.Lease
-                           && not (ClientModel.isRewound view.TerminalId model) && feed.KnownLength > 0 then
-                            html $"""
-                                <button type="button" class="{Style.terminalBarAct}" data-terminal-rewind="{TerminalId.value view.TerminalId}"
-                                        @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>rewind</button>"""
-                        else Lit.nothing
-                    html $"""<span class="{Style.terminalBarActs}">{take}{rewind}</span>"""
+                    // The one control between this terminal's two reads, in one slot whatever
+                    // it is doing (Plan 25, stage 3). In the bar rather than in the content
+                    // because it is an act about the TERMINAL, and because live mode has no
+                    // spatial home for it: what is on screen there is a screen, not a
+                    // scrollback, so there is no top of the history to scroll up to.
+                    let watch = terminalWatchToggle dispatch model view
+                    html $"""<span class="{Style.terminalBarActs}">{take}{watch}</span>"""
             | _ -> Lit.nothing
         // The bar names the SELECTED tab, which is the thing a reader cannot work out for
         // themselves. It used to say "terminals" — the largest text on a phone screen, telling

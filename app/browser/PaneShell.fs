@@ -40,26 +40,58 @@ requestAnimationFrame(() => {
 ) })($0)""")>]
 let toChatItem (tabKey: string) : unit = jsNative
 
-/// Hand focus to whichever replay control is on screen for this terminal (Plan 14, stage 7).
-/// The way in and the way out swap each other out of the document — rewind for Jump-to-live
-/// on a live terminal, play for Back-to-blocks on a closed one — so the press that swaps
-/// them, or the catch-up that fires when a rewound cast plays off its end, would otherwise
-/// strand focus on a control that has gone. One selector for all four: a terminal renders
-/// exactly one of them at a time. Guarded on focus actually being stranded (on `body`, or
-/// inside the player that is being unmounted): the automatic catch-up must never yank focus
+/// Hand focus to a terminal's watch toggle when the reader has been stranded (Plan 14,
+/// stage 7; Plan 25, stage 3).
+///
+/// There used to be four controls here — rewind, jump-to-live, play, back-to-blocks — each
+/// swapping another out of the document, so every press risked stranding focus and this had
+/// to name all four to catch whichever had survived. One toggle that relabels in place needs
+/// none of that: a press keeps its own focus.
+///
+/// What is left is the case no press causes. A rewound cast playing off its end unmounts the
+/// player by itself, under whoever was reading it. Hence the guard: focus is moved only when
+/// it is actually stranded (on `body`, or inside the player being unmounted), never yanked
 /// out of a composer somebody is typing in.
-[<Emit("""(function (terminalId) { return (
-requestAnimationFrame(() => {
+/// No terminal id: the toggle's VALUE is the face it will show, not which terminal it is
+/// about, and the pane shows one tab at a time — so there is exactly one of these in the
+/// document and naming a terminal could only ever name it wrongly.
+[<Emit("""requestAnimationFrame(() => {
   const active = document.activeElement
   const stranded = !active || active === document.body || active.closest('[data-pane-replay]')
   if (!stranded) return
-  const next = document.querySelector(
-    '[data-terminal-live="' + terminalId + '"], [data-terminal-rewind="' + terminalId + '"], ' +
-    '[data-terminal-blocks="' + terminalId + '"], [data-terminal-play="' + terminalId + '"]')
+  const next = document.querySelector('[data-terminal-watch]')
   if (next) next.focus()
+})""")>]
+let toWatchToggle () : unit = jsNative
+
+/// Scroll a terminal's history to one of its commands, and say which one (Plan 25, stage 3).
+///
+/// The other half of "show in terminal": the model moves the reader's POSITION to that block,
+/// and this is the part a rendered string cannot do. One shot, from the press — not from the
+/// render — because a reveal repeated on every render would fight the reader's own scrolling
+/// the moment a record arrived.
+///
+/// It runs a frame late for the reason everything else here does (the element has to exist),
+/// and that frame is also what puts it after `restoreSurfaceScroll`, which returns a freshly
+/// rendered scrollback to its end. Landing after it is the whole trick: the reveal wins once,
+/// and every render afterwards samples the position the reader was left at, so the two never
+/// fight.
+///
+/// The mark is an animation that ends. A block scrolled to in a wall of identical mono is
+/// still a block nobody can pick out; a permanent highlight would still be pointing at it
+/// long after the reader had moved on.
+[<Emit("""(function (terminalId, blockId) { return (
+requestAnimationFrame(() => {
+  const scrollback = document.querySelector('[data-terminal-scrollback][data-terminal-id="' + terminalId + '"]')
+  const block = scrollback && scrollback.querySelector('[data-terminal-block="' + blockId + '"]')
+  if (!block) return
+  block.scrollIntoView({ block: 'start' })
+  block.classList.remove('animate-reveal')
+  void block.offsetWidth
+  block.classList.add('animate-reveal')
 })
-) })($0)""")>]
-let toDvrControl (terminalId: string) : unit = jsNative
+) })($0, $1)""")>]
+let revealBlock (terminalId: string) (blockId: string) : unit = jsNative
 
 /// The pane's open state, as a class on the shell root — the same mechanism the sidebar uses,
 /// so a Lit re-render never fights the CSS transition. A `set` rather than a toggle, because

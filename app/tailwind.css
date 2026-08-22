@@ -236,6 +236,11 @@
 
   --animate-pulse2: pulse2 1.1s ease-in-out infinite;
   --animate-blink: blink 1s steps(1) infinite;
+  /* "Show in terminal" (Plan 25, stage 3): the block the reader was sent to, said once and
+     then gone. A scroll alone lands them in a wall of identical mono and leaves them hunting
+     for which line they were brought here for; a permanent mark would still be claiming it
+     an hour later. One pass, and the surface is ordinary again. */
+  --animate-reveal: reveal 1.6s ease-out 1;
 
   @keyframes pulse2 {
     0%, 100% { opacity: 0.25; }
@@ -243,6 +248,10 @@
   }
   @keyframes blink {
     50% { opacity: 0; }
+  }
+  @keyframes reveal {
+    0%, 55% { background-color: var(--color-surface-2); }
+    100% { background-color: transparent; }
   }
 }
 

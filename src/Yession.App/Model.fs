@@ -289,6 +289,11 @@ type TabMode =
     /// the rewind pinned. A pin exists only in this case, which is what makes "pinned to a
     /// block's recording" unwritable rather than merely unwritten.
     | WatchingBehind of TerminalId * pin: int
+    /// A terminal's TEXT, positioned at one of its commands — "show in terminal" (Plan 25,
+    /// stage 3). The answer to "what was going on around this", which is a question about
+    /// POSITION and wants more text, not a player: the same scrollback, scrolled to the
+    /// command and marking it.
+    | ReadingAt of TerminalId * BlockId
 
 module TabMode =
 
@@ -299,14 +304,48 @@ module TabMode =
         | Reading tab
         | Watching tab -> tab
         | WatchingFrom (terminal, _)
-        | WatchingBehind (terminal, _) -> TerminalTab terminal
+        | WatchingBehind (terminal, _)
+        | ReadingAt (terminal, _) -> TerminalTab terminal
 
     /// Whether this mode is a recording rather than a text read — the reader's half of
     /// `ClientModel.playsRecording`.
     let watches =
         function
-        | Reading _ -> false
+        | Reading _ | ReadingAt _ -> false
         | Watching _ | WatchingFrom _ | WatchingBehind _ -> true
+
+    /// The command a terminal's text read is positioned at, if it is positioned at one — what
+    /// the reveal scrolls to.
+    let anchor =
+        function
+        | ReadingAt (terminal, blockId) -> Some (terminal, blockId)
+        | Reading _ | Watching _ | WatchingFrom _ | WatchingBehind _ -> None
+
+    /// The OTHER read of the same thing — what the one watch/read toggle dispatches.
+    ///
+    /// Position is navigation and fidelity is a mode, so flipping the mode never moves the
+    /// reader: a watch entered at a command comes back to that command's text, and the way
+    /// back out is the same control in the same slot. That is what makes the toggle keep its
+    /// focus, and what retired the four differently-named exits that used to leave the
+    /// document behind them.
+    ///
+    /// Total, because a mode with only one read never renders the toggle: a stretch IS its
+    /// recording, and so is a closed terminal that ran nothing (`ReplayIsTheRead`). Those
+    /// rows are unreachable and still stated, because a partial function here would be a
+    /// crash waiting for the surface to change its mind.
+    let toggled =
+        function
+        | Reading tab -> Watching tab
+        | Watching tab -> Reading tab
+        // The anchor survives the flip, in both directions. This pair IS the step-out the
+        // old "play whole terminal" reached for: the position was already the command, so
+        // watching from it needs no hint riding a message, and coming back lands where the
+        // reader was rather than at the top of a scrollback.
+        | ReadingAt (terminal, blockId) -> WatchingFrom (terminal, blockId)
+        | WatchingFrom (terminal, blockId) -> ReadingAt (terminal, blockId)
+        // "Live". A pin is a fact about watching from behind an edge, so it dies with the
+        // watch rather than being carried into a read that has no use for it.
+        | WatchingBehind (terminal, _) -> Reading (TerminalTab terminal)
 
 /// The pane's one face (Plan 25, stage 2): a tab, or the census of every terminal.
 type PaneMode =
@@ -810,6 +849,11 @@ module ClientModel =
         match model.Pane with
         | Some (OnList _) -> true
         | Some (OnTab _) | None -> false
+
+    /// The command the pane's text read is positioned at (Plan 25, stage 3) — what the
+    /// browser scrolls into view once the render that put it on screen has happened.
+    let paneAnchor (model: ClientModel) : (TerminalId * BlockId) option =
+        model.Pane |> Option.bind PaneMode.onTab |> Option.bind TabMode.anchor
 
     /// Which terminal the pane is about — the selected tab's, whichever kind it is. A block
     /// tab and a stretch tab still belong to a terminal, which is what the composer, the

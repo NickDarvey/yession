@@ -626,7 +626,7 @@ let private uiChecklistTests =
                   // its result.
                   "the commands it ran are listed", Dom.attr Dom.Hooks.terminalBlock "block-ui"
                   "and the way to its recording is offered",
-                  Dom.attr Dom.Hooks.terminalPlay (TerminalId.value terminalId) ] do
+                  Dom.attr Dom.Hooks.terminalWatch "watch" ] do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
             // Nothing can be run in a closed terminal, so nothing offers to: a command line
             // that queues into a terminal with no shell behind it is the misleading half.
