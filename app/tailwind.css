@@ -286,6 +286,39 @@
    Without it every disclosure in the product wears a stray triangle on iOS and Safari. */
 summary::-webkit-details-marker { display: none; }
 
+/* What every mounted editor needs, keyed off the marker the mount itself looks for
+   (`[data-rich-body]` — see `Browser.richBodyHosts`), so a surface cannot render a body and
+   forget it. That is the whole reason it is not a `Style` token some host has to remember.
+
+   `white-space: pre-wrap` is ProseMirror's own requirement, and it said so in the console on
+   every mount in the product. Without it the browser collapses runs of spaces and drops a
+   trailing one, so indentation typed into a message is not the indentation that arrives and a
+   caret after a space has nowhere to sit. */
+[data-rich-body] .ProseMirror {
+  white-space: pre-wrap;
+}
+
+/* An empty composer says what it is for. A `contenteditable` has no `placeholder` attribute,
+   so the field's `placeholder:` utility never once applied to a mounted editor and the bar sat
+   unmarked — most of the surface, on a phone. The attribute is a NODE DECORATION
+   (`Editor.placeholderPlugin`), present only while the doc is empty, so these words are never
+   content: not selectable, not copied, and never sent as an empty message.
+
+   Absolute, so the words take no space and the box does not resize when they go;
+   `pointer-events: none`, so a click meant for the editor is not caught by the very text
+   inviting it. */
+[data-rich-body] .ProseMirror [data-placeholder] {
+  position: relative;
+}
+[data-rich-body] .ProseMirror [data-placeholder]::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  pointer-events: none;
+  color: var(--color-ink-faint);
+}
+
 /* Presence carets in a body editor (widget decorations built in `Editor.buildBodyDecorations`;
    the DOM + per-peer colour are set inline by `ProseMirror.caretDom`). The colour rides on
    `border-color`/`background`; these rules give the bar its shape and float the name label. */

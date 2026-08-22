@@ -216,6 +216,16 @@ module ProseMirror =
     let selection (state: EditorState) : obj = jsNative
     [<Emit("$0.doc")>]
     let stateDoc (state: EditorState) : obj = jsNative
+    /// A doc nobody has typed in: ProseMirror's empty document is ONE empty textblock, not an
+    /// absence, so "is there anything here" is this question and not `size = 0`.
+    ///
+    /// A real function taking the doc as a parameter, because the body asks about it three
+    /// times: a bare `$0.childCount === 1 && $0.firstChild...` would re-evaluate whatever
+    /// expression the caller passed, once per mention.
+    [<Emit("(function (doc) { return doc.childCount === 1 && doc.firstChild.isTextblock && doc.firstChild.content.size === 0 })($0)")>]
+    let docIsEmpty (doc: obj) : bool = jsNative
+    [<Emit("$0.content.size")>]
+    let docContentSize (doc: obj) : int = jsNative
     [<Emit("$0.hasFocus()")>]
     let viewHasFocus (view: EditorView) : bool = jsNative
     [<Emit("$0.anchor")>]
@@ -260,6 +270,11 @@ module ProseMirror =
     [<Emit("$0.inline($1, $2, $3)")>]
     let private decorationInline (cls: obj) (from: int) (to': int) (attrs: obj) : obj = jsNative
     let decoInline (from: int) (to': int) (attrs: obj) : obj = decorationInline decorationClass from to' attrs
+    [<Emit("$0.node($1, $2, $3)")>]
+    let private decorationNode (cls: obj) (from: int) (to': int) (attrs: obj) : obj = jsNative
+    /// Attributes on the NODE spanning `from..to'` — as opposed to `decoInline`'s span inside
+    /// one. What puts a marker on a whole empty paragraph without putting anything in it.
+    let decoNode (from: int) (to': int) (attrs: obj) : obj = decorationNode decorationClass from to' attrs
     [<Import("DecorationSet", "prosemirror-view")>]
     let private decorationSetClass : obj = jsNative
     [<Emit("$0.create($1, $2)")>]

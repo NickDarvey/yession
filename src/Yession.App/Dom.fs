@@ -361,6 +361,11 @@ module Dom =
         /// did not disappear, it split in two — a line break and a paragraph, which Enter
         /// alone could never tell apart.
         let composerKeys = "Enter sends · Shift+Enter line · Alt+Enter paragraph"
+        /// What an empty composer says, so that a thin unmarked bar reads as somewhere to
+        /// write. Lowercase and wordless of instruction, like every other prompt on the
+        /// surface — `composerKeys` above teaches the keys, and this only says what the bar
+        /// is. Drawn from a node decoration (`Editor.placeholderPlugin`), never content.
+        let composerPlaceholder = "write a message"
         /// What the timeline's pulse means, for a reader who cannot see it pulse (Plan 20).
         let readingHistory = "Reading this session's history"
         /// What stands where history this device does not hold would be (Plan 20). Said only

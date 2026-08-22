@@ -1051,8 +1051,15 @@ let private start () =
                             Some (fun () -> connectionRef |> Option.iter (fun c -> c.SendDraft author))
                         | _ -> None
                     let readOnly = hostReadOnly host
+                    // A prompt where there is a message to write — the same body the send
+                    // binding above belongs to. A queued message being edited already holds
+                    // words, and someone else's draft is not yours to be invited into.
+                    let placeholder =
+                        match fieldOfKey key with
+                        | Some (DraftBody _) -> Dom.Text.composerPlaceholder
+                        | _ -> ""
                     mountedBodies.[key] <-
-                        (fragment, readOnly, Editor.mountEditor host fragment readOnly reportFocus onSubmit)
+                        (fragment, readOnly, Editor.mountEditor host fragment readOnly reportFocus onSubmit placeholder)
                 match mountedBodies.TryGetValue key with
                 | true, (bound, readOnly, handle) when
                     not (System.Object.ReferenceEquals (bound, fragment)) || readOnly <> hostReadOnly host ->
@@ -1403,13 +1410,21 @@ let private start () =
         // The read surface (Plan 15): subscribe once, fold every frame. A malformed frame
         // is dropped rather than thrown — this is a best-effort push leg, and a stream
         // that dies on one bad line takes the whole surface down with it.
-        openQueryStream
-            (SessionRoute.relative SessionRoute.Queries)
-            (fun data ->
-                match Codec.fromString Codec.queryFrame data with
-                | Ok frame -> dispatchRef (QueryFrameMsg frame)
-                | Error _ -> ())
-        |> ignore
+        //
+        // Opened by the `/me` probe's authorized branch below, not here. This stream carries
+        // the same cookie every other fetch does, so on a cold unauthenticated open it can
+        // only 401 — and an EventSource reconnects on its own, so it 401s again and again in
+        // the seconds before the login bounce navigates away. Nobody is waiting on a frame
+        // that cannot arrive, and the console it was filling is the one anybody debugging a
+        // real authorization fault has to read.
+        let subscribeQueries () =
+            openQueryStream
+                (SessionRoute.relative SessionRoute.Queries)
+                (fun data ->
+                    match Codec.fromString Codec.queryFrame data with
+                    | Ok frame -> dispatchRef (QueryFrameMsg frame)
+                    | Error _ -> ())
+            |> ignore
 
         let githubAction (run: unit -> Async<Result<GitHubFlowState option, string>>) =
             dispatchRef (GitHubFlowMsg GitHubBusy)
@@ -1603,6 +1618,12 @@ let private start () =
             syncCatchUpTimer model
             pushPresences ()
             placeTitleCursorsAll ()
+            // The tab's name, which lives outside `#app` and so is the model's to push rather
+            // than Lit's to render. The NAME is computed in the model (`tabTitle`); this only
+            // applies it, and only on a change — assigning `document.title` every render is a
+            // write the browser need not be asked to make.
+            let tab = ClientModel.tabTitle model
+            if Browser.Dom.document.title <> tab then Browser.Dom.document.title <- tab
 
         App.makeProgram doc initial
         |> Program.withSetState setState
@@ -1660,8 +1681,10 @@ let private start () =
             // signed in for this session (docs/plans/07 — peer-scoped secrets).
             navigateTo (SessionRoute.relative Login + "?peer_id=" + urlEncode (PeerId.value peerId))
         else
-            // Authenticated: the Claude panel's status is knowable now.
+            // Authenticated: the Claude panel's status is knowable now, and the read
+            // surface's stream has a cookie that will be accepted.
             refreshClaude ()
+            subscribeQueries ()
             let hello =
                 { PeerId = peerId
                   DisplayName = displayName
