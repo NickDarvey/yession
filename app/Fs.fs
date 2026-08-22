@@ -13,6 +13,9 @@ let private fs : obj = jsNative
 [<Emit("$0.existsSync($1)")>]
 let private existsSyncImpl (fs: obj) (path: string) : bool = jsNative
 
+[<Emit("(function (fs, path) { try { fs.accessSync(path, fs.constants.X_OK); return true } catch { return false } })($0, $1)")>]
+let private accessXSyncImpl (fs: obj) (path: string) : bool = jsNative
+
 [<Emit("$0.readFileSync($1, 'utf8')")>]
 let private readFileSyncImpl (fs: obj) (path: string) : string = jsNative
 
@@ -28,6 +31,11 @@ let private renameSyncImpl (fs: obj) (from: string) (dest: string) : unit = jsNa
 let private writeSyncedImpl (fs: obj) (path: string) (text: string) : unit = jsNative
 
 let exists (path: string) : bool = existsSyncImpl fs path
+
+/// Can THIS process execute that path? Not the same question as `exists` — a path can be
+/// there and unrunnable — and it is the question a named tool has to answer before its
+/// absence is blamed for anything.
+let executable (path: string) : bool = accessXSyncImpl fs path
 
 /// Create a directory (and any missing parents); a no-op when it already exists.
 let ensureDir (path: string) : unit = mkdirSyncImpl fs path

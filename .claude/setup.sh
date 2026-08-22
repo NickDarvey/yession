@@ -91,11 +91,26 @@ fi
 # devenv.local.yaml repoints the devenv input at devenv's OWN source substituted from
 # cache.nixos.org, because the sandbox proxy blocks the github:cachix/devenv fetch the
 # generated flake would otherwise make. Gitignored; laptop/CI use the committed devenv.yaml.
-if src="$(nix build --no-link --print-out-paths "${nixpkgs}#devenv.src" 2>/dev/null)"; then
+# A pin needs a GC ROOT, not just a path. This built with `--no-link`, which roots nothing:
+# the source sat on the collector's dead list from the moment its path was written into the
+# lock. One `nix-collect-garbage` — or nix collecting on its own when this container's fixed
+# disk allowance runs low — and every `devenv shell -- <task>` in the repo dies with
+# `error: path '/nix/store/…-source' is not valid`, about a file devenv was TOLD to use and
+# nothing was keeping. `--out-link` registers an indirect root under /nix/var/nix/gcroots/auto,
+# so what the lock points at lives exactly as long as the link does.
+mkdir -p "$repo/.devenv"
+pinned() { sed -n 's|.*url: path:\(/nix/store/[^?]*\).*|\1|p' "$repo/devenv.local.yaml" 2>/dev/null; }
+if src="$(nix build --out-link "$repo/.devenv/devenv-src" --print-out-paths "${nixpkgs}#devenv.src" 2>/dev/null)"; then
   printf 'inputs:\n  devenv:\n    url: path:%s?dir=src/modules\n' "$src" > "$repo/devenv.local.yaml"
-  echo "setup: wrote $repo/devenv.local.yaml (devenv input -> $src)"
+  echo "setup: wrote $repo/devenv.local.yaml (devenv input -> $src, rooted at .devenv/devenv-src)"
+elif prev="$(pinned)" && [ -n "$prev" ] && ! nix path-info "$prev" >/dev/null 2>&1; then
+  # Nothing resolved AND what a previous session wrote is gone. A dead pin is worse than no
+  # pin: devenv answers every command with nix's `not valid` about a path nobody can explain,
+  # where the committed input at least fails saying what it could not fetch.
+  rm -f "$repo/devenv.local.yaml"
+  echo "setup: could not resolve devenv.src, and the pin from a previous session ($prev) is gone; removed devenv.local.yaml"
 else
-  echo "setup: could not resolve devenv.src from cache (proxy not ready?); skipping devenv.local.yaml"
+  echo "setup: could not resolve devenv.src from cache (proxy not ready?); keeping the existing devenv.local.yaml"
 fi
 
 $hook_only && exit 0
