@@ -1,5 +1,17 @@
 {
   "nodes": {
+    "devenv": {
+      "locked": {
+        "dir": "src/modules",
+        "path": "/nix/store/lxdvfnj1yvx2jg9wn9680792dvhwbx0v-source",
+        "type": "path"
+      },
+      "original": {
+        "dir": "src/modules",
+        "path": "/nix/store/lxdvfnj1yvx2jg9wn9680792dvhwbx0v-source",
+        "type": "path"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1787135253,
@@ -15,6 +27,7 @@
     },
     "root": {
       "inputs": {
+        "devenv": "devenv",
         "nixpkgs": "nixpkgs"
       }
     }
