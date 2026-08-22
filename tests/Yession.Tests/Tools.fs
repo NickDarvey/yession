@@ -122,7 +122,7 @@ let private writeOnly (schema: string) : (string * bool) list =
 /// `read_terminal` against a capability that answers with exactly this tail.
 let private readingTerminal (tail: TerminalTail) =
     let registry =
-        AgentTools.registry { AgentCapabilities.none with ReadTerminal = fun _ _ -> async { return Ok tail } }
+        AgentTools.registry { AgentCapabilities.none with ReadTerminal = fun _ _ _ -> async { return Ok tail } }
     registry.Invoke (call "yession" "read_terminal" """{"terminal":"t1"}""")
 
 let private sessionTests =
@@ -205,7 +205,7 @@ let private sessionTests =
         testCaseAsync "a read that reached the live edge says it is up to date" <|
             async {
                 let! answer =
-                    readingTerminal { Text = "U-Boot 2024.01\n=> "; Elided = 0; From = 0; Through = 2; Length = 2 }
+                    readingTerminal { Text = "U-Boot 2024.01\n=> "; Elided = 0; From = 0; Through = 2; Length = 2; Matched = None }
                 Expect.equal
                     answer
                     (Ok (ToolAnswer.text "lines 0-2 of 2, up to date\nU-Boot 2024.01\n=> "))
@@ -217,7 +217,7 @@ let private sessionTests =
         testCaseAsync "a read with more behind it hands back the line to carry on from" <|
             async {
                 let! answer =
-                    readingTerminal { Text = "boot\n"; Elided = 0; From = 0; Through = 500; Length = 1200 }
+                    readingTerminal { Text = "boot\n"; Elided = 0; From = 0; Through = 500; Length = 1200; Matched = None }
                 Expect.equal
                     answer
                     (Ok (ToolAnswer.text "lines 0-500 of 1200 — read on with from: 500\nboot\n"))
@@ -229,7 +229,7 @@ let private sessionTests =
         // confidently.
         testCaseAsync "a tail that left something out says how much" <|
             async {
-                let! answer = readingTerminal { Text = "=> "; Elided = 4096; From = 700; Through = 1200; Length = 1200 }
+                let! answer = readingTerminal { Text = "=> "; Elided = 4096; From = 700; Through = 1200; Length = 1200; Matched = None }
                 Expect.equal
                     answer
                     (Ok (ToolAnswer.text "lines 700-1200 of 1200, up to date\n[4096 earlier characters omitted]\n=> "))
@@ -238,7 +238,7 @@ let private sessionTests =
 
         testCaseAsync "a terminal that has said nothing says so, rather than answering blank" <|
             async {
-                let! answer = readingTerminal { Text = ""; Elided = 0; From = 0; Through = 0; Length = 0 }
+                let! answer = readingTerminal { Text = ""; Elided = 0; From = 0; Through = 0; Length = 0; Matched = None }
                 Expect.equal answer (Ok (ToolAnswer.text "terminal t1 has said nothing")) "silence is an answer"
             }
 
@@ -250,7 +250,7 @@ let private sessionTests =
                     AgentTools.registry
                         { AgentCapabilities.none with
                             ReadTerminal =
-                                fun _ _ ->
+                                fun _ _ _ ->
                                     async {
                                         return Error "this terminal runs commands as blocks — what one printed comes back from execute_command"
                                     } }

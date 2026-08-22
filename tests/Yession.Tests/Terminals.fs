@@ -2296,7 +2296,7 @@ let private sourceTests =
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
-                let! head = terminals.Tail id (Some 0)
+                let! head = terminals.Tail id (Some 0) None
                 let page = head |> expect
                 Expect.equal page.From 0 "it starts where it was asked to"
                 Expect.stringContains page.Text "ready" "and carries what the device said first"
@@ -2314,9 +2314,9 @@ let private sourceTests =
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
-                let! first = terminals.Tail id (Some 0)
+                let! first = terminals.Tail id (Some 0) None
                 let first = first |> expect
-                let! next = terminals.Tail id (Some first.Through)
+                let! next = terminals.Tail id (Some first.Through) None
                 let next = next |> expect
                 Expect.equal next.From first.Through "the second starts exactly where the first stopped"
                 Expect.isTrue (next.Through >= next.From) "and never goes backwards"
@@ -2334,9 +2334,79 @@ let private sourceTests =
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
-                let! tail = terminals.Tail id None
+                let! tail = terminals.Tail id None None
                 let tail = tail |> expect
                 Expect.equal tail.Through tail.Length "a tail is up to date, and says so"
+            }
+
+        // A wait whose text is already there is not a wait at all. `loopback` says "ready\n"
+        // on attach, so this answers from the transcript without holding anything.
+        testCaseAsync "a wait for something already said returns it at once" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! answer = terminals.Tail id (Some 0) (Some { Until = "ready"; TimeoutSeconds = 5.0 })
+                let answer = answer |> expect
+                Expect.equal answer.Matched (Some true) "it arrived"
+                Expect.stringContains answer.Text "ready" "and the text carries it"
+            }
+
+        // The bug this whole verb exists to make unexpressible. An agent that power-cycled a
+        // board and waited for its login prompt used to match the one from BEFORE the reboot,
+        // instantly, and carry on as though the board were up. A wait looks forward from the
+        // caller's own cursor, so what it has already been handed cannot satisfy it.
+        testCaseAsync "a wait cannot be satisfied by output the caller already read" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! first = terminals.Tail id (Some 0) None
+                let first = first |> expect
+                Expect.stringContains first.Text "ready" "the caller has been handed it"
+                // Waiting from where that read stopped: "ready" is behind the cursor now.
+                let! again = terminals.Tail id (Some first.Through) (Some { Until = "ready"; TimeoutSeconds = 0.05 })
+                let again = again |> expect
+                Expect.equal again.Matched (Some false) "what it already saw does not count as having arrived"
+            }
+
+        // A timeout is an ANSWER: what was said while waiting is usually where the reason it
+        // never came is written.
+        testCaseAsync "a wait that times out says what was said instead" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! answer = terminals.Tail id (Some 0) (Some { Until = "never-appears"; TimeoutSeconds = 0.05 })
+                let answer = answer |> expect
+                Expect.equal answer.Matched (Some false) "it did not arrive"
+                Expect.stringContains answer.Text "ready" "and what DID arrive is the answer"
+            }
+
+        // A read that was not waiting says so, rather than reporting a wait nobody asked for.
+        testCaseAsync "a read that waited for nothing claims neither outcome" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! answer = terminals.Tail id None None
+                Expect.equal (answer |> expect).Matched None "no wait, no verdict"
             }
 
         testCaseAsync "an attached source's bytes reach the transcript" <|
@@ -2432,7 +2502,7 @@ let private sourceTests =
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
 
-                match! terminals.Tail (expect device) None with
+                match! terminals.Tail (expect device) None None with
                 | Error e -> failwithf "a device has nothing but its transcript to read: %s" e
                 | Ok tail ->
                     // `loopback` greets with "ready\n" on attach, so there is something to read
@@ -2455,7 +2525,7 @@ let private sourceTests =
                 let! closed = terminals.Close id "the device went away"
                 Expect.isOk closed "the terminal closes"
 
-                match! terminals.Tail id None with
+                match! terminals.Tail id None None with
                 | Error e -> failwithf "a closed device still has a recording: %s" e
                 | Ok tail -> Expect.stringContains tail.Text "ready" "and it still reads"
             }
@@ -2469,7 +2539,7 @@ let private sourceTests =
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
 
-                match! terminals.Tail (expect shell) None with
+                match! terminals.Tail (expect shell) None None with
                 | Ok _ -> failwith "a shell's output is its blocks', and reading it twice is two answers to one question"
                 | Error reason -> Expect.stringContains reason "execute_command" "and it says where the answer is"
             }

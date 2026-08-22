@@ -510,7 +510,7 @@ let private agentLeaseTests =
                 async {
                     // `execute_command` answers with what a command printed — except for the
                     // one command that has not printed an answer and never will on its own.
-                    match! terminals.Tail id None with
+                    match! terminals.Tail id None None with
                     | Ok _ -> failwith "a shell's output is its blocks', and reading it twice is two answers to one question"
                     | Error reason -> Expect.stringContains reason "execute_command" "so it is refused, and says where the answer is"
 
@@ -524,7 +524,7 @@ let private agentLeaseTests =
                             20000)
                     let! wedged = until 8000 (fun () -> terminals.Interactive id)
                     Expect.isTrue wedged "the block took the screen"
-                    match! terminals.Tail id None with
+                    match! terminals.Tail id None None with
                     | Error e -> failwithf "there is no command answer to read instead, so the screen is the only one: %s" e
                     | Ok _ ->
                         match! terminals.Write id ActorRef.Agent "yes\r" with

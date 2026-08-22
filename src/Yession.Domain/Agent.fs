@@ -238,6 +238,24 @@ type CheckPending = QueueId -> Async<Result<PendingOutcome, string>>
 /// `execute_command` and the classifier that gates it.
 type WriteTerminal = TerminalId -> string -> Async<Result<string, string>>
 
+/// Holding a read open until the device says a particular thing.
+///
+/// The missing half of `write_terminal`. A device is request/response with no framing: you
+/// type `AT\r` and the answer arrives when it arrives, so a read taken immediately after
+/// returns nothing and a read taken later is a guess about how much later. Polling burns
+/// turns and still races the device.
+type TerminalWait =
+    { /// LITERAL text, never a pattern. What this is for is "wait for `login: `", and a
+      /// regular expression composed by a model over bytes a device chose is a
+      /// catastrophic-backtracking risk with a plausible cover story. The cost is real —
+      /// "wait for a prompt matching `[#$>] $`" cannot be said — and if it bites, the fix is
+      /// a bounded matcher here rather than handing the regex engine to the model.
+      Until : string
+      /// How long to hold before answering with what WAS said. Bounded here rather than by
+      /// the caller: a tool call that could be asked to wait an hour is a turn somebody
+      /// loses.
+      TimeoutSeconds : float }
+
 /// A window of what a terminal has said, and where in its recording that window sits.
 ///
 /// It carries its own bounds because a reader that cannot say WHERE it read cannot read on.
@@ -261,7 +279,11 @@ type TerminalTail =
       Through : int
       /// One past the last line the terminal has. `Through = Length` means this window
       /// reaches the live edge, and is the only way a reader can tell that it does.
-      Length : int }
+      Length : int
+      /// Whether what the caller was waiting for arrived. `None` when it was not waiting.
+      /// `Some false` is a timeout, and the text is what WAS said — usually where the answer
+      /// is, which is why a timeout is an answer here rather than an error.
+      Matched : bool option }
 
 /// Read what a terminal with no blocks has said (Plan 19).
 ///
@@ -278,7 +300,9 @@ type TerminalTail =
 /// `from` is a line a previous read handed back, or `None` for the tail. Reading an hour back
 /// is not more of a claim on the device than reading the last line — it is the same read from
 /// a different place, which is why it is an argument rather than a second verb.
-type ReadTerminal = TerminalId -> int option -> Async<Result<TerminalTail, string>>
+///
+/// `waitFor` is the same read held open until the device says something. See `TerminalWait`.
+type ReadTerminal = TerminalId -> int option -> TerminalWait option -> Async<Result<TerminalTail, string>>
 
 /// One terminal, as the AGENT is told about it (Plan 20, stage 3). What a person reads off a
 /// row in the list, in the shape a model reads — the same facts, because they are looking at
@@ -449,7 +473,7 @@ module AgentCapabilities =
         { ExecuteCommand = fun _ -> async { return Error "no terminal capability" }
           CheckPending = fun _ -> async { return Error "no terminal capability" }
           WriteTerminal = fun _ _ -> async { return Error "no terminal capability" }
-          ReadTerminal = fun _ _ -> async { return Error "no terminal capability" }
+          ReadTerminal = fun _ _ _ -> async { return Error "no terminal capability" }
           OpenTerminal = fun _ _ -> async { return Error "no terminal capability" }
           CloseTerminal = fun _ -> async { return Error "no terminal capability" }
           ListTerminals = fun () -> async { return Error "no terminal capability" }
