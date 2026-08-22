@@ -1248,6 +1248,24 @@ let private chromeTests =
         // tests: the accessibility floor is asserted once and centrally, and a surface that
         // is invisible to the scan is a surface the floor does not cover.
         let listShell = Support.render { representativeModel with TerminalList = true }
+        // Every notice at once — a dead feed, a credential the provider rejected, a session
+        // that stopped, and a deployment that can keep none of it. Scanned here for the same
+        // reason the terminal list is: a surface the floor's scan cannot see is a surface the
+        // floor does not cover, and the disclosures these notices fold their detail into are
+        // controls like any other.
+        let noticeShell =
+            Support.render
+                { representativeModel with
+                    Connection = Disconnected (Some "the session did not answer")
+                    Manager = Some "http://127.0.0.1:8321"
+                    CanKeepHistory = false
+                    EphemeralStorage = true
+                    EventConsumer = { representativeModel.EventConsumer with Feed = FeedStalled "ECONNREFUSED" }
+                    GitHub =
+                        { representativeModel.GitHub with
+                            Status =
+                                { representativeModel.GitHub.Status with
+                                    MineCredential = Some { Kind = "static"; SignInRequired = Some "github rejected this credential" } } } }
 
         // Every input either wears the ONE field face (a ring that goes blue on focus) or
         // wears nothing at all, because the row around it carries the stroke. What is ruled
@@ -1263,7 +1281,7 @@ let private chromeTests =
         // The failure this pins is silent by nature: a control with `outline-2` and no
         // `outline` draws nothing, and you only find out with a keyboard.
         testCase "every button and link declares a visible focus ring" <| fun () ->
-            for classes in classesOf [ "button"; "a " ] (shell + settingsShell + listShell) do
+            for classes in classesOf [ "button"; "a "; "summary" ] (shell + settingsShell + listShell + noticeShell) do
                 Expect.isTrue
                     (classes.Contains "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue")
                     (sprintf "a control has no visible focus ring: %s" classes)
@@ -1291,6 +1309,50 @@ let private chromeTests =
         // while breaking nothing, which is the shape this suite does not keep (AGENTS.md,
         // "Writing tests"). That focus is VISIBLE is the invariant, and the cases above are
         // what hold it.
+
+        // --- what a notice says first -----------------------------------------------------
+
+        /// The rendered page with every `<details …data-detail>` cut out of it: what a notice
+        /// says WITHOUT anyone opening anything.
+        let rec onTheSurface (html: string) : string =
+            match html.IndexOf Dom.Hooks.detail with
+            | -1 -> html
+            | at ->
+                let start = html.LastIndexOf ("<details", at)
+                let stop = html.IndexOf ("</details>", at)
+                if start < 0 || stop < 0 then html
+                else onTheSurface (html.Remove (start, stop + "</details>".Length - start))
+
+        // A disclosure is only a disclosure if the browser is the one making it. Written as a
+        // real `<details>`/`<summary>`, it arrives keyboard-operable and announced; written as
+        // a div with a click handler it arrives as neither, and looks identical.
+        testCase "every folded mechanism is a real details/summary" <| fun () ->
+            let rec check (from: int) (n: int) =
+                match noticeShell.IndexOf (Dom.Hooks.detail, from) with
+                | -1 -> n
+                | at ->
+                    let start = noticeShell.LastIndexOf ("<", at)
+                    let stop = noticeShell.IndexOf ("</details>", at)
+                    Expect.equal (noticeShell.Substring (start, "<details".Length)) "<details" "the element is a details"
+                    Expect.isTrue
+                        (stop > at && noticeShell.Substring(at, stop - at).Contains "<summary")
+                        "and it opens by a summary, not by a handler on something else"
+                    check (stop + 1) (n + 1)
+            Expect.isTrue (check 0 0 > 0) "the notices this shell renders do fold something away"
+
+        // The half of the split that can regress silently. Leading with the consequence is
+        // visible the moment anybody looks at the screen; losing the mechanism is not — a
+        // fault nobody can read is a fault nobody can report, and the words that go missing
+        // are the provider's and the transport's own.
+        testCase "a notice keeps its mechanism, and keeps it off the surface" <| fun () ->
+            let surface = onTheSurface noticeShell
+            for what, mechanism in
+                [ "the transport's reason for stopping", "the session did not answer"
+                  "the feed's fault", "ECONNREFUSED"
+                  "the provider's own words", "github rejected this credential"
+                  "why nothing can be kept here", Dom.Text.historyNotKeptWhy ] do
+                Expect.isTrue (noticeShell.Contains mechanism) (sprintf "%s is still in the document" what)
+                Expect.isFalse (surface.Contains mechanism) (sprintf "%s is not also on the surface" what)
     ]
 
 // What the session page must keep saying, whatever it comes to look like: one person wears

@@ -603,8 +603,14 @@ module Style =
 
     /// The degradation strip between the header and the timeline: a hairline notice, never a
     /// modal and never a blocker — the client below it stays fully usable.
+    ///
+    /// `flex-wrap`, for the reason `signInPrompt` below carries it: the row is three things
+    /// now — a status, what it costs you, and the disclosure holding the machinery — and on a
+    /// phone the third has to be able to take the line under the second rather than squeeze
+    /// it off the edge.
     let degradedBanner =
-        "shrink-0 flex items-baseline gap-3 px-8 py-2 bg-surface max-md:px-4 " + Stroke.dividerBottom
+        "shrink-0 flex flex-wrap items-baseline gap-x-3 gap-y-1 px-8 py-2 bg-surface max-md:px-4 "
+        + Stroke.dividerBottom
 
     /// The sign-in prompt, in the same slot and the same hairline as the degradation strip:
     /// a notice over the timeline, never a modal and never a blocker. It carries a real
@@ -620,6 +626,23 @@ module Style =
 
     /// The reason, taking the room between the status word and the button.
     let signInPromptReason = "mr-auto"
+
+    /// The mechanism behind a notice, folded away (the degradation strip, the sign-in
+    /// prompt, the reconnect card, a credential's fault, the history-store note, a terminal
+    /// that stopped marking). What every one of those surfaces has to say FIRST is what it
+    /// costs the reader; the provider's own words, the transport's reason and the browser's
+    /// storage rules are what they go looking for afterwards, and a notice that leads with
+    /// them buries the sentence somebody actually needed.
+    ///
+    /// A real `<details>`/`<summary>`, like every other disclosure in the product: the
+    /// browser's own, so it arrives keyboard-operable and correctly announced.
+    let detailNote = "min-w-0"
+    let detailSummary =
+        cls [ small; "cursor-pointer list-none"
+              "hover:text-ink-dim transition-colors duration-150 ease-out"
+              focusRing ]
+    /// The words inside, on the summary's own column so they read as its continuation.
+    let detailBody = small + " block pt-1"
 
     // --- Editable session title ------------------------------------------------------------
 

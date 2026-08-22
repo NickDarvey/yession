@@ -195,10 +195,10 @@ let private tableTemplate
     let emptyWord =
         match all, query.Show.IsEmpty with
         | [], _ -> "no sessions yet"
-        | _, true -> "nothing selected — pick active or archived above"
+        | _, true -> "no filter selected — pick active or archived above"
         | _, false ->
             let hidden = List.length all - List.length views
-            sprintf "no matches — %d hidden" hidden
+            sprintf "no sessions match — %d hidden" hidden
     let rows =
         match views with
         | [] ->
@@ -579,7 +579,7 @@ let private openingPage (target: string) : string =
     } catch (e) {
       if (attempts >= 40) {
         document.getElementById('status').textContent =
-          'Started, but not answering after 20 seconds. ' +
+          'The session started, but its address is not answering after 20 seconds. ' +
           'If this deployment maps session ports through a proxy, that mapping has not appeared.'
         return
       }

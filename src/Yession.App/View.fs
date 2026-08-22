@@ -202,6 +202,35 @@ module View =
         | PeerRef peer -> ClientModel.nameOf peer model
         | UserRef _ | ActorRef.Agent | ActorRef.SessionProcess | ActorRef.System -> authorLabel actor
 
+    /// The mechanism behind a notice, folded away under one word.
+    ///
+    /// Every surface that reports a fault has two things to say and they are not equals: what
+    /// it costs the reader, and why it is happening. The second used to sit beside the first
+    /// in the same faint sentence — a transport's reason, an OAuth provider's words, the
+    /// browser's storage rules — and on the strip over the timeline it was CONCATENATED with
+    /// the first by a `·`, so the promise that the work was safe arrived as the tail of a
+    /// sentence about an attempt counter.
+    ///
+    /// So: the consequence stays on the surface, and this takes the rest. A real
+    /// `<details>`/`<summary>`, like the timeline's tool runs and a block's facts — the
+    /// browser's own disclosure, so it is keyboard-operable and announced without any of it
+    /// being this view's to arrange. Nothing is hidden from a reader who cannot open it
+    /// either: the words are in the document, which is what a `<details>` is FOR and what a
+    /// tooltip would not have been.
+    ///
+    /// TOTAL over an empty list, so a surface with no mechanism to explain renders no
+    /// control — a disclosure over nothing is a promise of detail that is not there.
+    let private detailNote (token: string) (why: string list) : TemplateResult =
+        match why |> List.filter (fun w -> w <> "") with
+        | [] -> Lit.nothing
+        | why ->
+            let line (w: string) = html $"""<span class="{Style.detailBody}">{w}</span>"""
+            html $"""
+                <details class="{Style.detailNote}" data-detail="{token}">
+                  <summary class="{Style.detailSummary}">{Dom.Text.details}</summary>
+                  {why |> List.map line}
+                </details>"""
+
     let private messageStatusLabel =
         function
         | Complete -> Dom.Text.complete
@@ -244,8 +273,16 @@ module View =
             // the same address, so the doc in this browser is still its doc and syncs on
             // reconnect. Addressed by port it returns somewhere new, and everything written
             // here since it went is stranded — say so before they click, not after.
+            //
+            // The transport's own reason for stopping goes BEHIND the disclosure, with the
+            // storage rule when there is one. It used to open this card — so the sentence
+            // somebody reads before pressing a button began with a fault they can do nothing
+            // about, and the one that told them whether their work was safe came second.
             let reopenPromise =
                 if model.EphemeralStorage then Dom.Text.reopenPromiseEphemeral else Dom.Text.reopenPromise
+            let why =
+                [ reason
+                  if model.EphemeralStorage then Dom.Text.ephemeralAddress ]
             Some (
                 html
                     $"""
@@ -254,7 +291,8 @@ module View =
                       <div class="{Style.noAgentPrompt}">
                         <span class="{Style.noAgentEdge}"></span>
                         <div class="{Style.noAgentBody}">
-                          <span class="{Style.small}">{reason}. {reopenPromise}</span>
+                          <span class="{Style.small}">{reopenPromise}</span>
+                          {detailNote "session-gone" why}
                           <a class="{Style.cls [ Style.btnPrimary; Style.noAgentAction ]}"
                              href="{target}"
                              data-session-reopen="{target}"
@@ -303,12 +341,20 @@ module View =
                   <button type="button" class="{Style.btn}" data-retry-now
                           @click={Ev(fun _ -> actions.RetryNow ())}>{Dom.Text.retryNow}</button>"""
             | _ -> Lit.nothing
+        // The history leg's own line. The status word is the whole of what this row is for;
+        // the fault behind it went inline once — `history paused · ECONNREFUSED` — which put
+        // a string only an operator can read in a column a person reads for its status.
         let feedLine =
             match consumer.Feed with
             | FeedLive -> Lit.nothing
             | FeedRetrying (attempt, reason) ->
-                html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>history retrying · {reason} ({attempt})</span>"""
-            | FeedStalled reason -> html $"""<span class="{Style.statusErr}">history paused · {reason}</span>"""
+                html $"""
+                  <span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>history retrying</span>
+                  {detailNote "feed" [ sprintf "%s · attempt %d" reason attempt ]}"""
+            | FeedStalled reason ->
+                html $"""
+                  <span class="{Style.statusErr}">history paused</span>
+                  {detailNote "feed" [ reason ]}"""
         // The offer REPLACES the sync row and the reason line rather than sitting under
         // them: a red dot reading "Disconnected", its reason, and a button to fix it would
         // be saying the same thing three times. The feed line stays — the history leg is a
@@ -456,7 +502,16 @@ module View =
     let private credentialReason (hook: string) (scopeChoice: string) (credential: ConnectionView) : TemplateResult =
         match credential.SignInRequired with
         | None -> Lit.nothing
-        | Some reason -> html $"""<span class="{Style.small}" {hook}="{scopeChoice}">{reason}</span>"""
+        | Some reason ->
+            // The row above already says the consequence, in the words the prompt over the
+            // timeline uses: this credential needs signing in again. So the provider's own
+            // sentence is the mechanism here, and it folds away like every other one — the
+            // hook stays on it, so a test still reads the fault off the scope it was found on.
+            html $"""
+                <details class="{Style.detailNote}" {hook}="{scopeChoice}" data-detail="credential">
+                  <summary class="{Style.detailSummary}">{Dom.Text.details}</summary>
+                  <span class="{Style.detailBody}">{reason}</span>
+                </details>"""
 
     /// The Claude connection panel (Plan 08), living in the settings drawer: status per
     /// sign-in scope, the OAuth flow (approve on claude.ai → paste the shown code), and
@@ -543,7 +598,7 @@ module View =
             match model.Models with
             | ModelsUnknown -> html $"""<span class="{Style.small}" data-model-note="pending">…</span>"""
             | ModelsLoaded [] ->
-                html $"""<span class="{Style.small}" data-model-note="empty">no models offered</span>"""
+                html $"""<span class="{Style.small}" data-model-note="empty">this provider offered no models</span>"""
             | ModelsLoaded _ -> Lit.nothing
             | ModelsUnavailable reason ->
                 html $"""<span class="{Style.small}" data-model-note="unavailable">{reason}</span>"""
@@ -699,6 +754,7 @@ module View =
                 <section class="{Style.sideSection}" data-history-store="none">
                   <span class="{Style.label}">history</span>
                   <span class="{Style.small}">{Dom.Text.historyNotKept}</span>
+                  {detailNote "history-store" [ Dom.Text.historyNotKeptWhy ]}
                 </section>"""
 
     let private settingsPane (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
@@ -772,7 +828,8 @@ module View =
             html $"""
                 <section class="{Style.signInPrompt}" data-signin-required="{provider}">
                   <span class="{Style.statusErr}"><span class="{Style.statusDot}"></span>{provider}</span>
-                  <span class="{Style.cls [ Style.small; Style.signInPromptReason ]}">{reason}</span>
+                  <span class="{Style.small}">{Dom.Text.signInLost provider}</span>
+                  <span class="{Style.signInPromptReason}">{detailNote "signin" [ reason ]}</span>
                   <button type="button" class="{Style.btnPrimary}"
                           data-signin-again data-settings-toggle="prompt"
                           @click={Ev(fun _ -> actions.RevealSettings ())}>{Dom.Text.signInAgain}</button>
@@ -789,11 +846,24 @@ module View =
         // the one moment someone would rely on it.
         let localPromise =
             if model.EphemeralStorage then Dom.Text.localFallbackEphemeral else Dom.Text.localFallback
-        let strip (token: string) (status: TemplateResult) (detail: string) =
+        // Why the promise reads the way it does, folded away. Only the ephemeral deployment
+        // has anything to explain: on a stable address the sentence IS the whole story.
+        let localPromiseWhy =
+            [ if model.EphemeralStorage then Dom.Text.ephemeralAddress ]
+        // One shape for every leg: the status word, what it costs you, and — behind the
+        // disclosure — the machinery that produced it. The `detail` used to be one string,
+        // which is how a retrying feed came to read "ECONNREFUSED · attempt 3 · Your work is
+        // saved…": three unlike facts spliced into one line by a middot, led by the one
+        // nobody can act on.
+        let strip (token: string) (status: TemplateResult) (says: string) (why: string list) =
+            let consequence =
+                if says = "" then Lit.nothing
+                else html $"""<span class="{Style.small}">{says}</span>"""
             html $"""
                 <section class="{Style.degradedBanner}" data-degraded="{token}">
                   {status}
-                  <span class="{Style.small}">{detail}</span>
+                  {consequence}
+                  {detailNote "degraded" why}
                 </section>"""
         match model.Connection, model.EventConsumer.Feed with
         // The session leg subsumes the history leg: a Process that cannot be reached cannot
@@ -806,22 +876,26 @@ module View =
             strip
                 Dom.Text.degradedOffline
                 (html $"""<span class="{Style.statusErr}">not connected</span>""")
-                reason
+                ""
+                [ reason ]
         | Reconnecting, _ ->
             strip
                 Dom.Text.degradedReconnecting
                 (html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>reconnecting</span>""")
                 localPromise
+                localPromiseWhy
         | _, FeedRetrying (attempt, reason) ->
             strip
                 Dom.Text.feedRetrying
                 (html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>history retrying</span>""")
-                (sprintf "%s · attempt %d · %s" reason attempt localPromise)
+                localPromise
+                (sprintf "%s · attempt %d" reason attempt :: localPromiseWhy)
         | _, FeedStalled reason ->
             strip
                 Dom.Text.feedPaused
                 (html $"""<span class="{Style.statusErr}">history paused</span>""")
-                (reason + " · " + localPromise)
+                localPromise
+                (reason :: localPromiseWhy)
         | _, FeedLive -> Lit.nothing
 
     let private headerStatus (model: ClientModel) : TemplateResult =
@@ -1775,7 +1849,8 @@ module View =
                 html $"""
                     <div class="{Style.terminalBandRow}" data-terminal-lost="{TerminalId.value terminal}" aria-live="polite">
                       <span class="{Style.statusErr}">not marking</span>
-                      <span class="{Style.small}">queued commands held</span>
+                      <span class="{Style.small}">{Dom.Text.terminalNotMarking}</span>
+                      {detailNote "terminal-lost" [ Dom.Text.terminalNotMarkingWhy ]}
                       <div class="ml-auto flex items-center gap-2">
                         <button type="button" class="{Style.btnPrimary}" data-terminal-rearm="{TerminalId.value terminal}"
                                 @click={Ev(fun _ -> actions.RearmTerminal terminal)}>Re-arm</button>
