@@ -782,11 +782,16 @@ let private postForm (url: string) (body: string) : JS.Promise<obj> = Fable.Core
 
 /// A GET that keeps its status. `Interop.getText` discards it, and a route whose whole job
 /// is to distinguish "here it is" from "no such session" needs the number.
-[<Emit("fetch($0).then(async r => ({ status: r.status, cacheControl: '', body: await r.text() }))")>]
+[<Emit("fetch($0).then(async r => ({ status: r.status, cacheControl: '', contentType: r.headers.get('content-type') || '', body: await r.text() }))")>]
 let private getReply (url: string) : JS.Promise<obj> = Fable.Core.Util.jsNative
 
 [<Emit("$0.status")>]
 let private statusOfReply (reply: obj) : int = Fable.Core.Util.jsNative
+
+/// What the answer said it WAS. A route a browser navigates to is not fully described by its
+/// status: `text/plain` is a message on a laptop and a downloaded `document.txt` on a phone.
+[<Emit("$0.contentType")>]
+let private contentTypeOfReply (reply: obj) : string = Fable.Core.Util.jsNative
 
 [<Emit("$0.body")>]
 let private bodyOfReply (reply: obj) : string = Fable.Core.Util.jsNative
@@ -809,6 +814,100 @@ let private managerWithUi (name: string) =
         { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
             Strategy = Some Strategy.localhost }
         (Some ManagerUi.tryHandle)
+
+/// A deployment's front door that has not mapped anything yet — and can be told it has.
+///
+/// It answers `404 not found`, because that is what a reverse proxy with no route for an
+/// address says, and that is the whole hazard: an address that ANSWERS and a session that
+/// answers are different facts. A reconciler driven by `/sessions/stream` reaches a
+/// just-created session a few hundred milliseconds after the Manager has launched it, and
+/// everything that arrives in that window meets this.
+let private startFrontDoor () : Async<Interop.HttpServer * string * (unit -> unit)> =
+    async {
+        let mutable mapped = false
+        let handler (_: Interop.IncomingMessage) (res: Interop.ServerResponse) =
+            if mapped then
+                res.writeHead (200, Fable.Core.JsInterop.createObj [ "content-type", box "text/html; charset=utf-8" ]) |> ignore
+                res.``end`` "<!doctype html><title>a session</title>"
+            else
+                res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
+                res.``end`` "not found"
+        let server = Interop.createServer handler
+        let! listening =
+            Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
+        return listening, sprintf "http://127.0.0.1:%d" (Interop.serverPort listening), (fun () -> mapped <- true)
+    }
+
+/// A Manager publishing its sessions at a front door this test owns, with one session created
+/// and running. Hoisted because the two cases below need exactly this arrangement and differ
+/// only in what the door is doing when they ask.
+let private managerBehindFrontDoor (name: string) =
+    async {
+        let! door, doorOrigin, mapIt = startFrontDoor ()
+        let dataDir =
+            sprintf "tests/Yession.Tests/out/.data/%s-%d" name (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+        let! managerPort = freePort ()
+        let origin = sprintf "http://127.0.0.1:%d" managerPort
+        let! pm =
+            ProcessManager.createWithUi
+                { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                    Strategy = Some Strategy.localhost
+                    ManagerPort = Some managerPort
+                    // Two origins deliberately. The Manager keeps its own, because it is the
+                    // OIDC issuer a launched session fetches discovery against and that has
+                    // to be an address which really answers; the SESSIONS are published at
+                    // the door, which is the half `/open` has to wait for.
+                    Public = PublicAccess.create origin (doorOrigin + "/s/{id}") |> expect }
+                (Some ManagerUi.tryHandle)
+        pm.CreateSession name "" |> expect |> ignore
+        let sessionId = SessionId.create name |> expect
+        let! launched = pm.Launch sessionId
+        Expect.isTrue (Result.isOk launched) "the session launches"
+        return pm, origin, mapIt, door
+    }
+
+/// `/sessions/{id}/ready`: whether this deployment's front door reaches the session yet.
+///
+/// The question `/open`'s landing page asks before it hands the browser over, and the one it
+/// used to answer by GUESSING — a `no-cors` fetch of the address, which settles for the front
+/// door's 404 exactly as it settles for the session, so whoever pressed Create was redirected
+/// into that 404 a beat before the mapping appeared. On a phone a `text/plain` body is not
+/// even a message: it is a file called `document.txt`.
+let private readinessTests =
+    testList "Is the session reachable yet (Plan 11)" [
+        testCaseAsync "a session the front door has not mapped yet is not ready" <|
+            async {
+                let! pm, baseUrl, _, door = managerBehindFrontDoor "ready-miss"
+                let! answer = getReply (baseUrl + "/sessions/ready-miss/ready") |> Async.AwaitPromise
+                Expect.equal (statusOfReply answer) 503 "the session is running and its published address is not"
+                do! pm.StopAll ()
+                door.close ignore
+            }
+
+        testCaseAsync "a session whose published address answers is ready" <|
+            async {
+                let! pm, baseUrl, mapIt, door = managerBehindFrontDoor "ready-hit"
+                mapIt ()
+                let! answer = getReply (baseUrl + "/sessions/ready-hit/ready") |> Async.AwaitPromise
+                Expect.equal (statusOfReply answer) 200 "the door routes to it now, so it is reachable"
+                do! pm.StopAll ()
+                door.close ignore
+            }
+
+        // The downstream half of the same fault. Whatever goes wrong upstream, a browser is
+        // the only thing that ever lands on `/open` — so what it lands on has to be readable
+        // by one. `text/plain` reads as a download on a phone, which is how a refusal with
+        // words in it reached its operator as a file called `document.txt`.
+        testCaseAsync "an /open that cannot hand the browser over answers a page, not a download" <|
+            async {
+                let! pm = managerWithUi "open-page"
+                let baseUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
+                let! missing = getReply (baseUrl + "/sessions/no-such-session/open") |> Async.AwaitPromise
+                Expect.equal (statusOfReply missing) 404 "an unknown session is still a 404"
+                Expect.stringContains (contentTypeOfReply missing) "text/html" "and it is a page a browser can show"
+                do! pm.StopAll ()
+            }
+    ]
 
 /// The half of archiving that cannot be decided purely: it stops a real child, and the
 /// refusal has to hold over the wire and not just over a value.
@@ -2010,6 +2109,7 @@ let tests =
         Tag.needs "Session registry stream over SSE (Plan 09)" [ Tag.Ports; Tag.Native ] (fun () -> registryStreamTests)
         Tag.needs "Management UI flow (Step 25)" [ Tag.Ports; Tag.Native ] (fun () -> uiFlowTests)
         Tag.needs "Archiving over the process boundary" [ Tag.Ports; Tag.Native ] (fun () -> archiveFlowTests)
+        Tag.needs "Is the session reachable yet (Plan 11)" [ Tag.Ports; Tag.Native ] (fun () -> readinessTests)
         // `Ports` only: a ProcessManager binds its control endpoint on creation, but nothing
         // here launches a child — the invariant is about the moment BEFORE the first launch.
         Tag.needs "Registry writes announce themselves (UX review P0)" [ Tag.Ports ] (fun () -> registryPublishTests)

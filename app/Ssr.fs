@@ -52,7 +52,10 @@ let private stripBinding (s: string) : string = jsNative
 [<Emit("/=\"?$/.test($0)")>]
 let private endsWithAttr (s: string) : bool = jsNative
 
-let private escapeText (s: string) =
+/// Public for the same reason `escapeAttr` is: the Manager's own standalone pages (Plan 11's
+/// `/open` landing page and its refusals) are sprintf'd rather than Lit-rendered, and they put
+/// a session id and a refusal's words into TEXT. One escaper each, shared with the renderer.
+let escapeText (s: string) =
     s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;")
 
 /// Public because the Manager's own standalone pages need it too (Plan 11's `/open`

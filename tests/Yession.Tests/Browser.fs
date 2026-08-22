@@ -26,6 +26,8 @@ open System.IO
 open System.Net
 open System.Net.Http
 open System.Diagnostics
+open System.Text.Json
+open System.Threading
 open System.Threading.Tasks
 open Microsoft.Playwright
 
@@ -1933,6 +1935,237 @@ let mountedTests =
                 }))
     ]
 
+// --- Creating a session behind a front door (browser) -------------------------------------
+//
+// The deployment nothing else here has: ONE public origin, with the Manager at its root and
+// every session under `/s/<id>`, fronted by a door that learns where those sessions really
+// are from the Manager's registry stream (docs/plans/09, docs/plans/10). That door is BEHIND
+// — a session exists and is running for a moment before a mapping for it appears — and what
+// it answers in that window is `404 not found`.
+//
+// Which is the whole hazard `/open` exists for, and the one it used to get wrong: "the
+// address answered" and "the session answered" are different facts, and a page that cannot
+// tell them apart hands whoever pressed Create straight into the front door's miss. As a
+// `text/plain` body, that is a message on a laptop and a file called `document.txt` on a
+// phone.
+
+let private FRONT_PORT = 8190
+let private FRONT_MANAGER_PORT = 8191
+let private FRONT_SESSION = "front-default"
+let private frontDataDir = "tests/browser/.data-front"
+
+/// The operator's front door, with its reconciler's lag made into something a test can
+/// depend on: a session is routed only from its `lag`-th request onward.
+///
+/// Counted in REQUESTS, not milliseconds, so no sleep anywhere decides whether this passes —
+/// and sticky once it catches up, like a real reconciler: a mapping that has appeared does not
+/// go away again. Where each session actually listens is read off the Manager's registry
+/// stream, the same subscription an operator's proxy holds open, because a fixture that was
+/// TOLD the port would not be standing where the lag is.
+let private startFrontDoor (publicPort: int) (managerPort: int) (lag: int) : HttpListener =
+    let listener = new HttpListener ()
+    listener.Prefixes.Add (sprintf "http://127.0.0.1:%d/" publicPort)
+    listener.Start ()
+    let client = new HttpClient (new HttpClientHandler (AllowAutoRedirect = false, UseCookies = false))
+    let ports = System.Collections.Concurrent.ConcurrentDictionary<string, int> ()
+    let asked = System.Collections.Concurrent.ConcurrentDictionary<string, int> ()
+    // The registry, read the way a reconciler reads it. Retried because the door has to be up
+    // BEFORE the Manager — the Manager's public origin is this port, and its first session
+    // fetches OIDC discovery against it while booting. (This delay is a reconnect backoff in
+    // the fixture's plumbing; nothing the case asserts waits on a clock.)
+    let rec watching () =
+        async {
+            try
+                use registry = new HttpClient (Timeout = Timeout.InfiniteTimeSpan)
+                let! stream =
+                    registry.GetStreamAsync (sprintf "http://127.0.0.1:%d/sessions/stream" managerPort)
+                    |> Async.AwaitTask
+                use reader = new StreamReader (stream)
+                let mutable live = true
+                while live do
+                    let! line = reader.ReadLineAsync () |> Async.AwaitTask
+                    if isNull line then live <- false
+                    elif line.StartsWith "data:" then
+                        use frame = JsonDocument.Parse (line.Substring 5)
+                        for entry in frame.RootElement.GetProperty("sessions").EnumerateArray () do
+                            ports.[entry.GetProperty("id").GetString ()] <- entry.GetProperty("port").GetInt32 ()
+            with _ -> ()
+            do! Async.Sleep 100
+            return! watching ()
+        }
+    Async.Start (watching ())
+    let sessionIn (path: string) =
+        let m = Text.RegularExpressions.Regex.Match (path, "^/s/([^/]+)(/.*)?$")
+        if m.Success then Some m.Groups.[1].Value else None
+    let routes (id: string) =
+        let asks = asked.AddOrUpdate (id, 1, fun _ n -> n + 1)
+        asks > lag && ports.ContainsKey id
+    let copyHeader (reply: HttpResponseMessage) (ctx: HttpListenerContext) (name: string) =
+        let values =
+            match reply.Headers.TryGetValues name with
+            | true, vs -> List.ofSeq vs
+            | _ ->
+                match reply.Content.Headers.TryGetValues name with
+                | true, vs -> List.ofSeq vs
+                | _ -> []
+        for v in values do ctx.Response.Headers.Add (name, v)
+    let rec loop () =
+        async {
+            match! Async.Catch (listener.GetContextAsync () |> Async.AwaitTask) with
+            | Choice1Of2 ctx ->
+                Async.Start (
+                    async {
+                        try
+                            let raw = ctx.Request.RawUrl
+                            let session = sessionIn (raw.Split('?').[0])
+                            match session with
+                            | Some id when not (routes id) ->
+                                // What a front door says about an address it has no route
+                                // for. Verbatim, because being indistinguishable from a
+                                // session's own answer is the point.
+                                ctx.Response.StatusCode <- 404
+                                ctx.Response.ContentType <- "text/plain"
+                                let bytes = Text.Encoding.UTF8.GetBytes "not found"
+                                ctx.Response.OutputStream.Write (bytes, 0, bytes.Length)
+                            | _ ->
+                                // The path goes through UNCHANGED: a session strips its own
+                                // `/s/<id>` mount (docs/plans/10), and the Manager is what
+                                // this origin's root is.
+                                let port =
+                                    match session with
+                                    | Some id -> ports.[id]
+                                    | None -> managerPort
+                                let target = sprintf "http://127.0.0.1:%d%s" port raw
+                                use request = new HttpRequestMessage (HttpMethod ctx.Request.HttpMethod, target)
+                                if ctx.Request.HasEntityBody then
+                                    use buffer = new MemoryStream ()
+                                    ctx.Request.InputStream.CopyTo buffer
+                                    let content = new ByteArrayContent (buffer.ToArray ())
+                                    match ctx.Request.ContentType with
+                                    | null | "" -> ()
+                                    | contentType -> content.Headers.TryAddWithoutValidation ("content-type", contentType) |> ignore
+                                    request.Content <- content
+                                match ctx.Request.Headers.["Cookie"] with
+                                | null | "" -> ()
+                                | cookie -> request.Headers.TryAddWithoutValidation ("cookie", cookie) |> ignore
+                                let! reply = client.SendAsync request |> Async.AwaitTask
+                                ctx.Response.StatusCode <- int reply.StatusCode
+                                copyHeader reply ctx "Location"
+                                copyHeader reply ctx "Set-Cookie"
+                                copyHeader reply ctx "Cache-Control"
+                                match reply.Content.Headers.ContentType with
+                                | null -> ()
+                                | contentType -> ctx.Response.ContentType <- string contentType
+                                let! bytes = reply.Content.ReadAsByteArrayAsync () |> Async.AwaitTask
+                                ctx.Response.OutputStream.Write (bytes, 0, bytes.Length)
+                        with _ -> ctx.Response.StatusCode <- 502
+                        ctx.Response.Close ()
+                    })
+                return! loop ()
+            | Choice2Of2 _ -> ()   // listener stopped
+        }
+    Async.Start (loop ())
+    listener
+
+let mutable private frontedHost : Process = null
+
+/// The product entry, told that its ONE public origin is the front door: the Manager at its
+/// root (which is also the OIDC issuer, so it must resolve there) and sessions under `/s/{id}`
+/// on the same origin.
+let private startFrontedHost () : unit =
+    let psi = ProcessStartInfo "node"
+    psi.ArgumentList.Add "app/out/Main.js"
+    psi.ArgumentList.Add "--auth"
+    psi.ArgumentList.Add "localhost"
+    psi.UseShellExecute <- false
+    psi.RedirectStandardOutput <- true
+    psi.EnvironmentVariables.["YESSION_MANAGER_PORT"] <- string FRONT_MANAGER_PORT
+    psi.EnvironmentVariables.["YESSION_SESSION"] <- FRONT_SESSION
+    psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- frontDataDir
+    psi.EnvironmentVariables.["YESSION_MANAGER_URL"] <- sprintf "http://127.0.0.1:%d" FRONT_PORT
+    psi.EnvironmentVariables.["YESSION_SESSION_URL"] <- sprintf "http://127.0.0.1:%d/s/{id}" FRONT_PORT
+    let p = new Process (StartInfo = psi)
+    let ready = TaskCompletionSource<bool> ()
+    // The management UI's line, not the session's: this case drives the Manager, and that line
+    // is the last thing a completed boot prints.
+    p.OutputDataReceived.Add (fun e ->
+        if e.Data <> null && e.Data.Contains "management UI at" then ready.TrySetResult true |> ignore)
+    p.Start () |> ignore
+    p.BeginOutputReadLine ()
+    frontedHost <- p
+    if not (ready.Task.Wait 60000) then failwith "fronted host never reported readiness"
+
+let frontDoorTests =
+    testList "Creating a session behind a front door (browser)" [
+        testCaseAsync "creating a session lands in that session, never on the front door's miss" <|
+            async {
+                if Directory.Exists frontDataDir then Directory.Delete (frontDataDir, true)
+                // The door comes up first: the Manager's public origin IS this port, and its
+                // default session fetches OIDC discovery against it while booting.
+                let door = startFrontDoor FRONT_PORT FRONT_MANAGER_PORT 2
+                let mutable browserToClose : IBrowser option = None
+                let mutable playwrightToDispose : IPlaywright option = None
+                try
+                    startFrontedHost ()
+                    let! pw = await (Playwright.CreateAsync ())
+                    playwrightToDispose <- Some pw
+                    let! br = await (pw.Chromium.LaunchAsync (BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                    browserToClose <- Some br
+                    let! context = await (br.NewContextAsync ())
+                    let! page = await (context.NewPageAsync ())
+                    page.SetDefaultTimeout 30000.0f
+                    let evidence = watching page
+                    do! reporting "create behind a front door" page evidence <| async {
+                    let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" FRONT_PORT))
+
+                    // Pressed, not POSTed: the whole fault lives in what the browser does with
+                    // the answer, so the browser has to be the thing that asks.
+                    let create = sprintf "[%s] button[type=submit]" Yession.App.Dom.Manager.createSession
+                    let! _ = await (page.WaitForSelectorAsync create)
+                    do! awaitU (page.ClickAsync create)
+
+                    // THE promise: pressing Create puts you in the session it created. One
+                    // fact, read off the page rather than off its words — the shell says which
+                    // session it is, and the address says which session was asked for, and
+                    // they have to be the same one.
+                    let landed =
+                        sprintf
+                            """() => {
+                                 const at = /^\/s\/([^/]+)\//.exec(location.pathname)
+                                 const shell = document.querySelector('meta[name="%s"]')?.getAttribute('content')
+                                 return !!at && !!shell && shell === at[1]
+                               }"""
+                            Yession.App.Dom.sessionMetaName
+                    // Launching a real child and waiting out the door's lag is the slow part;
+                    // the failure this guards is instant, so a long wait only ever costs a
+                    // green run time.
+                    try
+                        do!
+                            await (page.WaitForFunctionAsync (landed, null, PageWaitForFunctionOptions (Timeout = 90000.0f)))
+                            |> Async.Ignore
+                    with _ ->
+                        // A browser case can only fail by a wait not settling, and that failure
+                        // names the wait rather than the fault. The page has been holding the
+                        // answer the whole time: say what it is showing.
+                        let! showing =
+                            await (page.EvaluateAsync<string>
+                                    """() => JSON.stringify({
+                                         url: location.href,
+                                         title: document.title,
+                                         text: document.body?.innerText?.slice(0, 200) ?? null
+                                       })""")
+                        failwithf
+                            "creating a session must land in that session; the browser is showing %s"
+                            showing
+                    }
+                finally
+                    browserToClose |> Option.iter (fun b -> b.CloseAsync () |> ignore)
+                    playwrightToDispose |> Option.iter (fun p -> p.Dispose ())
+                    door.Stop ()
+                    try if frontedHost <> null then frontedHost.Kill true with _ -> ()
+            }
+    ]
+
 #else
 
 // Fable (JS on Node): Playwright is a .NET driver and does not exist here, so the flows above
@@ -1941,5 +2174,6 @@ let mountedTests =
 let tests : Fable.Pyxpecto.Model.TestCase = testList "Browser E2E" []
 let editorTests : Fable.Pyxpecto.Model.TestCase = testList "Editor rendering (browser)" []
 let mountedTests : Fable.Pyxpecto.Model.TestCase = testList "Path-mounted session (browser)" []
+let frontDoorTests : Fable.Pyxpecto.Model.TestCase = testList "Creating a session behind a front door (browser)" []
 
 #endif
