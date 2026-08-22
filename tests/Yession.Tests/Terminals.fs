@@ -3145,6 +3145,51 @@ let private shellProfileTests =
                 Expect.isTrue (printed.Contains checkout) "and the transcript names the directory it could not use"
             }
 
+        testCaseAsync "a tree that goes away takes the profiles pointing into it" <|
+            async {
+                // Plan 25's upstream half (Plan 26): a profile pointing inside a checkout that
+                // has been deleted would send every future terminal somewhere that no longer
+                // exists.
+                let terminals, _, _, _, _ = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.ClearProfilesUnder ActorRef.Agent "/repos/octo"
+                Expect.equal
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    None
+                    "the profile goes with the tree"
+            }
+
+        testCaseAsync "it answers with the sandboxes it cleared" <|
+            async {
+                // The caller says so in its own answer, so the model learns its next terminal
+                // moved without having to ask.
+                let terminals, _, _, _, _ = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! cleared = terminals.ClearProfilesUnder ActorRef.Agent checkout
+                Expect.equal (cleared |> List.map SandboxName.value) [ "default" ] "the one it cleared, named"
+            }
+
+        testCaseAsync "a profile in a sibling that shares a prefix is left alone" <|
+            async {
+                let terminals, _, _, _, _ = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! cleared = terminals.ClearProfilesUnder ActorRef.Agent "/repos/octo/hell"
+                Expect.isEmpty cleared "a prefix is not a parent"
+                Expect.equal
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    (Some checkout)
+                    "and the profile still points where it did"
+            }
+
+        testCaseAsync "the next terminal after a cleared profile opens where the sandbox puts it" <|
+            async {
+                let terminals, _, ptySpawned, _, _ = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.ClearProfilesUnder ActorRef.Agent checkout
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                Expect.equal (ptyDirectories ptySpawned) [ None ] "nothing is asked for a directory that has gone"
+            }
+
         testCaseAsync "the query reports where each sandbox's terminals start" <|
             async {
                 // One registration reaches the agent as a read-only tool and the people as a

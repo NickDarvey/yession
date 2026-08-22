@@ -59,6 +59,7 @@ let private andPublish
 // live in this one file, so the name is agreed where it is used — the settings surface and
 // boot configuration that used to read a shared catalogue are gone (Plan 23).
 let private addRepoTool = "add_repo"
+let private removeRepoTool = "remove_repo"
 let private switchBranchTool = "switch_branch"
 let private startWorkSandboxTool = "start_work_sandbox"
 let private stopWorkSandboxTool = "stop_work_sandbox"
@@ -101,6 +102,51 @@ let dispatch (services: CommandServices) : CommandDispatch =
                                                     (RepoListing.describe listing))
                                 })
                 | Some _, other -> return Error (sprintf "add_repo takes one repo, got %d arguments" (List.length other))
+            }
+
+          removeRepoTool,
+          fun (invocation: GatedInvocation) ->
+            async {
+                match services.Repos (), decodeArgs invocation.Args with
+                | None, _ -> return Error "this session has no repos"
+                | Some service, [ repo; force ] ->
+                    match RepoRef.create repo with
+                    | Error e -> return Error (sprintf "not a repo name: %s" e)
+                    | Ok repo ->
+                        return!
+                            andPublish services Repos.queryName (
+                                async {
+                                    match! service.RemoveRepo (repoCaller invocation) repo (force = "true") with
+                                    | Error e -> return Error e
+                                    | Ok path ->
+                                        // Plan 25's upstream half, with a caller at last: a
+                                        // profile pointing inside a tree that has gone would
+                                        // send every future terminal somewhere that no longer
+                                        // exists. The repo service contributes the one fact
+                                        // only it has — the path, as a terminal saw it — and
+                                        // the terminal manager decides which profiles that
+                                        // invalidates. Nothing is computed here.
+                                        let! cleared =
+                                            (services.Terminals ())
+                                                .ClearProfilesUnder (Authority.author invocation.Authority) path
+                                        if not (List.isEmpty cleared) then
+                                            services.Invalidate ShellProfile.queryName
+                                        let profiles =
+                                            match cleared with
+                                            | [] -> ""
+                                            | names ->
+                                                sprintf
+                                                    " New terminals in %s start where the sandbox puts them again."
+                                                    (names |> List.map SandboxName.value |> String.concat ", ")
+                                        return
+                                            Ok (
+                                                sprintf
+                                                    "removed %s — the checkout is gone from this session, and from the work environment.%s"
+                                                    (RepoRef.value repo)
+                                                    profiles)
+                                })
+                | Some _, other ->
+                    return Error (sprintf "remove_repo takes a repo and a flag, got %d arguments" (List.length other))
             }
 
           switchBranchTool,
@@ -214,6 +260,16 @@ let private repoCapabilitiesFor
             AddRepo =
               fun repo ->
                 gated addRepoTool [ RepoRef.value repo ] (sprintf "add_repo %s" (RepoRef.value repo))
+            RemoveRepo =
+              fun repo force ->
+                // The cost is in the SUMMARY, because that is the sentence the classifier
+                // reads and a person watching the queue sees BEFORE it happens rather than
+                // after. A removal that would take uncommitted work with it must not look
+                // like one that would not.
+                let summary =
+                    if force then sprintf "remove_repo %s (deleting uncommitted changes)" (RepoRef.value repo)
+                    else sprintf "remove_repo %s" (RepoRef.value repo)
+                gated removeRepoTool [ RepoRef.value repo; (if force then "true" else "false") ] summary
             SwitchRepoBranch =
               fun repo branch create ->
                 let summary =

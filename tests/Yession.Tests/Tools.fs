@@ -133,7 +133,7 @@ let private sessionTests =
             let allowed = ToolRegistry.allowedTools registry
             let expected =
                 [ "execute_command"; "check_pending"; "set_secret"; "list_secrets"
-                  "delete_secret"; "add_repo"; "switch_branch"; "fetch_repo"
+                  "delete_secret"; "add_repo"; "remove_repo"; "switch_branch"; "fetch_repo"
                   "repo_status"; "repo_log"; "repo_diff"
                   "start_work_sandbox"; "stop_work_sandbox"; "set_shell_profile" ]
                 |> List.map (sprintf "mcp__yession__%s")
@@ -151,6 +151,42 @@ let private sessionTests =
             Expect.equal repos.Title (Some "repos") "and the title the settings surface shows"
             Expect.equal (writeOnly repos.InputSchema) [] "a query is nullary"
         }
+
+        // remove_repo (Plan 26). `force` is what decides whether uncommitted work is deleted,
+        // so what matters at this seam is that its ABSENCE reaches the capability as a
+        // decision not to — a default that arrived as `true` would delete somebody's work on
+        // a call that never mentioned it.
+        testCaseAsync "remove_repo without force asks for a removal that spares uncommitted work" <|
+            async {
+                let mutable seen : (string * bool) option = None
+                let registry =
+                    AgentTools.registry
+                        { AgentCapabilities.none with
+                            RemoveRepo =
+                              fun repo force ->
+                                async {
+                                    seen <- Some (RepoRef.value repo, force)
+                                    return Ok { Status = CommandRan "removed"; Tool = "remove_repo"; Summary = "s"; Handle = None }
+                                } }
+                let! _ = registry.Invoke (call "yession" "remove_repo" """{"repo":"octo/hello"}""")
+                Expect.equal seen (Some ("octo/hello", false)) "an unmentioned force is a no"
+            }
+
+        testCaseAsync "remove_repo carries an explicit force through to the capability" <|
+            async {
+                let mutable seen : (string * bool) option = None
+                let registry =
+                    AgentTools.registry
+                        { AgentCapabilities.none with
+                            RemoveRepo =
+                              fun repo force ->
+                                async {
+                                    seen <- Some (RepoRef.value repo, force)
+                                    return Ok { Status = CommandRan "removed"; Tool = "remove_repo"; Summary = "s"; Handle = None }
+                                } }
+                let! _ = registry.Invoke (call "yession" "remove_repo" """{"repo":"octo/hello","force":true}""")
+                Expect.equal seen (Some ("octo/hello", true)) "the second decision reaches the thing that acts on it"
+            }
 
         // The shell profile (Plan 25). What matters at this seam is that the tool's
         // arguments reach the capability as the capability's own vocabulary — a directory

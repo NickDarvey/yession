@@ -614,6 +614,51 @@ let private srtTests =
             Expect.equal (List.length events) 1 "one clone happened, and it was recorded once"
         }
 
+        testCaseAsync "a checkout with uncommitted changes is not removed by asking nicely" <| async {
+            // The one thing removal cannot undo: `add_repo` brings back the commits and
+            // nothing else. So it is refused, and the refusal has to be one a model can act
+            // on rather than retry.
+            let root = mkdtemp nodeFs nodeOs
+            makeBareFixture root "hello" |> ignore
+            let service = serviceIn root (freshLog ())
+            let repo = RepoRef.create "octo/hello" |> expect
+            let! _ = service.AddRepo caller repo
+            writeFile nodeFs (sprintf "%s/octo/hello/README.md" (reposIn root)) "work nobody has committed\n"
+            match! service.RemoveRepo caller repo false with
+            | Ok _ -> failwith "uncommitted work must not be deleted by a call that did not say so"
+            | Error reason ->
+                Expect.isTrue (reason.Contains "octo/hello") "the refusal names the repo"
+                Expect.isTrue (reason.Contains "force") "and says what would delete it anyway"
+            Expect.isTrue
+                (exists nodeFs (sprintf "%s/octo/hello" (reposIn root)))
+                "and the checkout is still there"
+        }
+
+        testCaseAsync "force removes a checkout with uncommitted changes" <| async {
+            let root = mkdtemp nodeFs nodeOs
+            makeBareFixture root "hello" |> ignore
+            let service = serviceIn root (freshLog ())
+            let repo = RepoRef.create "octo/hello" |> expect
+            let! _ = service.AddRepo caller repo
+            writeFile nodeFs (sprintf "%s/octo/hello/README.md" (reposIn root)) "work nobody has committed\n"
+            let! removed = service.RemoveRepo caller repo true
+            expect removed |> ignore
+            Expect.isFalse (exists nodeFs (sprintf "%s/octo/hello" (reposIn root))) "the second decision is honoured"
+        }
+
+        testCaseAsync "removing answers with the path a terminal saw, so a profile can be cleared" <| async {
+            // The one fact only this service has, and the only path anything outside the git
+            // sandbox can act on — the git sandbox's own path is visible to no terminal here.
+            let root = mkdtemp nodeFs nodeOs
+            makeBareFixture root "hello" |> ignore
+            let service = serviceIn root (freshLog ())
+            let repo = RepoRef.create "octo/hello" |> expect
+            let! added = service.AddRepo caller repo
+            let listing = expect added
+            let! removed = service.RemoveRepo caller repo false
+            Expect.equal (expect removed) listing.Path "the same path the listing reported"
+        }
+
         testCaseAsync "remove deletes the checkout and records who asked" <| async {
             let root = mkdtemp nodeFs nodeOs
             makeBareFixture root "hello" |> ignore
@@ -622,8 +667,8 @@ let private srtTests =
             let repo = RepoRef.create "octo/hello" |> expect
             let! _ = service.AddRepo caller repo
             let human : Repos.RepoCaller = { Actor = PeerRef ada; Credential = PeerRef ada }
-            let! removed = service.RemoveRepo human repo
-            expect removed
+            let! removed = service.RemoveRepo human repo false
+            expect removed |> ignore
             Expect.isFalse (exists nodeFs (sprintf "%s/octo/hello" (reposIn root))) "checkout gone"
             let! events = eventsOf log
             match events |> List.rev |> List.head with

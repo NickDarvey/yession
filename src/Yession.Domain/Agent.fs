@@ -378,6 +378,13 @@ type ListTerminals = unit -> Async<Result<TerminalSummary list, string>>
 /// which is where it has to be anyway, since what the gate carries is what the agent reads.
 type AddRepo = RepoRef -> Async<Result<CommandOutcome, string>>
 
+/// Delete a repo's checkout from the session, and record that it is gone (Plan 26).
+///
+/// `force` is the second decision: a checkout with uncommitted changes is REFUSED without
+/// it, because that is the one thing here a re-clone cannot undo — it brings back the
+/// commits and nothing else.
+type RemoveRepo = RepoRef -> bool -> Async<Result<CommandOutcome, string>>
+
 /// Switch a repo's checkout to a branch, optionally creating it. Local ref movement
 /// only — never touches the remote.
 type SwitchRepoBranch = RepoRef -> string -> bool -> Async<Result<CommandOutcome, string>>
@@ -464,6 +471,9 @@ type AgentCapabilities =
       // The repo verbs (Plan 14): read-only bootstrap — clone and orient. Commit/push
       // stay behind ExecuteCommand, which is what keeps the one-door invariant intact.
       AddRepo : AddRepo
+      /// The one repo verb that destroys something, and the reason `add_repo`'s advice about
+      /// an unreadable checkout finally names a tool that exists.
+      RemoveRepo : RemoveRepo
       SwitchRepoBranch : SwitchRepoBranch
       FetchRepo : FetchRepo
       RepoStatus : InspectRepo
@@ -522,6 +532,7 @@ module AgentCapabilities =
           ListSecrets = fun () -> async { return Error "no secrets capability" }
           DeleteSecret = fun _ -> async { return Error "no secrets capability" }
           AddRepo = fun _ -> async { return Error "no repos capability" }
+          RemoveRepo = fun _ _ -> async { return Error "no repos capability" }
           SwitchRepoBranch = fun _ _ _ -> async { return Error "no repos capability" }
           FetchRepo = fun _ -> async { return Error "no repos capability" }
           RepoStatus = fun _ -> async { return Error "no repos capability" }

@@ -509,6 +509,7 @@ let startFull
               // SessionMain's dispatching wrapper — the token is the TURN ACTOR's, and
               // only the dispatcher knows who that is.
               AddRepo = AgentCapabilities.none.AddRepo
+              RemoveRepo = AgentCapabilities.none.RemoveRepo
               SwitchRepoBranch = AgentCapabilities.none.SwitchRepoBranch
               FetchRepo = AgentCapabilities.none.FetchRepo
               RepoStatus = AgentCapabilities.none.RepoStatus

@@ -713,6 +713,15 @@ module SessionTerminals =
           /// directory that is not there, and an actor able to validate without appending has
           /// only asked a question. `None` clears it.
           SetProfile : ActorRef -> SandboxName -> string option -> Async<Result<string, string>>
+          /// Clear every profile whose directory is inside this tree, because the tree is
+          /// about to stop existing (Plan 26; Plan 25's upstream half). Answers with the
+          /// sandboxes it cleared, so the caller can say so.
+          ///
+          /// Here rather than at the caller for the reason `SetProfile` is: whoever is
+          /// deleting a tree knows only that it is going, and a caller left to work out
+          /// WHICH profiles that invalidates is a caller that can get it wrong somewhere no
+          /// cheap test reaches.
+          ClearProfilesUnder : ActorRef -> string -> Async<SandboxName list>
           /// Every sandbox's profile as it stands — what the `shell_profile` query reads.
           Profiles : unit -> ShellProfileProjection
           /// Reclaim any lease that has gone idle with something queued behind it (Plan 13,
@@ -759,6 +768,7 @@ module SessionTerminals =
           Interactive = fun _ -> false
           Rearm = fun _ -> async { return Error "this session has no terminals" }
           SetProfile = fun _ _ _ -> async { return Error "this session has no terminals" }
+          ClearProfilesUnder = fun _ _ -> async { return [] }
           Profiles = fun () -> ShellProfileProjection.empty
           ReclaimIdle = fun _ -> async { return () }
           IsOpen = fun _ -> false
@@ -2059,6 +2069,34 @@ module SessionTerminals =
                                      @ [ "Terminals you opened, and the people's, keep the directory they are in." ]))
             }
 
+        /// Every profile pointing inside a tree that is about to go, cleared (Plan 26).
+        ///
+        /// No validation and no retirement, unlike `SetProfile`: this is not a decision
+        /// somebody is making about where terminals should start, it is the disappearance of
+        /// a place they already start in. The terminals open in it keep running — a shell
+        /// whose directory is deleted is a fact of the filesystem, not ours to tidy — and the
+        /// next one to open lands somewhere that exists.
+        let clearProfilesUnder (actor: ActorRef) (tree: string) : Async<SandboxName list> =
+            async {
+                let affected =
+                    ShellProfileProjection.listed profiles
+                    |> List.filter (fun (_, profile) ->
+                        match profile.WorkingDirectory with
+                        | Some cwd -> ShellProfile.isInside tree cwd
+                        | None -> false)
+                    |> List.map fst
+                for sandbox in affected do
+                    let event =
+                        SessionEvent.ShellProfileSet
+                            { MessageId = mintMessageId ()
+                              Sandbox = sandbox
+                              WorkingDirectory = None
+                              Actor = actor }
+                    do! appendAs actor event
+                    profiles <- ShellProfileProjection.applyEvent profiles event
+                return affected
+            }
+
         { Open = openTerminal
           AgentTerminal = agentTerminal
           OpenAgentTerminal = openAgentTerminal
@@ -2079,6 +2117,7 @@ module SessionTerminals =
           Interactive = fun id -> TerminalLeases.autoHeld id leases
           Rearm = rearm
           SetProfile = setProfile
+          ClearProfilesUnder = clearProfilesUnder
           Profiles = fun () -> profiles
           ReclaimIdle = reclaimIdle
           IsOpen = isOpen

@@ -22,6 +22,20 @@ module ShellProfile =
     /// No profile: the sandbox decides, as it always did.
     let none : ShellProfile = { WorkingDirectory = None }
 
+    /// Is `cwd` the directory `tree`, or somewhere inside it? What a caller deleting a tree
+    /// asks about every profile it might have invalidated (Plan 26).
+    ///
+    /// A prefix on a DIRECTORY BOUNDARY, never a bare `StartsWith`: `/repos/hello-world`
+    /// starts with `/repos/hello` and is a different checkout, so the naive test would clear
+    /// a profile that is still perfectly good. Trailing slashes are trimmed on both sides
+    /// because a path that names a directory may or may not carry one, and which it is says
+    /// nothing about what it means.
+    let isInside (tree: string) (cwd: string) : bool =
+        let trimmed (path: string) = path.TrimEnd '/'
+        let tree = trimmed tree
+        let cwd = trimmed cwd
+        tree <> "" && (cwd = tree || cwd.StartsWith (tree + "/"))
+
 /// Every sandbox's profile, projected from the log. Per sandbox and not per session
 /// because a path is only a path inside the filesystem that has it: the default sandbox's
 /// workspace, a named sandbox's, and a docker sandbox's bind are three different trees,
