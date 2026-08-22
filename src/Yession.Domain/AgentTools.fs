@@ -66,12 +66,21 @@ module private ToolArgs =
                 get.Required.Field first Decode.string, get.Required.Field second Decode.string))
             json
 
-    /// `read_terminal`'s pair: which terminal, and where to read from. An absent `from` is
-    /// the tail, which is what the optional parameter degrades to.
-    let terminalFrom (json: string) : Result<string * int option, string> =
+    /// `read_terminal`'s three: which terminal, where to read from, and what to wait for. An
+    /// absent `from` is the tail and an absent `wait_for` is a read that does not wait, which
+    /// is what the optional parameters degrade to. A `timeout_seconds` without a `wait_for` is
+    /// nothing to bound, so the wait is only assembled when there is something to wait FOR.
+    let terminalRead (json: string) : Result<string * int option * TerminalWait option, string> =
         read
             (Decode.object (fun get ->
-                get.Required.Field "terminal" Decode.string, get.Optional.Field "from" Decode.int))
+                get.Required.Field "terminal" Decode.string,
+                get.Optional.Field "from" Decode.int,
+                get.Optional.Field "wait_for" Decode.string
+                |> Option.filter (fun until -> until <> "")
+                |> Option.map (fun until ->
+                    { Until = until
+                      TimeoutSeconds =
+                        get.Optional.Field "timeout_seconds" Decode.float |> Option.defaultValue 10.0 })))
             json
 
     let repoBranchCreate (json: string) : Result<string * string * bool, string> =
@@ -240,9 +249,14 @@ module AgentTools =
     /// Read a live-only terminal (Plan 19). Same rendering as a block's output, because it is
     /// the same question — what did this print — and a model should not have to learn two
     /// shapes for one answer.
-    let private readTerminal (capabilities: AgentCapabilities) (id: TerminalId) (from: int option) : Async<string> =
+    let private readTerminal
+        (capabilities: AgentCapabilities)
+        (id: TerminalId)
+        (from: int option)
+        (waitFor: TerminalWait option)
+        : Async<string> =
         async {
-            match! capabilities.ReadTerminal id from with
+            match! capabilities.ReadTerminal id from waitFor with
             | Error reason -> return sprintf "could not read terminal %s: %s" (TerminalId.value id) reason
             | Ok tail when tail.Text = "" && tail.Length = 0 ->
                 return sprintf "terminal %s has said nothing" (TerminalId.value id)
@@ -263,8 +277,15 @@ module AgentTools =
                             tail.Through
                 let omitted =
                     if tail.Elided > 0 then sprintf "\n[%d earlier characters omitted]" tail.Elided else ""
-                if tail.Text = "" then return sprintf "%s%s\n(nothing printed in these lines)" where omitted
-                else return sprintf "%s%s\n%s" where omitted tail.Text
+                // A timeout is an ANSWER, not an error: what was said while waiting is
+                // usually where the reason it never arrived is written.
+                let waited =
+                    match tail.Matched, waitFor with
+                    | Some false, Some wait ->
+                        sprintf "\n(%s did not appear within %gs — this is what it said instead)" wait.Until wait.TimeoutSeconds
+                    | _ -> ""
+                if tail.Text = "" then return sprintf "%s%s%s\n(nothing printed in these lines)" where omitted waited
+                else return sprintf "%s%s%s\n%s" where omitted waited tail.Text
         }
 
     let private setSecret (capabilities: AgentCapabilities) (name: string) (value: string) : Async<string> =
@@ -492,20 +513,28 @@ module AgentTools =
 
           tool
               "read_terminal"
-              "Read what a terminal has said, when its answer does not come back as a command's output — one streaming something live, or a shell terminal where a command has opened a full-screen program and is waiting for a keystroke. With no `from` you get the tail: what it is saying now, capped, saying how much it left out. With `from` you get a page starting at that line and the line to carry into the next call, which is how you read what a terminal said BEFORE you arrived, however long ago. Every answer says which lines it covers and how many the terminal has, so you can tell a whole answer from the end of a long one. Reading takes nothing from anybody: whoever is typing keeps the terminal. Refused on a shell terminal running ordinary commands, where what one printed comes back from execute_command instead."
+              "Read what a terminal has said, and optionally wait for it to say something. Use it when the answer does not come back as a command's output — a terminal streaming something live, or a shell terminal where a command has opened a full-screen program and is waiting for a keystroke. With `wait_for` the read is held until that exact text appears, which is what you want after typing at a device: it answers as soon as the text arrives, and on a timeout it answers with what was said instead, which is usually where the reason it never came is written. With no `from` you get the tail: what it is saying now, capped, saying how much it left out. With `from` you get a page starting at that line and the line to carry into the next call, which is how you read what a terminal said BEFORE you arrived, however long ago. Every answer says which lines it covers and how many the terminal has, so you can tell a whole answer from the end of a long one. Reading takes nothing from anybody: whoever is typing keeps the terminal. Refused on a shell terminal running ordinary commands, where what one printed comes back from execute_command instead."
               [ ToolField.required "terminal" "string" "the terminal id, from the terminal that was opened for the stream"
                 ToolField.optional
                     "from"
                     "integer"
-                    "the line to read forward from, as reported by a previous read; omit for the tail" ]
+                    "the line to read forward from, as reported by a previous read; omit for the tail"
+                ToolField.optional
+                    "wait_for"
+                    "string"
+                    "hold the read until this exact text appears, e.g. \"login: \". Literal text, not a pattern"
+                ToolField.optional
+                    "timeout_seconds"
+                    "number"
+                    "how long to hold before answering with what was said instead; default 10" ]
               (fun args ->
                   async {
-                      match ToolArgs.terminalFrom args with
+                      match ToolArgs.terminalRead args with
                       | Error e -> return Error e
-                      | Ok (terminal, from) ->
+                      | Ok (terminal, from, waitFor) ->
                           match TerminalId.create terminal with
                           | Error e -> return Error (sprintf "not a terminal id: %s" e)
-                          | Ok id -> return! ok (readTerminal capabilities id from)
+                          | Ok id -> return! ok (readTerminal capabilities id from waitFor)
                   })
 
           tool
