@@ -1233,7 +1233,7 @@ module View =
                         data-chat-block="{BlockId.value blockId}"
                         data-chat-block-status="{terminalBlockStatusLabel block.Status}"
                         data-terminal-id="{TerminalId.value terminalId}"
-                        @click={Ev(fun _ -> dispatch (OpenPaneTabMsg (BlockTab (terminalId, blockId))); actions.FocusPane ())}>
+                        @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (BlockTab (terminalId, blockId)))); actions.FocusPane ())}>
                   <span class="{Style.terminalPrompt}">$</span>
                   <code class="{Style.chatChipCommand}">{block.Command}</code>
                   <span class="shrink-0">{terminalBlockStatus model block.Status}</span>
@@ -1245,7 +1245,7 @@ module View =
                         data-chat-stretch="{TerminalStretch.key stretch}"
                         data-chat-stretch-end="{stretchEndLabel stretch.End}"
                         data-terminal-id="{TerminalId.value stretch.TerminalId}"
-                        @click={Ev(fun _ -> dispatch (OpenPaneTabMsg (StretchTab stretch)); actions.FocusPane ())}>
+                        @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (StretchTab stretch))); actions.FocusPane ())}>
                   <span class="{Style.chatChipText}">typed in {stretch.Title} for {length}</span>
                   <span class="shrink-0">{stretchEnding model stretch.End}</span>
                 </button>"""
@@ -1914,7 +1914,7 @@ module View =
                 else
                     html $"""
                         <button type="button" class="{Style.btn}" data-pane-play-whole="{BlockId.value blockId}"
-                                @click={Ev(fun _ -> dispatch (PlayRecordingMsg (TerminalTab terminalId, Some block.FromSeq)))}>Play whole terminal</button>"""
+                                @click={Ev(fun _ -> dispatch (ShowInPaneMsg (WatchingFrom (terminalId, blockId))))}>Play whole terminal</button>"""
             // Text, then the recording behind one press — the same rule the terminal's own
             // panel follows, because a block IS the case that made it: a command and its
             // result, printed, needed no player of the same two lines under it.
@@ -1931,8 +1931,7 @@ module View =
                     html $"""
                         <button type="button" class="{Style.btn}" data-pane-play="{BlockId.value blockId}"
                                 @click={Ev(fun _ ->
-                                              dispatch (if playing then SelectPaneTabMsg tab
-                                                        else PlayRecordingMsg (tab, None)))}>{label}</button>"""
+                                              dispatch (ShowInPaneMsg (if playing then Reading tab else Watching tab)))}>{label}</button>"""
             // A bordered strip with nothing in it is a control bar that says there are no
             // controls. An open terminal's block has no whole recording to step out into, and
             // a refusal has nothing to play.
@@ -2046,8 +2045,12 @@ module View =
                         <button type="button" class="{Style.btnIconBare}" data-terminal-list-rewind="{id}"
                                 aria-label="Rewind {view.Title}"
                                 @click={Ev(fun _ ->
+                                              // ONE message. It used to be this and a select
+                                              // beside it, and the second cleared the pin the
+                                              // first had just taken — a verb that did nothing
+                                              // but leave the list. The rewind states the whole
+                                              // face now, list included.
                                               dispatch (RewindTerminalMsg view.TerminalId)
-                                              dispatch (SelectFromListMsg view.TerminalId)
                                               actions.FocusPane ())}>{Icon.rewind}</button>"""
             let reattach =
                 if not affords.CanReattach then Lit.nothing
@@ -2069,7 +2072,7 @@ module View =
                   {state}
                   <span class="min-w-0 flex items-center">
                     <button type="button" class="{nameClass}" data-terminal-list-row="{id}"
-                            @click={Ev(fun _ -> dispatch (SelectFromListMsg view.TerminalId); actions.FocusPane ())}>{view.Title}</button>
+                            @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (TerminalTab view.TerminalId))); actions.FocusPane ())}>{view.Title}</button>
                     <span class="{Style.terminalTabPeers}">{peers}</span>
                   </span>
                   <span class="{Style.terminalListVerbs}">{rewind}{reattach}{kill}</span>
@@ -2171,10 +2174,9 @@ module View =
         let tabButton (tab: PaneTab) =
             let pinnable = PaneTab.isLive model.Terminals tab
             let pinned = pinnable && ClientModel.isPinned tab model
-            let select () =
-                match tab with
-                | TerminalTab id -> dispatch (SelectTerminalMsg id)
-                | BlockTab _ | StretchTab _ -> dispatch (SelectPaneTabMsg tab)
+            // One message whichever kind of tab it is: showing a tab is showing a tab, and
+            // the two spellings only ever differed in which fields they remembered to clear.
+            let select () = dispatch (ShowInPaneMsg (Reading tab))
             let activate () =
                 if isOn tab && pinnable then dispatch (TogglePinMsg tab) else select ()
             // The mark says the tab is kept, and only when it is. `role="img"` with a name,
@@ -2249,7 +2251,7 @@ module View =
                     html $"""
                         <button type="button" class="{Style.terminalReplayFrom}"
                                 data-terminal-play="{TerminalId.value view.TerminalId}"
-                                @click={Ev(fun _ -> dispatch (PlayRecordingMsg (tab, None)); actions.FocusDvr view.TerminalId)}>↑ play the recording</button>"""
+                                @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Watching tab)); actions.FocusDvr view.TerminalId)}>↑ play the recording</button>"""
                 else Lit.nothing
             // The way back OUT of a player, in the slot every reader already knows: floating
             // over the scroller, transient, about where you are rather than what you are
@@ -2267,7 +2269,7 @@ module View =
                         <div class="{Style.terminalLiveFloat}">
                           <button type="button" class="{Style.btnPrimary}"
                                   data-terminal-blocks="{TerminalId.value view.TerminalId}"
-                                  @click={Ev(fun _ -> dispatch (SelectTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>Back to blocks</button>
+                                  @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (TerminalTab view.TerminalId))); actions.FocusDvr view.TerminalId)}>Back to blocks</button>
                         </div>"""
             let backToLive =
                 if not (view.IsOpen && rewound) then Lit.nothing
@@ -2284,7 +2286,7 @@ module View =
                           <span class="{Style.statusFaint}" data-terminal-behind="{TerminalId.value view.TerminalId}">{behind}</span>
                           <button type="button" class="{Style.btnPrimary}"
                                   data-terminal-live="{TerminalId.value view.TerminalId}"
-                                  @click={Ev(fun _ -> dispatch (JumpToLiveMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>Jump to live</button>
+                                  @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (TerminalTab view.TerminalId))); actions.FocusDvr view.TerminalId)}>Jump to live</button>
                         </div>"""
             // In live mode the block history gives way to the SCREEN (Plan 14, stage 6). A
             // program is running here and what it displays is not a list of commands and
@@ -2444,7 +2446,7 @@ module View =
         // case the DVR's pair needs `FocusDvr` to answer. Its value is the face it will show,
         // which is the same contract `data-nav-toggle` and `data-settings-toggle` carry.
         let listToggle =
-            let showingList = model.TerminalList
+            let showingList = ClientModel.showsList model
             html $"""
                 <button type="button" class="{Style.cls [ Style.btnIcon; "w-8 h-8 ml-auto" ]}"
                         data-terminal-list-toggle="{if showingList then "pane" else "list"}"
@@ -2473,8 +2475,8 @@ module View =
                                         // reader came from, exactly as closing a tab does.
                                         selected |> Option.iter (PaneTab.key >> actions.FocusChat))}>{Icon.right}</button>
                 </div>
-                {if model.TerminalList then Lit.nothing else strip}
-                {if model.TerminalList then terminalListView actions dispatch model else body ()}
+                {if ClientModel.showsList model then Lit.nothing else strip}
+                {if ClientModel.showsList model then terminalListView actions dispatch model else body ()}
               </div>
             </aside>"""
 
