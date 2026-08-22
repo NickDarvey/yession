@@ -58,9 +58,11 @@ devenv.local.yaml
 # The committed lock carries nixpkgs ONLY. devenv's own input is left out on purpose: its rev
 # comes from the devenv CLI (2.2.2 asks for 5844e78, which devenv.yaml never names), and in a
 # github-restricted sandbox devenv.local.yaml replaces that input with a store path — neither
-# is a fact about this repository. devenv re-adds that node itself, so `devenv.lock` shows as
-# MODIFIED after any devenv run: do not commit that back. A store path from somebody's box in
-# here breaks every other checkout.
+# is a fact about this repository. devenv re-adds that node itself after any run, so in a
+# sandbox `.claude/setup.sh` installs a local clean filter that strips it: git then hashes the
+# working copy WITHOUT the node, the file matches HEAD, and the store path cannot reach the
+# index even by `git commit -a`. A store path from somebody's box in here breaks every other
+# checkout, so the guard is a filter rather than a note asking people to remember.
 
 # Browser E2E scratch data
 tests/browser/.data*
