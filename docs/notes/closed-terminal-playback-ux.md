@@ -4,7 +4,7 @@
 > shipped, along with items 1–3. Items 4–7 are the ones still open.
 
 How this was exercised: real app booted in the dev container (`node app/out/Main.js --auth
-localhost`, scratch `YESSION_DATA_DIR`, `YESSION_SANDBOX_NESTED=weak`), one session, one
+localhost`, scratch `YESSION_DATA_DIR`, `YESSION_NESTED_SANDBOX=weak`), one session, one
 terminal, three block commands (`ls -la`, a colored `printf`, `echo … && sleep 1 && echo …`),
 terminal killed from the list. Then every playback path clicked through in headless Chromium
 over CDP (real mouse/key events, focus emulation on), at 1440×900 and a true 390×844 viewport.

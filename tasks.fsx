@@ -421,7 +421,7 @@ let private depVersion (name: string) =
 let private managerBinJs = """#!/usr/bin/env node
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-process.env.YESSION_SESSION_MAIN ||= join(dirname(fileURLToPath(import.meta.url)), '..', 'session.js')
+process.env.YESSION_SPAWN_MAIN ||= join(dirname(fileURLToPath(import.meta.url)), '..', 'session.js')
 import('../manager.js')
 """
 
@@ -540,7 +540,7 @@ let bootSmoke (ready: string) (command: string) (arguments: string list) =
     psi.WorkingDirectory <- repoRoot
     psi.RedirectStandardOutput <- true
     psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- dataDir
-    psi.EnvironmentVariables.["YESSION_MANAGER_PORT"] <- "0"
+    psi.EnvironmentVariables.["YESSION_PORT"] <- "0"
     psi.EnvironmentVariables.["YESSION_SERIAL_PORT"] <- "0"
     psi.EnvironmentVariables.["JUMPSTARTER_PROVIDER_PORT"] <- "0"
     let p = Process.Start psi
@@ -563,7 +563,7 @@ let bootSmoke (ready: string) (command: string) (arguments: string list) =
 let package (version: string) =
     restore ()
     stage version
-    // Boot the packaged bin shim (it self-sets YESSION_SESSION_MAIN); externals resolve from the
+    // Boot the packaged bin shim (it self-sets YESSION_SPAWN_MAIN); externals resolve from the
     // repo node_modules two levels up from dist/npm.
     bootSmoke managerReady "node" ([ Path.Combine (pkg, "bin/yession-manager.js") ] @ managerSmokeArgs)
     let packed = runIn pkg "npm" [ "pack"; "--pack-destination"; dist ] |> fun out -> out.Split('\n') |> Array.last
@@ -745,10 +745,10 @@ let private srtAvailable () =
     if OperatingSystem.IsMacOS () then true
     else
         let named name = Environment.GetEnvironmentVariable name
-        let bwrap = match named "YESSION_BWRAP_PATH" with null | "" -> "bwrap" | path -> path
-        let socat = match named "YESSION_SOCAT_PATH" with null | "" -> "socat" | path -> path
-        let ripgrep = match named "YESSION_RIPGREP_PATH" with null | "" -> "rg" | path -> path
-        let weak = (match named "YESSION_SANDBOX_NESTED" with null -> "" | v -> v.Trim().ToLowerInvariant ()) = "weak"
+        let bwrap = match named "YESSION_BIN_BWRAP" with null | "" -> "bwrap" | path -> path
+        let socat = match named "YESSION_BIN_SOCAT" with null | "" -> "socat" | path -> path
+        let ripgrep = match named "YESSION_BIN_RIPGREP" with null | "" -> "rg" | path -> path
+        let weak = (match named "YESSION_NESTED_SANDBOX" with null -> "" | v -> v.Trim().ToLowerInvariant ()) = "weak"
         let confines =
             if weak then
                 probeSucceeds bwrap [ "--ro-bind"; "/"; "/"; "--dev"; "/dev"; "--unshare-net"; "--unshare-pid"
@@ -765,7 +765,7 @@ let private srtAvailable () =
 // without it throws. socat is the third leg: a PTY pair is a serial port at both ends, which is
 // how the engine is exercised with no hardware attached.
 let private serialAvailable () =
-    let socat = match Environment.GetEnvironmentVariable "YESSION_SOCAT_PATH" with null | "" -> "socat" | path -> path
+    let socat = match Environment.GetEnvironmentVariable "YESSION_BIN_SOCAT" with null | "" -> "socat" | path -> path
     let listed =
         // `SerialPort.list()` for real. Zero ports is a pass — the question is whether the
         // engine ANSWERS, not whether this box has hardware.
@@ -816,7 +816,7 @@ let private requireCapabilities (caps: string list) =
           if List.contains "Srt" caps && not (srtAvailable ()) then
             "Srt: no working confinement (bubblewrap, socat, ripgrep, and — under the strict "
             + "profile — a nested user namespace; an unprivileged container needs "
-            + "YESSION_SANDBOX_NESTED=weak)" ]
+            + "YESSION_NESTED_SANDBOX=weak)" ]
     if not (List.isEmpty missing) then
         failwithf
             "check: this box cannot host every capability it was asked for:\n  - %s\nRun a tier it can host, or install what is missing."

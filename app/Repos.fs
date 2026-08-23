@@ -103,7 +103,7 @@ let hardenedEnv (allowProtocol: string) (token: string option) : (string * strin
 /// Empty or unset keeps PATH, so nothing off-Nix regresses; the installable names one.
 let gitExecutable (ambient: Map<string, string>) : string =
     ambient
-    |> Map.tryFind "YESSION_GIT_PATH"
+    |> Map.tryFind "YESSION_BIN_GIT"
     |> Option.map (fun path -> path.Trim ())
     |> Option.filter (fun path -> path <> "")
     |> Option.defaultValue "git"
@@ -121,7 +121,7 @@ let gitExecutable (ambient: Map<string, string>) : string =
 /// answers EPERM, not EACCES, so the probe died with `fatal: unable to access
 /// '~/.config/git/config'` (exit 128) on a host where every verb, which nulls that path,
 /// ran fine. The sandbox was then refused for its whole lifetime in words naming
-/// `YESSION_GIT_PATH` and `YESSION_SANDBOX_READ_PATHS`: a working binary, and a read scope
+/// `YESSION_BIN_GIT` and `YESSION_SESSION_READ`: a working binary, and a read scope
 /// whose only fault was doing its job. Following that advice would have widened the scope
 /// to hand back the home it exists to deny.
 let gitExec
@@ -146,7 +146,7 @@ let gitExec
 /// what is left really is the binary or the runtime it reads.
 let unusableGit (git: string) (reason: string) : string =
     sprintf
-        "git ('%s') cannot run inside the sandbox: %s. Name a working git with YESSION_GIT_PATH; if it needs files the sandbox's read scope denies, name those with YESSION_SANDBOX_READ_PATHS."
+        "git ('%s') cannot run inside the sandbox: %s. Name a working git with YESSION_BIN_GIT; if it needs files the sandbox's read scope denies, name those with YESSION_SESSION_READ."
         git
         reason
 

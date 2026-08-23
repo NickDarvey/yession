@@ -40,14 +40,14 @@ let private defaultSession =
 let private dataDir = Interop.envOr "YESSION_DATA_DIR" ".yession"
 // The management UI wants a bookmarkable address, so its default is fixed; a second
 // Manager instance must choose its own port (bind conflicts fail loudly).
-let private managerPort = Interop.envOr "YESSION_MANAGER_PORT" "8321" |> int
+let private managerPort = Interop.envOr "YESSION_PORT" "8321" |> int
 
 // How long a session may go unused before the Manager stops it (Plan 11). Unset = never,
 // which is the default: reaping trades a launch on the next visit for everything an idle
 // session holds, and on a deployment that tracks a fast-moving build, for sessions that
 // return on the new one without the Manager having to restart. Both are choices.
 let private idleTimeout =
-    match Yession.Manager.IdleWindow.parse (Interop.envOr "YESSION_SESSION_IDLE_TIMEOUT" "") with
+    match Yession.Manager.IdleWindow.parse (Interop.envOr "YESSION_IDLE_TIMEOUT" "") with
     | Ok window -> window
     | Error e -> Cli.abort e
 
@@ -84,11 +84,11 @@ let private nodePath : string = Fable.Core.Util.jsNative
 
 // The session process command: this Node running the session entry. In the npm
 // package both bins live in one install, and the `yession` bin shim sets
-// `YESSION_SESSION_MAIN` to the packaged `session.js`; in development it defaults to
-// the Fable output. `YESSION_SESSION_BIN` overrides with a standalone command.
+// `YESSION_SPAWN_MAIN` to the packaged `session.js`; in development it defaults to
+// the Fable output. `YESSION_SPAWN_BIN` overrides with a standalone command.
 let private sessionCommand, sessionArgs =
-    match Interop.envOr "YESSION_SESSION_BIN" "" with
-    | "" -> nodePath, [ Interop.envOr "YESSION_SESSION_MAIN" "app/SessionMain.js" ]
+    match Interop.envOr "YESSION_SPAWN_BIN" "" with
+    | "" -> nodePath, [ Interop.envOr "YESSION_SPAWN_MAIN" "app/SessionMain.js" ]
     | binary -> binary, []
 
 Async.StartImmediate(

@@ -208,7 +208,7 @@ let private sandboxPolicyTests =
             Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" ambientRun) (Some "ambient-token") "so does the ambient token"
 
         testCase "egress: only a confined backend carries an allowlist, and it is opt-in" <| fun () ->
-            let ambient = Map.ofList [ "YESSION_WORK_DOMAINS", "api.example.com, cdn.example.com" ]
+            let ambient = Map.ofList [ "YESSION_SESSION_WORK_NET", "api.example.com, cdn.example.com" ]
             Expect.equal (Sandboxes.egressFor HostBackend ambient) None "an unconfined backend is unrestricted"
             Expect.equal (Sandboxes.egressFor DockerBackend ambient) None "so is docker"
             Expect.equal
@@ -310,7 +310,7 @@ let private sandboxPolicyTests =
                 Sandboxes.SrtSandbox.runtimeReadPaths
                     "linux"
                     [ "/opt/node22/bin/node" ]
-                    (Map.ofList [ "YESSION_SANDBOX_READ_PATHS", "/srv/toolchain, /srv/sdk" ])
+                    (Map.ofList [ "YESSION_SESSION_READ", "/srv/toolchain, /srv/sdk" ])
             Expect.isTrue (List.contains "/usr" paths) "the platform's runtime is still there"
             Expect.isTrue (List.contains "/opt/node22" paths) "so is what is already running"
             Expect.isTrue (List.contains "/srv/toolchain" paths) "and the operator's additions"
@@ -339,7 +339,7 @@ let private sandboxPolicyTests =
                     (Sandboxes.SrtSandbox.runtimeReadPaths
                         "linux"
                         []
-                        (Map.add "YESSION_SANDBOX_READ_PATHS" "/home/operator" ambient)))
+                        (Map.add "YESSION_SESSION_READ" "/home/operator" ambient)))
                 "an operator naming it explicitly means it"
 
         testCase "the read scope's platform list is the platform's, not this box's" <| fun () ->
@@ -366,9 +366,9 @@ let private sandboxPolicyTests =
             let tools =
                 Sandboxes.SrtSandbox.toolsFrom
                     (Map.ofList
-                        [ "YESSION_BWRAP_PATH", " /nix/store/x/bin/bwrap "
-                          "YESSION_SOCAT_PATH", ""
-                          "YESSION_RIPGREP_PATH", "/nix/store/x/bin/rg" ])
+                        [ "YESSION_BIN_BWRAP", " /nix/store/x/bin/bwrap "
+                          "YESSION_BIN_SOCAT", ""
+                          "YESSION_BIN_RIPGREP", "/nix/store/x/bin/rg" ])
                 |> expect
             Expect.equal tools.Bwrap (Some "/nix/store/x/bin/bwrap") "a named tool is trimmed and used"
             Expect.equal tools.Ripgrep (Some "/nix/store/x/bin/rg") "every dependency is named, not left to PATH"
@@ -378,13 +378,13 @@ let private sandboxPolicyTests =
                 (List.contains "/usr" tools.Runtime)
                 "and the host's own runtime is discovered, not left to a caller to remember"
             Expect.equal
-                (Sandboxes.SrtSandbox.toolsFrom (Map.ofList [ "YESSION_SANDBOX_NESTED", "weak" ])
+                (Sandboxes.SrtSandbox.toolsFrom (Map.ofList [ "YESSION_NESTED_SANDBOX", "weak" ])
                  |> expect
                  |> fun t -> t.Nesting)
                 Sandboxes.WeakNesting
                 "an unprivileged container asks for the weaker profile explicitly"
             Expect.isError
-                (Sandboxes.SrtSandbox.toolsFrom (Map.ofList [ "YESSION_SANDBOX_NESTED", "off" ]))
+                (Sandboxes.SrtSandbox.toolsFrom (Map.ofList [ "YESSION_NESTED_SANDBOX", "off" ]))
                 "and anything else is a loud error, not a guess at which way to err"
 
         testCase "an argv survives the shell srt wraps it in" <| fun () ->
@@ -401,7 +401,7 @@ let private sandboxPolicyTests =
                 Sandboxes.AgentSandbox.defaultDomains
                 "unconfigured, the CLI reaches the API and the console it refreshes a credential against"
             Expect.equal
-                (Sandboxes.AgentSandbox.domainsFrom (Map.ofList [ "YESSION_AGENT_DOMAINS", "gateway.internal" ]))
+                (Sandboxes.AgentSandbox.domainsFrom (Map.ofList [ "YESSION_SESSION_AGENT_NET", "gateway.internal" ]))
                 [ "gateway.internal" ]
                 "a deployment that fronts the API elsewhere replaces the list, it does not add to it"
 

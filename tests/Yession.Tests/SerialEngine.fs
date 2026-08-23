@@ -47,7 +47,7 @@ type private Pair =
   const { spawn } = await import('node:child_process')
   const fs = await import('node:fs')
   const tty = await import('node:tty')
-  const socat = process.env.YESSION_SOCAT_PATH || 'socat'
+  const socat = process.env.YESSION_BIN_SOCAT || 'socat'
   const { child, paths } = await new Promise((resolve, reject) => {
     const child = spawn(socat, ['-d', '-d', 'pty,raw,echo=0', 'pty,raw,echo=0'], { stdio: ['ignore', 'ignore', 'pipe'] })
     // Matched against everything socat has said so far rather than against each chunk:

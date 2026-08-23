@@ -56,8 +56,8 @@ let resolveVariables
 /// The domains the WORK sandbox may reach, as configured. `None` is unrestricted, which
 /// is what the unconfining backends are and all srt can honestly report for them; srt
 /// itself has no unrestricted mode, so a confined sandbox always carries a list —
-/// `YESSION_WORK_DOMAINS` (comma- or space-separated), the counterpart of the agent's
-/// `YESSION_AGENT_DOMAINS`.
+/// `YESSION_SESSION_WORK_NET` (comma- or space-separated), the counterpart of the agent's
+/// `YESSION_SESSION_AGENT_NET`.
 ///
 /// Empty where the operator named none, and deliberately so: what hosts an agent's
 /// commands legitimately need is not something this code can guess, and egress is the
@@ -68,7 +68,7 @@ let egressFor (backend: SandboxBackend) (ambient: Map<string, string>) : string 
     | DockerBackend -> None
     | SrtBackend ->
         ambient
-        |> Map.tryFind "YESSION_WORK_DOMAINS"
+        |> Map.tryFind "YESSION_SESSION_WORK_NET"
         |> Option.defaultValue ""
         |> fun raw -> raw.Split ([| ','; ' '; '\t'; '\n' |])
         |> Array.map (fun domain -> domain.Trim ())
@@ -819,7 +819,7 @@ module SrtSandbox =
     /// suite on darwin (pr.yaml's macos job builds the package and enters the dev shell),
     /// and the box that verified the Linux list is Linux. It is what a Seatbelt profile
     /// conventionally allows back; if it is short, the failure is loud and local — a
-    /// command cannot find its interpreter — and `YESSION_SANDBOX_READ_PATHS` is the answer.
+    /// command cannot find its interpreter — and `YESSION_SESSION_READ` is the answer.
     let darwinRuntimePaths : string list =
         [ "/usr"; "/bin"; "/sbin"; "/System"; "/Library"; "/opt/homebrew"; "/nix"
           "/private/etc"; "/private/var/db"; "/private/var/select" ]
@@ -858,7 +858,7 @@ module SrtSandbox =
     /// a deployment naming its unusual toolchain still needs libc.
     let configuredReadPaths (ambient: Map<string, string>) : string list =
         ambient
-        |> Map.tryFind "YESSION_SANDBOX_READ_PATHS"
+        |> Map.tryFind "YESSION_SESSION_READ"
         |> Option.defaultValue ""
         |> fun raw -> raw.Split ([| ','; ' '; '\t'; '\n' |])
         |> Array.map (fun path -> path.Trim ())
@@ -874,7 +874,7 @@ module SrtSandbox =
     /// `~/node_modules`, whose owning prefix is the home itself — so the allow-back would
     /// hand back the entire region this scope exists to deny, and it would do it silently.
     /// Refusing it fails the other way instead: that layout cannot start a command until an
-    /// operator names a narrower path in `YESSION_SANDBOX_READ_PATHS`. An explicitly
+    /// operator names a narrower path in `YESSION_SESSION_READ`. An explicitly
     /// configured path is never dropped — an operator naming their home means it.
     let runtimeReadPaths (platform: string) (installed: string list) (ambient: Map<string, string>) : string list =
         let platformPaths =
@@ -971,7 +971,7 @@ module SrtSandbox =
             |> Option.map (fun value -> value.Trim ())
             |> Option.filter (fun value -> value <> "")
         let nesting =
-            match ambient |> Map.tryFind "YESSION_SANDBOX_NESTED" |> Option.defaultValue "strict" with
+            match ambient |> Map.tryFind "YESSION_NESTED_SANDBOX" |> Option.defaultValue "strict" with
             | value ->
                 match value.Trim().ToLowerInvariant () with
                 | ""
@@ -987,9 +987,9 @@ module SrtSandbox =
                     "cannot locate @anthropic-ai/sandbox-runtime's own files, which every confined command execs"
             | srtPackage ->
                 Ok
-                    { Bwrap = named "YESSION_BWRAP_PATH"
-                      Socat = named "YESSION_SOCAT_PATH"
-                      Ripgrep = named "YESSION_RIPGREP_PATH"
+                    { Bwrap = named "YESSION_BIN_BWRAP"
+                      Socat = named "YESSION_BIN_SOCAT"
+                      Ripgrep = named "YESSION_BIN_RIPGREP"
                       Nesting = nesting
                       // The binaries a confined spawn execs but the platform list cannot
                       // know the location of: the claude CLI the AgentSandbox starts, and
@@ -998,7 +998,7 @@ module SrtSandbox =
                         runtimeReadPaths
                             (platform ())
                             ([ execPath (); srtPackage ]
-                             @ ([ "YESSION_CLAUDE_PATH"; "YESSION_GIT_PATH" ] |> List.choose named))
+                             @ ([ "YESSION_BIN_CLAUDE"; "YESSION_BIN_GIT" ] |> List.choose named))
                             ambient })
 
     [<Emit("(function (allowedDomains, denyRead, allowRead, allowWrite, bwrap, socat, ripgrep, weakNesting, allowGitConfig, filesystemDisabled) { return ({ network: { allowedDomains: allowedDomains, deniedDomains: [], strictAllowlist: true }, filesystem: { denyRead: denyRead, allowRead: allowRead, allowWrite: allowWrite, denyWrite: [], allowGitConfig: allowGitConfig, disabled: filesystemDisabled }, ...(bwrap ? { bwrapPath: bwrap } : {}), ...(socat ? { socatPath: socat } : {}), ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}), ...(weakNesting ? { enableWeakerNestedSandbox: true } : {}) }) })($0, $1, $2, $3, $4, $5, $6, $7, $8, $9)")>]
@@ -1273,13 +1273,13 @@ module AgentSandbox =
 
     /// Where the confined CLI may reach. The agent's egress needs are known — the API it
     /// talks to, and the console it refreshes an OAuth credential against — so unlike the
-    /// work sandbox's, this allowlist has a real default. `YESSION_AGENT_DOMAINS` replaces
+    /// work sandbox's, this allowlist has a real default. `YESSION_SESSION_AGENT_NET` replaces
     /// it wholesale for a deployment that fronts the API somewhere else.
     let defaultDomains : string list =
         [ "api.anthropic.com"; "console.anthropic.com"; "claude.ai" ]
 
     let domainsFrom (ambient: Map<string, string>) : string list =
-        match ambient |> Map.tryFind "YESSION_AGENT_DOMAINS" with
+        match ambient |> Map.tryFind "YESSION_SESSION_AGENT_NET" with
         | None -> defaultDomains
         | Some raw ->
             raw.Split ([| ','; ' '; '\t'; '\n' |])

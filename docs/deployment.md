@@ -10,6 +10,30 @@ are worked examples of one thing satisfying them.
 
 ---
 
+## What the variable names tell you
+
+Yession's environment splits three ways, and the NAME says which — so "may I set this?" is
+answerable without a table.
+
+| shape | who sets it | example |
+|---|---|---|
+| `YESSION_*` | **you**, the operator. Ordinary configuration. | `YESSION_MANAGER_URL`, `YESSION_IDLE_TIMEOUT` |
+| `YESSION_BIN_*` | you, and it names an executable on this host. | `YESSION_BIN_GIT`, `YESSION_BIN_BWRAP` |
+| `YESSION_SESSION_*` | you, as the DEFAULT for every session — the seam a repo's own configuration will later take over per session. | `YESSION_SESSION_WORK_BACKEND`, `YESSION_SESSION_READ` |
+| `YESSION_LAUNCH` | **nobody.** The Manager mints it per launch and the session decodes it. | — |
+
+`YESSION_LAUNCH` carries the launch's control secret, which is custody of that session's
+secrets and its authority to register as an OIDC client. Setting it by hand is claiming to
+be a session the Manager started. It never reaches a sandboxed command — the host baseline
+is an allowlist — and nothing but the Manager should ever write it.
+
+The split matters most for the middle two. Anything under `YESSION_BIN_*` names a binary
+this host will execute, so it is the operator's alone and always will be. Anything under
+`YESSION_SESSION_*` is a per-session policy that happens, today, to be set once for the whole
+host.
+
+---
+
 ## Interfaces
 
 ### Authorizing
@@ -100,10 +124,10 @@ that wrong sends remote logins to an address only the host can resolve.
 ### Session lifetime
 
 ```sh
-YESSION_SESSION_IDLE_TIMEOUT=30m                 # or 90s, 2h; unset means never
+YESSION_IDLE_TIMEOUT=30m                 # or 90s, 2h; unset means never
 ```
 
-`YESSION_SESSION_IDLE_TIMEOUT` lets the Manager stop sessions nobody is using. A session
+`YESSION_IDLE_TIMEOUT` lets the Manager stop sessions nobody is using. A session
 reports busy or idle over its control channel — a connected peer, a running turn, a command in
 a terminal, a non-empty queue — and the Manager reaps on **silence**, so no single report has
 to arrive; unset is the default, because stopping a session nobody asked to have stopped is not
@@ -115,7 +139,7 @@ localhost`, a re-bounce under `trusted-headers`); and a session wedged after rea
 beating and is stopped as `NeverReported` rather than diagnosed.
 
 What it buys beyond the Node process, Yjs replica and loaded event log an idle session holds:
-point `YESSION_SESSION_BIN` at a path that floats with your builds, and sessions upgrade
+point `YESSION_SPAWN_BIN` at a path that floats with your builds, and sessions upgrade
 continuously as they idle out and relaunch, while the Manager — whose own restart evicts
 everybody — is left alone until nothing is running. A MAJOR version difference refuses the
 launch rather than pairing two processes whose control protocol may disagree, which drains the
