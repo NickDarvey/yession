@@ -6,9 +6,8 @@ presentation (Metro/Zune styling, rich-text editing, collaborative presence curs
 telemetry (Plan 04), the Manager→Session control-RPC reverse legs, secrets + ABAC
 (Plan 06), BYO user authorization (Plan 07), connections and Claude sign-in (Plan 08),
 remote and mounted session access (Plans 09/10/12), idle reaping (Plan 11), and
-terminals on the WorkSandbox (Plan 13, every stage). A plan number cited here or in the
-code dates a decision and nothing more — the plans are gone, and each one's reasoning now
-sits beside the code it governs.
+terminals on the WorkSandbox (Plan 13, every stage). The plans those numbers name are gone;
+each one's reasoning now sits beside the code it governs.
 Everything below is deliberate scope, recorded so nobody discovers it in production.
 Items are roughly ordered by how much they matter.
 
