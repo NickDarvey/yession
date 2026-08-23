@@ -60,9 +60,13 @@ devenv.local.yaml
 # github-restricted sandbox devenv.local.yaml replaces that input with a store path — neither
 # is a fact about this repository. devenv re-adds that node itself after any run, so in a
 # sandbox `.claude/setup.sh` installs a local clean filter that strips it: git then hashes the
-# working copy WITHOUT the node, the file matches HEAD, and the store path cannot reach the
-# index even by `git commit -a`. A store path from somebody's box in here breaks every other
-# checkout, so the guard is a filter rather than a note asking people to remember.
+# working copy WITHOUT the node, so the file matches HEAD and there is nothing to see or to
+# stage. That keeps a working tree clean; it is not what makes the rule hold. A filter is per
+# clone and arrives when setup runs, so a clone where it has not yet is a clone with no guard
+# at all — which is how `/nix/store/lxdvfnj…-source` reached master once, through two commits
+# made in that window. What holds the rule is `tests/Yession.Tests/LockSource.fs`, which reads
+# the COMMITTED lock and refuses a node or a store path in it, on every pull request, whatever
+# anybody's local git is configured to do.
 
 # Browser E2E scratch data
 tests/browser/.data*

@@ -99,6 +99,9 @@ let all =
         // and only its consequence needs a live tier.
         Tag.needs "Test sources" [] (fun () -> TestSources.tests)
         Tag.needs "Emit bodies" [] (fun () -> EmitSources.tests)
+        // The third source contract, and the one that guards a file no F# reads: what a
+        // checkout of devenv.lock gives a machine that is not this one.
+        Tag.needs "Committed lock" [] (fun () -> LockSource.tests)
         // The rich editor rendering E2E stands alone: it needs a browser but NOT the native
         // WebRTC host, so it runs wherever Chromium exists ([Browser]). The full two-peer
         // convergence/persistence E2E spawns the real Session Process, so it also needs Native.
