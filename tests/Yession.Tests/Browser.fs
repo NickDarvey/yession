@@ -1359,6 +1359,51 @@ let editorTests =
                     await (page.EvaluateAsync<string> "() => document.activeElement?.outerHTML?.slice(0, 60) ?? 'NOTHING'")
                 Expect.stringContains kept "data-term-resize" "a lease landing leaves focus that survived the render where it was"
             }
+        // A screen is a paint at a GEOMETRY, and the client's emulator has to be the geometry
+        // the pty is or everything on it lands in the wrong column. Only a browser can answer
+        // it: this is the real `@xterm/headless` composing a real screen, and what is asserted
+        // is where the text ended up — which no rendered string holds.
+        //
+        // `ESC[500G` is how a program asks for the last column, whatever that is. The
+        // serializer answers with the gap it measured — `ESC[39C` on a 40-column screen,
+        // `ESC[99C` on a 100-column one — so this reads the width straight off the rendered
+        // line, and would have read 79 for both back when the snapshot carried no size.
+        editorCase "the live screen is the shape the process says it is" (EDITOR_PORT + 18) <| fun page ->
+            async {
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                do! awaitU (page.ClickAsync "#shell [data-terminal-tab='term-live']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
+
+                // Seeded at a seq past everything the fixture's feed holds, so what ends up on
+                // this screen is only what this case put there.
+                do! awaitU (page.EvaluateAsync "() => window.__snapshot('term-live', 10, '', 40, 24)")
+                do! awaitU (page.EvaluateAsync "() => window.__record('term-live', 10, 'o', '\\u001b[500GX')")
+                // Waited for, then MEASURED. A wait that was also the assertion would fail as
+                // a timeout naming neither number, and this tier can only fail by a wait
+                // never settling.
+                let lineEndingIn (mark: string) =
+                    sprintf
+                        """(() => {
+                             const el = document.querySelector("[data-terminal-screen='term-live']")
+                             const line = el.textContent.split('\n').find(l => l.trimEnd().endsWith('%s'))
+                             return line === undefined ? -1 : line.trimEnd().length
+                           })()"""
+                        mark
+                let widthOfLineEndingIn (mark: string) =
+                    async {
+                        let! _ = await (page.WaitForFunctionAsync (lineEndingIn mark + " > 0"))
+                        return! await (page.EvaluateAsync<int> ("() => " + lineEndingIn mark))
+                    }
+                let! atForty = widthOfLineEndingIn "X"
+                Expect.equal atForty 40 "the last column of a 40-column screen"
+
+                // A resize is a record like any other, and the emulator follows it — the pty
+                // was told the same thing at the same point in the same stream.
+                do! awaitU (page.EvaluateAsync "() => window.__record('term-live', 11, 'r', '100x24')")
+                do! awaitU (page.EvaluateAsync "() => window.__record('term-live', 12, 'o', '\\r\\n\\u001b[500GY')")
+                let! atHundred = widthOfLineEndingIn "Y"
+                Expect.equal atHundred 100 "and of a 100-column one, after the resize"
+            }
         // The DVR (Plan 14, stage 7). What only a browser can answer: that rewinding a LIVE
         // terminal really mounts a player over what it has recorded so far — the same player
         // and the same cast a finished terminal's replay uses, which is what "rewound like

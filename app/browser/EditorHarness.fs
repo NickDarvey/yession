@@ -635,6 +635,13 @@ let private recordTyped (_terminal: TerminalId) (data: string) : unit = jsNative
 [<Emit("(function(f){ window.__snapshot = (id, seq, screen, cols, rows) => f(id, seq, screen, cols ?? 80, rows ?? 24) })($0)")>]
 let private exposeSnapshot (f: string -> int -> string -> int -> int -> unit) : unit = jsNative
 
+/// Hand the shell one transcript record, as the Session Process does as a terminal speaks.
+/// The companion to the snapshot: a snapshot is where a screen STARTS and records are what
+/// move it, and composing the two — including a resize reshaping the emulator mid-stream —
+/// is the client's own fold.
+[<Emit("(function(f){ window.__record = f })($0)")>]
+let private exposeRecord (f: string -> int -> string -> string -> unit) : unit = jsNative
+
 /// Hand a terminal's lease to this peer WITHOUT a press, as the alt-screen flip does: a block
 /// takes the screen and the Session Process gives its author the keyboard. Exposed for the
 /// same reason the snapshot is — it is the arrival of a fact from elsewhere, and a test that
@@ -694,6 +701,11 @@ do
         match TerminalId.create id with
         | Ok terminal -> takeRef terminal
         | Error _ -> ())
+    exposeRecord (fun id seq kind data ->
+        match TerminalId.create id, TranscriptKind.parse kind with
+        | Ok terminal, Some kind ->
+            dispatch (TerminalRecordMsg (terminal, seq, { At = 0.0; Kind = kind; Data = data }))
+        | _ -> ())
     render ()
     // The shell harness drives the real view, so it gets the real shell plumbing too — a
     // splitter that only worked in the app is a splitter no browser-tier test could reach.
