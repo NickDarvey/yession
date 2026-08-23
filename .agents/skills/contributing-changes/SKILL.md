@@ -17,12 +17,13 @@ independently shippable — each one compiles, passes `check`, and is useful on 
 they are, integrate each as its own PR rather than saving them up: finish step one, run this
 process end to end, then start step two from the merged master.
 
-The cost of not doing this is not style, it is rebase tax, and it compounds. Master moves
-while a branch sits: five PRs landed under Plan 17's single four-step branch, and reconciling
-one branch against them took longer than all four features took to write. Each of those four
-steps would have merged in minutes on its own. The tax is superlinear — twice the branch
-against twice the drift is four times the conflict — and every hour of it is spent
-re-deciding questions already answered.
+The cost of not doing this is not style, it is rebase tax, and it compounds. The merge queue
+pays the mechanical half for you — a green check no longer goes stale because master moved —
+but not the half that hurts: conflict reconciliation. Five PRs landed under Plan 17's single
+four-step branch, and reconciling one branch against them took longer than all four features
+took to write. Each of those four steps would have merged in minutes on its own. The tax is
+superlinear — twice the branch against twice the drift is four times the conflict — and
+every hour of it is spent re-deciding questions already answered.
 
 Split on the plan's own seams:
 
@@ -38,6 +39,25 @@ Split on the plan's own seams:
 If you find yourself with several finished steps on one branch anyway, do not bundle them
 out of sympathy for the work already done — open the PR for what is there, and split the
 NEXT plan.
+
+## Merge semantics: the queue
+
+`master` merges through a **merge queue**, not directly, and squash is the only method.
+
+- **A moving master costs you nothing now.** Branches are not required to be up to date, and
+  a green check does not go stale when someone else lands first — the queue re-tests your
+  change against real master itself. Rebase only for a genuine conflict.
+- **Enabling auto-merge enqueues; it does not merge.** The queue builds base+PR on a
+  temporary ref and runs `test` there via `pr.yaml`'s `merge_group` trigger.
+- **Never infer merged-ness from a check conclusion — in either direction.** Grouping is
+  `HEADGREEN`, so a batch can merge on its LAST entry's checks and carry a red one in with
+  it; and an entry that fails, or never reports inside 60 minutes, is dropped from the queue
+  and its PR quietly returns to open with auto-merge off. Read
+  `gh pr view <n> --json state,mergedAt,mergeStateStatus` and believe that instead.
+- **Silence is not progress.** A dropped entry produces no failure event. If a PR has neither
+  merged nor failed by your next check-in, assume ejection and re-enqueue.
+- **One push can carry several PRs**, so the `release` run in Step 4 may be a batch head that
+  contains your commit rather than a run named for it.
 
 ## Step 1: Compare implementation to plan
 
@@ -66,9 +86,9 @@ If consistent: proceed. No need to ask.
 2. Commit on the session's designated feature branch, push with `git push -u origin <branch>`.
 3. Open a PR against `master` (`mcp__github__create_pull_request`). The body should
    summarize the plan and note that the implementation matches it.
-4. Enable auto-merge: `mcp__github__enable_pr_auto_merge` (squash). If the repo refuses
-   (auto-merge disabled or no branch protection), fall back to merging manually with
-   `mcp__github__merge_pull_request` once PR CI is green.
+4. Enable auto-merge: `mcp__github__enable_pr_auto_merge` (squash). Under the queue this
+   enqueues the PR when it is otherwise ready — see Merge semantics above. There is no
+   manual-merge fallback: direct merges to `master` are blocked by the ruleset.
 5. Subscribe to the PR: `subscribe_pr_activity`. Then end the turn — events wake the
    session; never poll with sleep.
 
@@ -80,7 +100,9 @@ gate every PR on, and a copy of it in this skill went stale within two plans. A 
 SMALLER tier than CI's is not "what CI runs": suites are gated on the capabilities they need,
 so the ones CI declares and you did not are the ones you will not have run.
 
-- **CI green + auto-merge fires → merged.** Go to Step 4.
+- **CI green + auto-merge fires → enqueued, then merged.** Go to Step 4.
+- **Ejected from the queue →** not a CI failure and it raises no event. Diagnose the queue
+  entry's own `test` run, fix if it was yours, and re-enqueue.
 - **CI fails →** diagnose from the logs (`mcp__github__get_job_logs`), reproduce locally
   where the capability tiers allow, fix, and repeat this process from Step 1: the fix is
   itself a change, so re-compare it to the plan. A mechanical fix (lint, missed test
@@ -112,6 +134,7 @@ PR webhooks stop at merge, so watch master actively:
 
 ## Definition of done
 
-Merged to master AND the master `release` pipeline is green for (or after) the merge
-commit. Anything short of that, the loop is still running — either an event subscription
-or a scheduled check-in must be armed before ending the turn.
+Merged to master — confirmed from the PR's merge state, not from a green check — AND the
+master `release` pipeline is green for (or after) the merge commit. Anything short of that,
+the loop is still running — either an event subscription or a scheduled check-in must be
+armed before ending the turn.
