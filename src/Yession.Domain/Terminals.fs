@@ -32,6 +32,29 @@ module TerminalSize =
     /// terminal, it is a broken one — and it reaches us from a doc any peer can write.
     let isValid (size: TerminalSize) : bool = size.Cols > 0 && size.Rows > 0
 
+    /// How a size is written into a transcript, and read back out of one — `"120x40"`, the
+    /// asciicast `"r"` record's payload.
+    ///
+    /// The pair lives here, with the type, because the two halves run in different processes:
+    /// the Session Process writes the record when it resizes a pty, and a browser reads it to
+    /// reshape the emulator composing that terminal's screen. A `sprintf` on one side and a
+    /// regex on the other is one format in two places, and the side that drifts is the side
+    /// nothing round-trips.
+    let format (size: TerminalSize) : string = sprintf "%dx%d" size.Cols size.Rows
+
+    /// `None` for anything that is not two positive integers around one `x`. A transcript is
+    /// replayed by clients that did not write it, and a record that cannot be read is a record
+    /// to skip — never a reason to stop reading the rest.
+    let parse (text: string) : TerminalSize option =
+        match text.Split 'x' with
+        | [| cols; rows |] ->
+            match System.Int32.TryParse cols, System.Int32.TryParse rows with
+            | (true, cols), (true, rows) ->
+                let size = { Cols = cols; Rows = rows }
+                if isValid size then Some size else None
+            | _ -> None
+        | _ -> None
+
 /// Where a block is in its life.
 ///
 /// `BlockRejected` widens what a block IS, deliberately: a `BlockId` names a proposed

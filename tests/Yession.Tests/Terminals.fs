@@ -396,6 +396,25 @@ let private emulatorTests =
             Expect.isFalse (TerminalSize.isValid { Cols = 80; Rows = -1 }) "nor are negative rows"
             Expect.isTrue (TerminalSize.isValid TerminalSize.default') "the default is always valid"
 
+        testCase "a size round-trips through the record a transcript writes it as" <| fun () ->
+            // The two halves of this run in different processes — the Session Process writes
+            // the record when it resizes a pty, a browser reads it to reshape the emulator
+            // composing that terminal's screen — so the format is only ever right if one of
+            // them cannot drift from the other.
+            let size = { Cols = 132; Rows = 43 }
+            Expect.equal (TerminalSize.format size) "132x43" "the asciicast `r` payload"
+            Expect.equal (TerminalSize.parse (TerminalSize.format size)) (Some size) "and it reads back"
+
+        testCase "a resize payload that is not a size is skipped, never guessed at" <| fun () ->
+            // A transcript is replayed by clients that did not write it, so an unreadable
+            // record is one to step over — the alternative is a screen reshaped to a number
+            // nobody wrote.
+            Expect.equal (TerminalSize.parse "") None "nothing is not a size"
+            Expect.equal (TerminalSize.parse "80") None "one dimension is not a size"
+            Expect.equal (TerminalSize.parse "80x24x2") None "nor are three"
+            Expect.equal (TerminalSize.parse "eighty x twenty-four") None "nor words"
+            Expect.equal (TerminalSize.parse "0x24") None "nor a dimension nothing can render"
+
         testCaseAsync "the no-op emulator answers everything without keeping a screen" <|
             async {
                 // A host with no emulator still runs terminals; only the join snapshot is
@@ -1401,14 +1420,31 @@ let private codecTests =
             let frames =
                 [ Terminal (TerminalRecord (terminalA, 7, { At = 1.0; Kind = TranscriptOutput; Data = "hi" }))
                   Terminal (TerminalTranscriptAvailable (terminalA, 42))
-                  // The screen a joining peer renders, and the seq it composes with.
-                  Terminal (TerminalSnapshot (terminalA, 42, "screen"))
+                  // The screen a joining peer renders: the seq it composes with, and the
+                  // geometry it was painted at.
+                  Terminal (TerminalSnapshot (terminalA, { Seq = 42; Cols = 120; Rows = 40; Screen = "screen" }))
                   // Live mode's two peer-authored frames (stage 2e).
                   Terminal (TerminalInput (terminalA, "\u001b[A"))
                   Terminal (TerminalResize (terminalA, 120, 40)) ]
             for frame in frames do
                 let encoded = Codec.toString codec frame
                 Expect.equal (Codec.fromString codec encoded) (Ok frame) ("round-trips: " + encoded)
+
+        testCase "a snapshot with no geometry is the size every terminal opens at" <| fun () ->
+            // The size was added to a frame that already existed, and a client's bundle is
+            // served over a cache it may not have refreshed. A snapshot written without it
+            // came from a Process that had resized nothing, so 80x24 is not a fallback guess
+            // here — it is what that screen was painted at.
+            let codec = Codec.sessionFrame Codec.string
+            let older =
+                """{"tag":"terminal","payload":{"kind":"snapshot","terminalId":"term-a",""" +
+                """"seq":42,"screen":"screen"}}"""
+            match Codec.fromString codec older with
+            | Ok (Terminal (TerminalSnapshot (_, keyframe))) ->
+                Expect.equal keyframe.Seq 42 "the fields it did carry are read"
+                Expect.equal keyframe.Screen "screen" "including the screen"
+                Expect.equal (keyframe.Cols, keyframe.Rows) (80, 24) "and the one it did not is the opening size"
+            | other -> failwithf "a snapshot written before the geometry must still read back, got %A" other
 
         testCase "the terminal commands and focus fields round-trip" <| fun () ->
             let codec = Codec.sessionFrame Codec.string
@@ -2173,7 +2209,8 @@ let private sourceTests =
                 let! snapshot = terminals.Snapshot id
                 let length = terminals.Lengths () |> List.tryFind (fst >> (=) id) |> Option.map snd
                 match snapshot, length with
-                | Some (seq, _), Some hinted -> Expect.equal seq hinted "one currency, or the client splices at the wrong line"
+                | Some keyframe, Some hinted ->
+                    Expect.equal keyframe.Seq hinted "one currency, or the client splices at the wrong line"
                 | other -> failwithf "expected a snapshot and a length, got %A" other
             }
 
