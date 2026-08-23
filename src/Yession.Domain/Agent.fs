@@ -238,12 +238,78 @@ type CheckPending = QueueId -> Async<Result<PendingOutcome, string>>
 /// `execute_command` and the classifier that gates it.
 type WriteTerminal = TerminalId -> string -> Async<Result<string, string>>
 
-/// The tail of what a terminal has said, and how much of it was left out.
+/// Holding a read open until the device says a particular thing.
 ///
-/// `Elided` is stated rather than silently dropped, for `TerminalCommandOutcome`'s reason: a
-/// model that cannot tell a short output from a truncated one will confidently describe the
-/// wrong thing.
-type TerminalTail = { Text : string; Elided : int }
+/// The missing half of `write_terminal`. A device is request/response with no framing: you
+/// type `AT\r` and the answer arrives when it arrives, so a read taken immediately after
+/// returns nothing and a read taken later is a guess about how much later. Polling burns
+/// turns and still races the device.
+/// What a wait is waiting for. A closed choice rather than two nullable fields, so "both at
+/// once" is not a state anything downstream has to consider: the tool boundary refuses it,
+/// and past there it cannot be said.
+type TerminalMatch =
+    /// Exactly these characters. The honest minimum, and what "wait for `login: `" wants.
+    | MatchLiteral of string
+    /// A pattern over the subset `TerminalPattern` accepts — compiled at the boundary, so a
+    /// pattern outside the subset is an answer to the tool call rather than a surprise in the
+    /// middle of a wait.
+    | MatchPattern of pattern: TerminalPattern * source: string
+
+module TerminalMatch =
+
+    /// Does what a terminal said satisfy this — or, if the matcher could not answer, why.
+    ///
+    /// A literal always answers. A pattern answers unless the matcher exceeded its own step
+    /// budget, which is a fault in this code rather than in the caller's pattern; it is
+    /// carried rather than swallowed, because a wait that quietly reported "not yet" for a
+    /// broken matcher would look exactly like a device that never spoke.
+    let isMet (target: TerminalMatch) (text: string) : Result<bool, string> =
+        match target with
+        | MatchLiteral literal -> Ok (text.Contains literal)
+        | MatchPattern (compiled, _) -> TerminalPattern.matches compiled text
+
+    /// How to name it when saying it never arrived.
+    let describe (target: TerminalMatch) : string =
+        match target with
+        | MatchLiteral literal -> literal
+        | MatchPattern (_, source) -> sprintf "the pattern %s" source
+
+type TerminalWait =
+    { /// What to wait for. Literal text or a pattern — see `TerminalMatch`.
+      Until : TerminalMatch
+      /// How long to hold before answering with what WAS said. Bounded here rather than by
+      /// the caller: a tool call that could be asked to wait an hour is a turn somebody
+      /// loses.
+      TimeoutSeconds : float }
+
+/// A window of what a terminal has said, and where in its recording that window sits.
+///
+/// It carries its own bounds because a reader that cannot say WHERE it read cannot read on.
+/// The tail answers "what is it saying now"; everything else worth asking — what did this say
+/// before I arrived, what did it say between these two lines — is the same question asked
+/// from a different line, and `Through` is what makes asking it possible.
+type TerminalTail =
+    { Text : string
+      /// Characters left out of the START of this window. Non-zero only on a TAIL, which is
+      /// bounded by characters so it fits a context window and says what it dropped. A PAGE
+      /// is bounded by where it STOPPED and says so with `Through` instead — a page that
+      /// elided its own middle would hand back a cursor skipping lines nobody was told about.
+      ///
+      /// Stated rather than silently dropped, for `TerminalCommandOutcome`'s reason: a model
+      /// that cannot tell a short output from a truncated one will confidently describe the
+      /// wrong thing.
+      Elided : int
+      /// The first transcript line this window covers.
+      From : int
+      /// One past the last line it covers. Pass it back as `from` to read on.
+      Through : int
+      /// One past the last line the terminal has. `Through = Length` means this window
+      /// reaches the live edge, and is the only way a reader can tell that it does.
+      Length : int
+      /// Whether what the caller was waiting for arrived. `None` when it was not waiting.
+      /// `Some false` is a timeout, and the text is what WAS said — usually where the answer
+      /// is, which is why a timeout is an answer here rather than an error.
+      Matched : bool option }
 
 /// Read what a terminal with no blocks has said (Plan 19).
 ///
@@ -256,7 +322,13 @@ type TerminalTail = { Text : string; Elided : int }
 /// comes back from `execute_command`, and every block since the last turn is already in the
 /// context pack. A second way to read the same bytes would be a second answer to one
 /// question.
-type ReadTerminal = TerminalId -> Async<Result<TerminalTail, string>>
+///
+/// `from` is a line a previous read handed back, or `None` for the tail. Reading an hour back
+/// is not more of a claim on the device than reading the last line — it is the same read from
+/// a different place, which is why it is an argument rather than a second verb.
+///
+/// `waitFor` is the same read held open until the device says something. See `TerminalWait`.
+type ReadTerminal = TerminalId -> int option -> TerminalWait option -> Async<Result<TerminalTail, string>>
 
 /// One terminal, as the AGENT is told about it (Plan 20, stage 3). What a person reads off a
 /// row in the list, in the shape a model reads — the same facts, because they are looking at
@@ -306,6 +378,13 @@ type ListTerminals = unit -> Async<Result<TerminalSummary list, string>>
 /// which is where it has to be anyway, since what the gate carries is what the agent reads.
 type AddRepo = RepoRef -> Async<Result<CommandOutcome, string>>
 
+/// Delete a repo's checkout from the session, and record that it is gone (Plan 26).
+///
+/// `force` is the second decision: a checkout with uncommitted changes is REFUSED without
+/// it, because that is the one thing here a re-clone cannot undo — it brings back the
+/// commits and nothing else.
+type RemoveRepo = RepoRef -> bool -> Async<Result<CommandOutcome, string>>
+
 /// Switch a repo's checkout to a branch, optionally creating it. Local ref movement
 /// only — never touches the remote.
 type SwitchRepoBranch = RepoRef -> string -> bool -> Async<Result<CommandOutcome, string>>
@@ -346,6 +425,14 @@ type StartWorkSandbox = SandboxName -> string list -> Async<Result<CommandOutcom
 /// forwarding, and stated as such wherever the change is refused.
 type StopWorkSandbox = SandboxName -> Async<Result<CommandOutcome, string>>
 
+/// Set (or clear) where a shell opened in one sandbox starts (Plan 25). `None` clears it,
+/// back to the sandbox's own default — one verb, because "what does a new terminal do" has
+/// one answer at a time.
+///
+/// A DIRECTORY and not a script: each field of a profile is applied by the spawn, so this
+/// can never become a second way to run something. See `ShellProfile`.
+type SetShellProfile = SandboxName -> string option -> Async<Result<CommandOutcome, string>>
+
 /// Answer one of the session's registered queries (Plan 15). The agent reaches the SAME
 /// registry the humans' settings surface streams from — that is the whole point of a
 /// query being a declaration rather than a tool body: one declaration, two audiences, no
@@ -384,6 +471,9 @@ type AgentCapabilities =
       // The repo verbs (Plan 14): read-only bootstrap — clone and orient. Commit/push
       // stay behind ExecuteCommand, which is what keeps the one-door invariant intact.
       AddRepo : AddRepo
+      /// The one repo verb that destroys something, and the reason `add_repo`'s advice about
+      /// an unreadable checkout finally names a tool that exists.
+      RemoveRepo : RemoveRepo
       SwitchRepoBranch : SwitchRepoBranch
       FetchRepo : FetchRepo
       RepoStatus : InspectRepo
@@ -401,6 +491,10 @@ type AgentCapabilities =
       // these decide which sandboxes exist, not what runs in them.
       StartWorkSandbox : StartWorkSandbox
       StopWorkSandbox : StopWorkSandbox
+      /// Where terminals opened in a sandbox from now on start (Plan 25). A command like
+      /// the two above: it changes what every future terminal does — the people's as much
+      /// as the agent's — which is exactly the kind of act the gate exists for.
+      SetShellProfile : SetShellProfile
       /// Where every tool call this turn makes is recorded (Plan 16, part C). ONE seam,
       /// bound to the turn by whoever built these capabilities, and wrapped around the
       /// WHOLE registry rather than around each tool — so a provider added later cannot
@@ -427,7 +521,7 @@ module AgentCapabilities =
         { ExecuteCommand = fun _ -> async { return Error "no terminal capability" }
           CheckPending = fun _ -> async { return Error "no terminal capability" }
           WriteTerminal = fun _ _ -> async { return Error "no terminal capability" }
-          ReadTerminal = fun _ -> async { return Error "no terminal capability" }
+          ReadTerminal = fun _ _ _ -> async { return Error "no terminal capability" }
           OpenTerminal = fun _ _ -> async { return Error "no terminal capability" }
           CloseTerminal = fun _ -> async { return Error "no terminal capability" }
           ListTerminals = fun () -> async { return Error "no terminal capability" }
@@ -438,6 +532,7 @@ module AgentCapabilities =
           ListSecrets = fun () -> async { return Error "no secrets capability" }
           DeleteSecret = fun _ -> async { return Error "no secrets capability" }
           AddRepo = fun _ -> async { return Error "no repos capability" }
+          RemoveRepo = fun _ _ -> async { return Error "no repos capability" }
           SwitchRepoBranch = fun _ _ _ -> async { return Error "no repos capability" }
           FetchRepo = fun _ -> async { return Error "no repos capability" }
           RepoStatus = fun _ -> async { return Error "no repos capability" }
@@ -447,6 +542,7 @@ module AgentCapabilities =
           ReadQuery = fun _ -> async { return Error "no query capability" }
           StartWorkSandbox = fun _ _ -> async { return Error "no sandbox capability" }
           StopWorkSandbox = fun _ -> async { return Error "no sandbox capability" }
+          SetShellProfile = fun _ _ -> async { return Error "no terminal capability" }
           RecordToolUse = ToolUseLog.none
           ForeignTools = [] }
 

@@ -63,6 +63,7 @@ let all =
         Tag.needs "The jumpstarter provider" [ Tag.Jumpstarter ] (fun () -> Jumpstarter.tests)
         Tag.needs "SessionProcess" [] (fun () -> SessionProcess.tests)
         Tag.needs "Sync" [] (fun () -> Sync.tests)
+        Tag.needs "TerminalPattern" [] (fun () -> TerminalPattern.tests)
         Tag.needs "Terminals" [] (fun () -> Terminals.tests)
         Tag.needs "Timeline" [] (fun () -> Timeline.tests)
         // The upgrade IS the thing being tested, and there is no in-memory stand-in for it.
@@ -110,6 +111,10 @@ let all =
         // path-preserving proxy: the only check that `<base href>` resolution works in a
         // real browser rather than in reasoning about one (docs/plans/10).
         Tag.needs "Path-mounted session (browser)" [ Tag.Browser; Tag.Native ] (fun () -> Browser.mountedTests)
+        // Creating a session behind a deployment's front door, pressed in a real browser: the
+        // only place the difference between "the address answered" and "the session answered"
+        // is observable, because it is the browser that acts on the answer.
+        Tag.needs "Creating a session behind a front door (browser)" [ Tag.Browser; Tag.Native ] (fun () -> Browser.frontDoorTests)
     ]
 
 [<EntryPoint>]

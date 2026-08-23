@@ -44,15 +44,21 @@ module Dom =
         let sessionId = "data-session-id"
         let cursorPeer = "data-cursor-peer"
         // Sidebar — identity & live sync state.
+        /// The transport's exact state token, ALWAYS present and never words on the screen:
+        /// a healthy client says nothing about being healthy, so this is the only thing a
+        /// test (or the browser suite, waiting for a session to come up) can read it off.
         let connection = "data-connection"
         let displayName = "data-display-name"
         let catchUp = "data-catch-up"
-        /// Why the client is not connected, when it knows; absent otherwise.
-        let connectionReason = "data-connection-reason"
         /// The durable event feed's health (sidebar), carrying a `Text.feed*` token.
         let feed = "data-feed"
-        /// The one degradation strip over the timeline, carrying the token of whichever leg
-        /// is down (`Text.degraded*` or `Text.feed*`); absent when everything is healthy.
+        /// A mount of the connection report, carrying the token of whichever leg is down
+        /// (`Text.degraded*` or `Text.feed*`); absent entirely when everything is healthy.
+        ///
+        /// TWO elements wear it — the nav column's, and the bar for where the column cannot be
+        /// seen — and they are complementary, so a person only ever sees one. That is a
+        /// VISIBILITY rule, which no markup test can settle: both mounts are in the document
+        /// at once by design. The browser suite counts the visible ones.
         let degraded = "data-degraded"
         let lastProcessedOffset = "data-last-processed-offset"
         let latestKnownOffset = "data-latest-known-offset"
@@ -121,6 +127,10 @@ module Dom =
         /// something is wrong cannot be mistaken for chrome.
         let signInRequired = "data-signin-required"
         let signInAgain = "data-signin-again"
+        /// The disclosure a notice folds its mechanism into, valued by which notice it
+        /// belongs to. ONE hook across every one of them, because it is one move: the
+        /// consequence is on the surface, the reason for it is a keypress away.
+        let detail = "data-detail"
         /// The model picker (settings): the section, and the control itself. The control's
         /// VALUE is the session's current choice — a model id, or `default` where the
         /// provider is left to choose — so a test reads the state off the same attribute it
@@ -233,29 +243,35 @@ module Dom =
         let paneReplay = "data-pane-replay"
         /// A stretch's facts, above its recording.
         let paneStretch = "data-pane-stretch"
-        /// The step-out from a block's view to the whole terminal's recording.
-        let panePlayWhole = "data-pane-play-whole"
-        /// A block's own way between its two reads: the output it printed, and the recording
-        /// of it printing. One control saying whichever the reader is not looking at, so the
-        /// press that swaps the body keeps the focus it was pressed with.
-        let panePlay = "data-pane-play"
+        /// From a block, to that command in its terminal's own history (Plan 25, stage 3):
+        /// the same text, scrolled to it and marking it. The reader's other question — not
+        /// "what did this print", which the block already answers, but "what was going on
+        /// around it" — and text answers it, where a player used to.
+        let paneShowInTerminal = "data-pane-show-in-terminal"
+        /// A block's way between its two reads: the output it printed, and the recording of
+        /// it printing. One control saying whichever the reader is not looking at, so the
+        /// press that swaps the body keeps the focus it was pressed with. Its VALUE is the
+        /// face it will show — `watch` / `output` — the same contract the list toggle keeps.
+        let paneWatch = "data-pane-watch"
         /// The live screen of a terminal in live mode (Plan 14, stage 6). Its value is the
         /// terminal's id; the holder's copy is the one that takes keystrokes, and every other
         /// peer's is the same screen read-only.
         let terminalScreen = "data-terminal-screen"
-        /// The DVR (Plan 14, stage 7): step back through what a LIVE terminal has recorded
-        /// so far, and catch back up to its edge. Offered on any live terminal, whichever
-        /// mode it is in — both are one growing byte stream, and a rule that offered it for
-        /// an interactive session and not for a running build would be a special case to
-        /// explain rather than a feature.
-        let terminalRewind = "data-terminal-rewind"
-        let terminalLive = "data-terminal-live"
-        /// The same pair on a CLOSED terminal: the way into its recording, and the way back
-        /// to the blocks it ran. One mechanism with two ends — a recording is somewhere you
-        /// GO, live or finished — so these sit in the same two slots as the DVR's and hand
-        /// focus on the same way.
-        let terminalPlay = "data-terminal-play"
-        let terminalBlocks = "data-terminal-blocks"
+        /// A terminal's one way between its two reads (Plan 14, stage 7; Plan 25, stage 3):
+        /// its text — the live screen, or the blocks that ran — and its recording.
+        ///
+        /// ONE control, in one slot, whatever the terminal is doing. It was four: two ways in
+        /// at the top of the scrollback (`↑ replay from the start`, `↑ play the recording`)
+        /// and two ways out floating over it (`Back to blocks`, `Jump to live`), each
+        /// removing another from the document and each needing focus handed on after it.
+        /// A toggle that relabels in place is the same act with none of that, and the words
+        /// are the reader's: on a live terminal, watching means going behind its edge and the
+        /// way back is `Live`.
+        ///
+        /// Its VALUE is the face it will show — `watch` / `output` / `live` — so a test can
+        /// read the state off the attribute it clicks, and the browser can hand focus to
+        /// whichever control replaced the one it just lost.
+        let terminalWatch = "data-terminal-watch"
         /// How far behind live the rewound reader is, growing as the terminal keeps
         /// printing under them.
         let terminalBehind = "data-terminal-behind"
@@ -268,8 +284,8 @@ module Dom =
         /// One row, carrying its terminal's id — and the control that shows that terminal,
         /// so a row is keyboard-operable by construction rather than by a handler on a div.
         let terminalListRow = "data-terminal-list-row"
-        /// The rewind, on a row. Its own hook because the pane keeps a DVR rewind of its own
-        /// (`terminalRewind`) for the terminal it is showing, and the two are different
+        /// The rewind, on a row. Its own hook because the pane keeps a watch toggle of its own
+        /// (`terminalWatch`) for the terminal it is showing, and the two are different
         /// controls in different places — unlike the kill and the attach-again, which the
         /// list is now the ONLY home of (Plan 20, stage 1) and which therefore keep the names
         /// they have always had: `terminalClose`, `terminalReattach`.
@@ -295,6 +311,12 @@ module Dom =
         // once (the header's status and the sidebar's sync row).
         let catchingUp = "Catching up"
         let upToDate = "Up to date"
+
+        /// The word on every notice's disclosure. ONE word across all of them: the move is
+        /// the same wherever it appears — what this costs you is on the surface, why it is
+        /// happening is one keypress in — and a surface that invented its own word for it
+        /// would read as a different kind of control.
+        let details = "Details"
 
         // Where a peer is (presence, in the roster and on a terminal tab). The VALUE of
         // `data-peer-at` is one of these FIELD tokens — stable, one per collaborative field
@@ -325,24 +347,39 @@ module Dom =
         let degradedReconnecting = "reconnecting"
         // The reconnect offer's button (Plan 11).
         let reopenSession = "Reopen session"
+        /// What reopening costs, on that offer's card. Two, because a deployment that
+        /// addresses sessions by port brings one back at a NEW origin, and a browser
+        /// partitions storage by origin — the promise the first can make is the one the
+        /// second cannot keep. Both say the CONSEQUENCE; `ephemeralAddress` is the
+        /// mechanism, and it goes behind the disclosure.
+        let reopenPromise = "Your work is saved here and will sync when the session is back."
+        let reopenPromiseEphemeral = "Anything written here since it stopped will be lost."
         /// What a credential that stopped working asks for. The panel row says it as a
         /// STATUS, in the caps the other status words use; the prompt over the timeline says
         /// it on a button, in the sentence case the other actions use. One phrase either
         /// way, because it is one thing to do.
         let signInAgain = "Sign in again"
         let signInAgainStatus = "sign in again"
+        /// What a dead credential COSTS, on the prompt over the timeline. The button beside
+        /// it already says what to do; this says why doing it matters, which is the half a
+        /// status word and a button cannot carry between them.
+        let signInLost (provider: string) : string = "This session cannot reach " + provider + " on your behalf."
         /// Ask now rather than waiting out the supervised backoff (Plan 20). The wording is
         /// what a person wants of it, not what it does to the loop.
         let retryNow = "Try again"
         /// What every degraded state promises: this is a local-first client, so a lost leg
         /// costs sync, not the ability to work.
-        let localFallback = "You can keep writing — everything is saved locally and syncs when the session is back."
+        let localFallback = "Your work is saved on this device and will sync when the session is back."
         /// The same promise where it cannot be kept (Plan 13): this deployment addresses
         /// sessions by port, so a session that restarts comes back at a new origin — and a
         /// browser partitions storage by origin, which strands anything written here in the
         /// meantime. Everything already sent is safe; it is on the server.
-        let localFallbackEphemeral =
-            "You can keep writing, but this session reopens at a new address — anything written here while it is away will not come back with it."
+        let localFallbackEphemeral = "Anything you write while the session is away will be lost."
+        /// WHY those two differ, said once and folded away on both surfaces that carry it.
+        /// Nobody needs the browser's storage model to understand what it costs them — but
+        /// the reader who wonders why a local-first client would lose anything is owed it.
+        let ephemeralAddress =
+            "This session reopens at a new address, and a browser keeps saved work separately for each address."
         /// The model picker's state token, and its first option, for when nobody has chosen:
         /// the provider decides. Named rather than blank because "no model is set" and
         /// "whatever the provider picks" are the same fact, and only one of them is a
@@ -353,14 +390,20 @@ module Dom =
         /// context; a session reached over plain HTTP at a non-loopback address has none, so
         /// nothing is kept and — without this — nothing says why, which is indistinguishable
         /// from a bug. The remedy is the operator's, and it is one flag, so name it.
-        let historyNotKept =
-            "History is not kept on this device: this session is served over plain HTTP, and a browser "
-            + "withholds storage of this kind outside a secure context. Serving it over HTTPS restores it."
+        let historyNotKept = "This session's history will not be kept on this device."
+        let historyNotKeptWhy =
+            "It is served over plain HTTP, and a browser withholds storage of this kind outside a "
+            + "secure context. Serving it over HTTPS restores it."
         /// What the composer's keys do, shown in the composer while you are in it. Enter is
         /// the send because that is what every chat surface's Enter is; what it used to do
         /// did not disappear, it split in two — a line break and a paragraph, which Enter
         /// alone could never tell apart.
         let composerKeys = "Enter sends · Shift+Enter line · Alt+Enter paragraph"
+        /// What an empty composer says, so that a thin unmarked bar reads as somewhere to
+        /// write. Lowercase and wordless of instruction, like every other prompt on the
+        /// surface — `composerKeys` above teaches the keys, and this only says what the bar
+        /// is. Drawn from a node decoration (`Editor.placeholderPlugin`), never content.
+        let composerPlaceholder = "write a message"
         /// What the timeline's pulse means, for a reader who cannot see it pulse (Plan 20).
         let readingHistory = "Reading this session's history"
         /// What stands where history this device does not hold would be (Plan 20). Said only
@@ -388,14 +431,21 @@ module Dom =
         let pinned = "pinned"
         /// What a second activation of the tab you are on will do. A gesture has no control
         /// of its own to be labelled, so it says so from the tab it acts on.
-        let pinHint = "Select again to keep this tab"
-        let unpinHint = "Select again to release this tab"
+        let pinHint = "Select again to pin this tab"
+        let unpinHint = "Select again to unpin this tab"
         /// A queued command that will run as soon as the terminal is free.
         let queuedReady = "ready"
         /// A queued command held because a peer is typing in its terminal (Plan 13, stage
         /// 2e) — it resolves when the person finishes their task, and a queue that said
         /// only *pending* would leave that looking like a stall.
         let queuedAwaitingTerminal = "awaiting-terminal"
+        /// What a terminal that stopped marking costs, and why, on that terminal's own band.
+        /// The status word says the fault; this says what it does to the queue, which is the
+        /// thing a person is about to wonder about.
+        let terminalNotMarking = "Queued commands are held until the terminal is re-armed."
+        let terminalNotMarkingWhy =
+            "The shell stopped reporting when a command starts and finishes, so nothing here can "
+            + "tell when one has run."
         /// A queued command held because its terminal's shell stopped marking (Plan 13, stage
         /// 2f). Apart from `queuedAwaitingTerminal` because it resolves differently: one ends
         /// when a person finishes a task, this one when somebody repairs the terminal.
@@ -416,8 +466,8 @@ module Dom =
         /// The same fact, at length, for the reader who wants it. Never the visible label:
         /// the chat's meta line is three short words wide.
         let turnWokeCommandFinished = "The agent picked this up on its own: a command it left running in the background finished."
-        let turnWokeStreamEnded = "The agent picked this up on its own: a terminal it had been working in was attached to a stream that has now ended."
-        let turnWokeIntegrationLost = "The agent picked this up on its own: a terminal it had a command running in stopped reporting, so nothing further will say how that command ended."
+        let turnWokeStreamEnded = "The agent picked this up on its own: the stream behind a terminal it was working in has ended."
+        let turnWokeIntegrationLost = "The agent picked this up on its own: a terminal it had a command running in stopped reporting, so nothing will say how that command ended."
         // Conversation item status.
         let complete = "complete"
         let streaming = "streaming"

@@ -104,10 +104,42 @@ let gitExecutable (ambient: Map<string, string>) : string =
     |> Option.filter (fun path -> path <> "")
     |> Option.defaultValue "git"
 
+/// The one exec any git invocation here is built from — the probe and every verb alike.
+///
+/// A function rather than a record literal per call site, because `hardenedEnv` is not
+/// hardening if a call site can be written without it, and one was: the probe spawned
+/// `git --version` with an EMPTY env, which is an env no verb ever runs with. So it
+/// answered a question about a git nothing here executes, and it answered it wrong.
+///
+/// git resolves its global config path before it does anything at all, `--version`
+/// included. It tolerates an EACCES there — unreadable reads as absent — and treats every
+/// other errno as fatal. A sandbox that denies the operator's home (Plan 24's read scope)
+/// answers EPERM, not EACCES, so the probe died with `fatal: unable to access
+/// '~/.config/git/config'` (exit 128) on a host where every verb, which nulls that path,
+/// ran fine. The sandbox was then refused for its whole lifetime in words naming
+/// `YESSION_GIT_PATH` and `YESSION_SANDBOX_READ_PATHS`: a working binary, and a read scope
+/// whose only fault was doing its job. Following that advice would have widened the scope
+/// to hand back the home it exists to deny.
+let gitExec
+    (git: string)
+    (workingDirectory: string)
+    (allowProtocol: string)
+    (token: string option)
+    (args: string list)
+    : SandboxExec =
+    { Executable = git
+      Arguments = args
+      Env = hardenedEnv allowProtocol token |> Map.ofList
+      WorkingDirectory = Some workingDirectory }
+
 /// What a sandbox that cannot run git says. It is a whole sentence with the two knobs in
 /// it because the alternative is what shipped: the host binary's own parting words —
 /// `xcode-select: error: unable to read data link ...` — which name neither the sandbox
 /// nor anything an operator can set.
+///
+/// Both knobs are honest only because the probe now runs the verbs' env: what it rules out
+/// before it speaks is every config file git would otherwise have gone looking for, so
+/// what is left really is the binary or the runtime it reads.
 let unusableGit (git: string) (reason: string) : string =
     sprintf
         "git ('%s') cannot run inside the sandbox: %s. Name a working git with YESSION_GIT_PATH; if it needs files the sandbox's read scope denies, name those with YESSION_SANDBOX_READ_PATHS."
@@ -185,7 +217,15 @@ type ReposService =
       RepoStatus : RepoRef -> Async<Result<string, string>>
       RepoLog : RepoRef -> Async<Result<string, string>>
       RepoDiff : RepoRef -> Async<Result<string, string>>
-      RemoveRepo : RepoCaller -> RepoRef -> Async<Result<unit, string>> }
+      /// Delete a checkout, and answer with the path it was at AS A TERMINAL SAW IT (Plan
+      /// 26). That path rather than `unit`, because it is the one fact only this service has
+      /// and the only one a shell profile could have been holding — the git sandbox's own
+      /// path is visible to no terminal in this session.
+      ///
+      /// `force` is required to delete a checkout with uncommitted changes. An UNREADABLE
+      /// checkout needs none: clearing one is what this verb was advertised for long before
+      /// it existed, and refusing there would leave no way out of an interrupted clone.
+      RemoveRepo : RepoCaller -> RepoRef -> bool -> Async<Result<string, string>> }
 
 [<ImportAll("node:fs")>]
 let private fs : obj = jsNative
@@ -218,18 +258,44 @@ let create (config: ReposConfig) : Result<ReposService, string> =
     Sandboxes.forBackend config.Backend "git" EnvironmentSpec.defaults
     |> Result.map (fun createSandbox ->
 
+        /// The repos directory as an ABSOLUTE path, resolved once here and used for every
+        /// path below — never `config.ReposDir` again.
+        ///
+        /// Every verb but the clone runs `git -C (pathOf repo)` in a sandbox whose working
+        /// directory IS this directory, so a relative one is resolved twice: git looks for
+        /// `<reposDir>/<reposDir>/owner/repo` and exits 128 with `cannot change to ...: No
+        /// such file or directory`. The clone is the one verb that survives it, because it
+        /// passes a target relative to that same cwd on purpose — so the checkout lands and
+        /// then every verb, `add_repo`'s own listing included, reports a failure about it.
+        /// A session whose data directory is relative (the unset-`YESSION_SESSION_DATA`
+        /// default is) had exactly that: a repo on disk that no verb would admit to.
+        ///
+        /// Resolved HERE rather than only at the composition root because this is where a
+        /// relative path stops being a path and starts being a wrong answer, and the next
+        /// caller to build one of these has not read the root.
+        let reposDir = Fs.absolute config.ReposDir
+
         let policy : SandboxPolicy =
-            { ReadPaths = config.ReposDir :: config.ExtraReadPaths
-              WritePaths = [ config.ReposDir ]
+            { ReadPaths = reposDir :: config.ExtraReadPaths
+              WritePaths = [ reposDir ]
               AllowedDomains = Some config.AllowedDomains
               Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-              WorkingDirectory = Some config.ReposDir
+              WorkingDirectory = Some reposDir
               Filesystem = Confined }
+
+        /// Every git this service spawns, built in the one place that carries the hardened
+        /// env (`gitExec`) — so the probe below cannot drift from the verbs it speaks for.
+        let execFor (token: string option) (args: string list) : SandboxExec =
+            gitExec config.Git reposDir config.AllowProtocol token args
 
         /// `git --version` inside the sandbox, before any verb runs one. A sandbox that
         /// cannot run git is not a git sandbox, and this is where it says so: the
         /// alternative is every verb reporting whatever the host's binary printed on its
         /// way out, once per verb, in words that name neither the sandbox nor a knob.
+        ///
+        /// It runs a VERB's environment (no token: `--version` reaches no remote), because
+        /// a probe that runs anything else proves nothing about the invocations it gates —
+        /// which is exactly how it once refused a git that worked.
         ///
         /// It costs one spawn per sandbox lifetime — two per session, milliseconds under
         /// srt — and it is the guard that catches the NEXT unreadable runtime rather than
@@ -237,12 +303,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
         let usable (sandbox: Sandbox) : Async<Result<Sandbox, string>> =
             async {
                 let mutable output = ""
-                let exec : SandboxExec =
-                    { Executable = config.Git
-                      Arguments = [ "--version" ]
-                      Env = Map.empty
-                      WorkingDirectory = Some config.ReposDir }
-                match! sandbox.Spawn exec (fun (_, chunk) -> output <- output + chunk) with
+                match! sandbox.Spawn (execFor None [ "--version" ]) (fun (_, chunk) -> output <- output + chunk) with
                 | Error reason -> return Error (unusableGit config.Git reason)
                 | Ok handle ->
                     match! handle.Exited with
@@ -296,12 +357,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                 | Ok sandbox ->
                     let mutable stdout = ""
                     let mutable stderr = ""
-                    let exec : SandboxExec =
-                        { Executable = config.Git
-                          Arguments = args
-                          Env = hardenedEnv config.AllowProtocol token |> Map.ofList
-                          WorkingDirectory = Some config.ReposDir }
-                    match! sandbox.Spawn exec (fun (stream, chunk) ->
+                    match! sandbox.Spawn (execFor token args) (fun (stream, chunk) ->
                               match stream with
                               | Stdout -> stdout <- stdout + chunk
                               | Stderr -> stderr <- stderr + chunk) with
@@ -327,7 +383,10 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                 | Ok run -> return Ok run
             }
 
-        let pathOf (repo: RepoRef) = sprintf "%s/%s" config.ReposDir (RepoRef.relativePath repo)
+        let pathOf (repo: RepoRef) = sprintf "%s/%s" reposDir (RepoRef.relativePath repo)
+        /// The same checkout as a TERMINAL in this session reaches it. What the listing
+        /// reports, and the only path anything outside the git sandbox can act on.
+        let visiblePathOf (repo: RepoRef) = sprintf "%s/%s" config.VisibleAt (RepoRef.relativePath repo)
         let present (repo: RepoRef) = Fs.exists (sprintf "%s/.git" (pathOf repo))
 
         let listingOf (repo: RepoRef) : Async<Result<RepoListing, string>> =
@@ -343,7 +402,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                                 { Repo = repo
                                   Branch = branch.Stdout.Trim ()
                                   Dirty = status.Stdout.Trim () <> ""
-                                  Path = sprintf "%s/%s" config.VisibleAt (RepoRef.relativePath repo) }
+                                  Path = visiblePathOf repo }
             }
 
         let mintMessageId () : MessageId =
@@ -373,7 +432,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                 // Relative, because the sandbox's working directory is the repos dir; git
                 // creates the leading directories itself.
                 let relative = sprintf "%s/%s" stagingDirName (string (Guid.NewGuid ()))
-                let staging = sprintf "%s/%s" config.ReposDir relative
+                let staging = sprintf "%s/%s" reposDir relative
                 // `--template=` is empty deliberately: git's default templates are a
                 // set of `.git/hooks/*.sample` files, and srt's macOS profile denies
                 // every write under `**/.git/hooks/**` unconditionally — so the copy
@@ -392,7 +451,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                 | Ok _ ->
                     // The owner directory is the rename's destination PARENT, and git made
                     // it inside the staging area rather than here.
-                    Fs.ensureDir (sprintf "%s/%s" config.ReposDir (RepoRef.owner repo))
+                    Fs.ensureDir (sprintf "%s/%s" reposDir (RepoRef.owner repo))
                     Fs.rename staging (pathOf repo)
                     match! listingOf repo with
                     | Error e -> return Error e
@@ -446,12 +505,12 @@ let create (config: ReposConfig) : Result<ReposService, string> =
         let listRepos () : Async<Result<RepoListing list, string>> =
             async {
                 let refs =
-                    readdirSafe fs config.ReposDir
+                    readdirSafe fs reposDir
                     |> Array.collect (fun owner ->
-                        readdirSafe fs (sprintf "%s/%s" config.ReposDir owner)
+                        readdirSafe fs (sprintf "%s/%s" reposDir owner)
                         |> Array.choose (fun repo ->
                             match RepoRef.create (sprintf "%s/%s" owner repo) with
-                            | Ok ref when Fs.exists (sprintf "%s/%s/%s/.git" config.ReposDir owner repo) -> Some ref
+                            | Ok ref when Fs.exists (sprintf "%s/%s/%s/.git" reposDir owner repo) -> Some ref
                             | _ -> None))
                     |> Array.toList
                 let mutable listings = []
@@ -510,12 +569,36 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                         return Ok (if said = "" then "(clean — nothing to show)" else capText outputLimit said)
                 })
 
-        let removeRepo (caller: RepoCaller) (repo: RepoRef) : Async<Result<unit, string>> =
+        let removeRepo (caller: RepoCaller) (repo: RepoRef) (force: bool) : Async<Result<string, string>> =
             requirePresent repo (fun () ->
                 async {
-                    rmRecursive fs (pathOf repo)
-                    do! append caller.Actor (SessionEvent.RepoRemoved { MessageId = mintMessageId (); Repo = repo; Actor = caller.Actor })
-                    return Ok ()
+                    let remove () =
+                        async {
+                            rmRecursive fs (pathOf repo)
+                            do!
+                                append
+                                    caller.Actor
+                                    (SessionEvent.RepoRemoved
+                                        { MessageId = mintMessageId (); Repo = repo; Actor = caller.Actor })
+                            return Ok (visiblePathOf repo)
+                        }
+                    // Uncommitted work is the one thing removal cannot undo: `add_repo` brings
+                    // back the commits and nothing else. So it is refused, and `force` is a
+                    // second decision — taken here, with the checkout, because a caller who
+                    // could delete without asking is the caller this exists to stop.
+                    match! listingOf repo with
+                    | Ok listing when listing.Dirty && not force ->
+                        return
+                            Error (
+                                sprintf
+                                    "%s has uncommitted changes, and removing it deletes them — adding the repo again brings back the commits and nothing else. Commit or push them first, or pass force to delete them."
+                                    (RepoRef.value repo))
+                    | Ok _ -> return! remove ()
+                    // git cannot read the checkout: exactly what an interrupted clone leaves
+                    // behind, and exactly what `add_repo` points at this verb to clear. There
+                    // is no dirtiness to protect, because there is nothing git can tell us
+                    // about — refusing here would leave that state with no way out.
+                    | Error _ -> return! remove ()
                 })
 
         { AddRepo = addRepo

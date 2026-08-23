@@ -4,10 +4,9 @@ What is worth pinning here is not "a WebSocket works". It is the three propertie
 a console safe to share between a person at a terminal and an agent holding a claim:
 
   * the offer is on the RESULT, where a client reads it, and the address in it opens;
-  * one drain, two readers — a terminal being open must not blind `serial_read`, which is
-    the whole reason the drain writes to a buffer as well as to the socket;
-  * one writer — while a terminal is attached, `serial_send` sends the caller there, because
-    two doors onto one console is exactly what the terminal's lease exists to prevent.
+  * the console is reached through the stream and nowhere else, so a claim ending on the
+    control leg is visible on the data leg — one console, one door, and no second reader to
+    keep in step.
 """
 
 from __future__ import annotations
@@ -52,44 +51,62 @@ def test_acquire_offers_a_stream_a_client_can_open(provider: str) -> None:
     client.end()
 
 
-def test_bytes_go_both_ways_and_the_tools_still_see_them(provider: str) -> None:
+def test_bytes_go_both_ways(provider: str) -> None:
     client = Client(provider)
     offer = _offer(client)
     with connect(offer["url"], open_timeout=30) as socket:
         socket.send(PROMPT.encode())
-        # The socket sees it, because `loop://` echoes.
+        # `loop://` echoes, so a round trip proves the whole path: the token, the drain, the
+        # SDK's console, gRPC, the driver.
         seen = ""
         while PROMPT.strip() not in seen:
             frame = socket.recv(timeout=30)
             if isinstance(frame, bytes):
                 seen += frame.decode()
-        # And so does the tool, from the same drain — a terminal being open must not take
-        # the console away from the agent that holds the claim.
-        assert PROMPT.strip() in client.tool("serial_read", timeout_seconds=2.0)
     client.end()
 
 
-def test_while_a_terminal_is_attached_writes_have_one_door(provider: str) -> None:
-    client = Client(provider)
-    offer = _offer(client)
+def test_releasing_hands_the_console_back_clean(provider: str) -> None:
+    """A claim ending closes the console, so the next holder does not inherit a stream
+    mid-sentence.
+
+    This used to be asserted through `serial_read`. The console is reached as a terminal now,
+    so the claim is asserted where it actually lives — on the stream leg — which is a better
+    test of the same invariant: it goes through the door a caller really uses.
+    """
+    first = Client(provider, name="first")
+    offer = _offer(first)
     with connect(offer["url"], open_timeout=30) as socket:
-        answer = client.tool("serial_send", data="ignored\n")
-        assert "attached to a terminal" in answer
-        assert "write_terminal" in answer
-        # Refused BEFORE the write: a refusal that had already sent the bytes would be worse
-        # than no refusal at all.
-        socket.send(b"x\n")
-        assert "ignored" not in client.tool("serial_read", timeout_seconds=1.0)
-    client.end()
+        socket.send(b"left over\n")
+        seen = ""
+        while "left over" not in seen:
+            frame = socket.recv(timeout=30)
+            if isinstance(frame, bytes):
+                seen += frame.decode()
+        # Ended in band and waited for, rather than by walking out of the `with`. The offer
+        # is suppressed while a stream is attached, and a closed socket is not the same
+        # instant as a server that has noticed — the `exited` frame is sent after the stream
+        # has let go, so seeing it is the only thing that makes the next acquire deterministic.
+        socket.send(json.dumps({"type": "kill"}))
+        while True:
+            frame = socket.recv(timeout=30)
+            if isinstance(frame, str) and json.loads(frame)["type"] == "exited":
+                break
+    first.tool("release")
+    first.end()
 
-
-def test_expect_still_answers_from_the_stream(provider: str) -> None:
-    client = Client(provider)
-    offer = _offer(client)
-    with connect(offer["url"], open_timeout=30) as socket:
-        socket.send(b"BANNER v1\n")
-        assert "BANNER" in client.tool("serial_expect", pattern="BANNER v[0-9]", timeout_seconds=20.0)
-    client.end()
+    second = Client(provider, name="second")
+    later = _offer(second)
+    with connect(later["url"], open_timeout=30) as socket:
+        # Nothing from the last holder: a fresh console has nothing to say until something
+        # is said to it.
+        try:
+            frame = socket.recv(timeout=2)
+            carried = frame.decode() if isinstance(frame, bytes) else frame
+        except TimeoutError:
+            carried = ""
+        assert "left over" not in carried
+    second.end()
 
 
 def test_a_kill_ends_the_stream_in_band(provider: str) -> None:

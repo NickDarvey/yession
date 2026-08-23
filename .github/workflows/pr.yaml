@@ -186,13 +186,37 @@ jobs:
       # node the package itself runs on — nix/packages.nix wraps `${pkgs.nodejs_24}/bin/node` —
       # so the smoke test now loads the addon under the same interpreter that ships it, which is
       # the interpreter the claim is about.
+      #
+      # Teardown is the product's own sequence (app/WebRtc.fs `closePeerConnection`, and the
+      # `Interop.cleanup ()` the suites run after draining every connection): close, WAIT for
+      # libdatachannel to report CLOSED — its own signal that its threads are finished with
+      # the object — then the global cleanup, then let node exit on its own. `pc.close()` is
+      # not synchronous, so `close(); process.exit(0)` tears the process down while native
+      # threads still hold the connection. That is a SIGSEGV on the way out, after the check
+      # has already printed its pass, and it took this job red on darwin. It is the same
+      # crash the Node suite hit (the SIGSEGV of verify run 30137017551) and fixed the same
+      # way; this script was the last place still exiting into live threads.
+      #
+      # The wait is bounded and loud: a connection that never reports closed fails the step
+      # with a reason rather than hanging until the job timeout.
       - name: The native WebRTC addon loads
         run: |
           cat > "$RUNNER_TEMP/addon-smoke.cjs" <<'EOF'
           const m = require(`${process.cwd()}/result/libexec/yession/node_modules/node-datachannel`);
           const pc = new m.PeerConnection('ci', { iceServers: [] });
           console.log('addon loaded; PeerConnection state:', pc.state());
+          const closed = new Promise((resolve, reject) => {
+            if (pc.state() === 'closed') return resolve();
+            pc.onStateChange((state) => { if (state === 'closed') resolve(); });
+            setTimeout(() => reject(new Error('the connection never reported closed')), 10000).unref();
+          });
           pc.close();
-          process.exit(0);
+          closed.then(
+            () => { m.cleanup(); console.log('addon torn down cleanly'); },
+            // A live connection keeps the loop alive, so setting an exit CODE here would
+            // hang the step for its whole timeout with the diagnosis already printed. The
+            // hard exit is what the happy path must never do and this path must: the step
+            // is failing either way, and the reason is on stderr before the process goes.
+            (error) => { console.error(String(error)); process.exit(1); });
           EOF
           nix shell --inputs-from . nixpkgs#nodejs_24 --command node "$RUNNER_TEMP/addon-smoke.cjs"

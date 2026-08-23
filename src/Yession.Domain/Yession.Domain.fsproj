@@ -21,6 +21,9 @@
          because it reuses `PtyHandle` rather than minting a parallel handle. -->
     <Compile Include="TerminalSource.fs" />
     <Compile Include="Environment.fs" />
+    <!-- Where a shell opened in a sandbox starts (Plan 25). After Environment.fs, which
+         owns the sandbox's OWN working directory: this is the layer over a live one. -->
+    <Compile Include="ShellProfile.fs" />
     <Compile Include="Secrets.fs" />
     <Compile Include="Connections.fs" />
     <Compile Include="Authorization.fs" />
@@ -45,6 +48,10 @@
          this declares, so the policy types precede the collaborative state that holds
          them. Before Terminals.fs too, because a terminal's mode is one case of it. -->
     <Compile Include="Classify.fs" />
+    <!-- Matching a pattern against terminal output (Plan 25, step 9). Before Agent.fs,
+         which carries the wait that uses it, and standalone: it knows nothing about
+         terminals beyond the fact that a console is lines. -->
+    <Compile Include="TerminalPattern.fs" />
     <Compile Include="Terminals.fs" />
     <Compile Include="TerminalMarks.fs" />
     <!-- After both projections it merges: the chat as a person reads it, said and run

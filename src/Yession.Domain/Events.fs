@@ -98,6 +98,10 @@ type SessionEvent =
     // notes it is a sibling of.
     | WorkSandboxStarted of WorkSandboxStarted
     | WorkSandboxStopped of WorkSandboxStopped
+    // The shell profile (Plan 25): where a shell opened in one sandbox starts. One event
+    // for set and for clear, because "what does a new terminal do" has one answer at a
+    // time — a second verb would let the two disagree about which was last.
+    | ShellProfileSet of ShellProfileSet
     // The approval gate's refusal (Plan 15, stage 3). Only the refusal: an approval is
     // recorded on the event of the command it released.
     | CommandRefused of CommandRefused
@@ -452,6 +456,16 @@ and WorkSandboxStarted =
 and WorkSandboxStopped =
     { MessageId : MessageId
       Sandbox : SandboxName
+      Actor : ActorRef }
+
+and ShellProfileSet =
+    { MessageId : MessageId
+      /// Which sandbox's shells this is about. A path is only a path inside the filesystem
+      /// that has it, so the profile is per sandbox rather than per session.
+      Sandbox : SandboxName
+      /// Where a shell opened in that sandbox starts. `None` is the CLEAR — back to the
+      /// sandbox's own default, which is what every terminal did before this plan.
+      WorkingDirectory : string option
       Actor : ActorRef }
 
 /// A command refused at its gate (Plan 15, stage 3; Plan 23: the gate is the classifier).

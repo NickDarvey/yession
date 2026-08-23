@@ -56,6 +56,36 @@ type TranscriptRecord =
       Kind : TranscriptKind
       Data : string }
 
+/// The tty driver's ONLCR, applied at CAPTURE to sources that never had one.
+///
+/// A pty puts the terminal line discipline between a process and us, and `ONLCR` is the part
+/// of it that turns a bare LF into CRLF — which is why a `\n` printed by a program reaches
+/// the transcript as `\r\n` and a replay draws the next line at column zero. The piped block
+/// runner has no line discipline at all, so its bytes arrive with the LF the program wrote
+/// and nothing else. Feed those to a VT and every line starts where the last one ENDED: the
+/// staircase, wrapping off the right edge, in the player and in the emulator alike.
+///
+/// So the driver's rule is applied here instead, once, where the bytes are captured. It is
+/// idempotent by construction — an LF already preceded by CR is left alone — so pty output
+/// passes through untouched and a source cannot be double-converted by being read twice.
+module Onlcr =
+
+    /// Normalize one chunk. `endedWithCr` says whether the PREVIOUS chunk of this stream
+    /// ended in `\r`, which is the only thing a chunk cannot see for itself: a `\r\n` split
+    /// across a read boundary would otherwise become `\r\r\n` — a byte the terminal never
+    /// printed, in the record whose whole purpose is fidelity. Returns the normalized text
+    /// and the carry for the next chunk.
+    let normalize (endedWithCr: bool) (data: string) : string * bool =
+        if data = "" then "", endedWithCr
+        else
+            let out = System.Text.StringBuilder (data.Length + 8)
+            let mutable prevCr = endedWithCr
+            for ch in data do
+                if ch = '\n' && not prevCr then out.Append '\r' |> ignore
+                out.Append ch |> ignore
+                prevCr <- ch = '\r'
+            out.ToString (), prevCr
+
 /// The asciicast header — the transcript's first line, written once when the terminal
 /// opens.
 type TranscriptHeader =

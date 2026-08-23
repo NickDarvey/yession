@@ -191,10 +191,30 @@ module Editor =
             "props" ==> createObj [
                 "decorations" ==> System.Func<EditorState, obj>(fun s -> pluginKeyGetState presenceDecoKey s) ] ])
 
+    /// What an empty composer says it is for. A `contenteditable` has no `placeholder`
+    /// attribute — the field's own `placeholder:` Tailwind variant has never once applied to a
+    /// mounted editor — so an unwritten-in composer was a thin unmarked bar with an arrow
+    /// beside it and nothing saying it took words. Especially on a phone, where the bar is most
+    /// of what there is.
+    ///
+    /// A node decoration rather than a rendered node: the paragraph carries an attribute while
+    /// the doc is empty, and `Style` draws the text from it. So the placeholder is never
+    /// CONTENT — it cannot be selected, copied, sent, or synced to a peer as an empty message,
+    /// which is exactly what putting the words in the document would risk.
+    let private placeholderPlugin (text: string) : Plugin =
+        makePlugin (createObj [
+            "props" ==> createObj [
+                "decorations" ==> System.Func<EditorState, obj>(fun state ->
+                    let doc = stateDoc state
+                    if docIsEmpty doc then
+                        decoSetCreate doc [| decoNode 0 (docContentSize doc) (createObj [ "data-placeholder" ==> text ]) |]
+                    else decoSetEmpty) ] ])
+
     let private plugins
         (fragment: Y.XmlFragment)
         (report: ((string * string) option -> unit) option)
         (onSubmit: (unit -> unit) option)
+        (placeholder: string)
         : Plugin[] =
         let ps =
             ResizeArray<Plugin> [
@@ -205,6 +225,7 @@ module Editor =
                 keymap baseKeymap
                 presenceDecorationsPlugin () ]
         report |> Option.iter (fun r -> ps.Add (presenceReportPlugin r))
+        if placeholder <> "" then ps.Add (placeholderPlugin placeholder)
         ps.ToArray ()
 
     /// Plain-text (Markdown) paste -> parsed as Markdown; HTML paste falls through to
@@ -236,10 +257,14 @@ module Editor =
         (readOnly: bool)
         (reportFocus: (string * string) option -> unit)
         (onSubmit: (unit -> unit) option)
+        (placeholder: string)
         : EditorHandle =
         let report = if readOnly then None else Some reportFocus
         let submit = if readOnly then None else onSubmit
-        let state = createState (createObj [ "schema" ==> schema; "plugins" ==> plugins fragment report submit ])
+        // Nothing to prompt in a body you cannot type in, on the same rule that drops the
+        // send binding there: a read-only editor is a rendering, not an invitation.
+        let prompt = if readOnly then "" else placeholder
+        let state = createState (createObj [ "schema" ==> schema; "plugins" ==> plugins fragment report submit prompt ])
         let view =
             createView host (createObj [
                 "state" ==> state

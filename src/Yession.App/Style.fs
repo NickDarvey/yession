@@ -484,6 +484,22 @@ module Style =
     // off-canvas on mobile; `nav-alt` = the inverse. Expressed with arbitrary variants so it
     // stays plain Tailwind.
 
+    // --- The degradation bar's one number ------------------------------------------------
+    // On a phone the bar is FIXED above all three panes, so the panes leave room for it, so
+    // its height and that room are the same number in three class strings. They cannot be
+    // composed from a shared token: Tailwind generates only classes that appear LITERALLY in
+    // the source, so `"max-md:h-" + n` produces a class the stylesheet never contains — which
+    // fails silently, the bar falling back to its content height and the reservation to
+    // whatever the last edit left. So the number is written out three times, here, together,
+    // and `Phase4`'s theme suite fails if the three ever stop agreeing.
+
+    /// The bar's own height on a phone.
+    let degradedBarHeight = "max-md:h-12"
+    /// The room a pane anchored to the top edge leaves for it (the two off-canvas overlays).
+    let degradedBarRoom = "max-md:[.is-degraded_&]:top-12"
+    /// The same room, paid in padding, by the column that is in normal flow.
+    let degradedBarRoomPad = "max-md:[.is-degraded_&]:pt-12"
+
     /// The 280px column. It holds TWO faces — the workspace nav and settings (`navPane` /
     /// `settingsPane`) — because settings is a place you go, not a thing that covers what you
     /// were reading. Collapsing on desktop animates the column's width shut; on mobile the
@@ -493,6 +509,7 @@ module Style =
         + "md:transition-[width] md:duration-200 md:ease-out "
         + "md:[.nav-alt_&]:w-0 md:[.nav-alt_&]:border-r-0 "
         + "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:w-[min(var(--spacing-side),84vw)] "
+        + degradedBarRoom + " "
         + "max-md:transition-transform max-md:duration-200 max-md:ease-out max-md:-translate-x-[101%] "
         + "max-md:[.nav-alt_&]:translate-x-0 motion-reduce:transition-none"
 
@@ -569,7 +586,9 @@ module Style =
     let queryHeadCell = caps + " text-ink-dim text-left font-normal pr-4 pb-1 whitespace-nowrap"
     let queryCell = "font-light text-small leading-5 text-ink-dim pr-4 py-0.5 whitespace-nowrap"
 
-    let mainColumn = "flex-1 flex flex-col min-w-0 h-full"
+    /// On a phone this column sits under the fixed degradation bar, so it pays for it in
+    /// padding — but only while the bar is there (`degradedShell`).
+    let mainColumn = "flex-1 flex flex-col min-w-0 h-full " + degradedBarRoomPad
 
     /// The phone's band is a ROW, not a compressed copy of the desktop's stack: the two
     /// chevrons a phone always has in this band — the sidebar's and the terminals' — and the
@@ -601,10 +620,53 @@ module Style =
         + focusRing + " "
         + "hidden md:[.nav-alt_&]:block max-md:block max-md:[.nav-alt_&]:hidden"
 
-    /// The degradation strip between the header and the timeline: a hairline notice, never a
-    /// modal and never a blocker — the client below it stays fully usable.
-    let degradedBanner =
-        "shrink-0 flex items-baseline gap-3 px-8 py-2 bg-surface max-md:px-4 " + Stroke.dividerBottom
+    /// The nav column's own mount of the connection report. Hidden on a phone, where the bar
+    /// above every pane carries it — the two mounts are complementary by construction, so
+    /// exactly one is ever on screen and the report is never read twice.
+    ///
+    /// It covers the STATUS only, never the reconnect card: the card is an action, and a
+    /// phone that could see what was wrong but not the button that fixes it would be the
+    /// worse half of the trade.
+    let connectionInColumn = "max-md:hidden flex flex-col gap-2"
+
+    /// The class the shell wears while anything is degraded, so the panes can make room for
+    /// the bar fixed above them. A marker, never a look: the two rules that read it are
+    /// `sidebar`, `mainColumn` and the terminals column below, and only on a phone.
+    let degradedShell = "is-degraded"
+    /// The connection report where the nav column cannot be seen. On a desktop with the
+    /// column open it is not rendered at all — the column says it, and saying it twice on one
+    /// screen is what this whole surface was rebuilt to stop.
+    ///
+    /// A hairline notice, never a modal and never a blocker: the client under it stays fully
+    /// usable, which is the promise the words in it make.
+    ///
+    /// One row that never wraps. `signInPrompt` below wraps because it may hold a sentence;
+    /// this holds three short things — a status, a disclosure, and the way back — and its
+    /// height is a number the panes reserve, so wrapping is the one thing it must not do.
+    let degradedBar =
+        cls [ "flex flex-nowrap items-center gap-3 px-8 py-2 bg-surface"
+              Stroke.dividerBottom
+              // Where the column IS on screen, the column says it. Where it is not — a
+              // collapsed nav, or any phone — this does. Same rule as `headerNoAgent`.
+              "hidden md:[.nav-alt_&]:flex max-md:flex"
+              // A phone shows one pane at a time and the other two are overlays anchored to
+              // the top edge, so this leaves the conversation column's flow and sits over all
+              // three. `z-50` clears the overlays (`z-40`) and the scrim between them.
+              "max-md:fixed max-md:inset-x-0 max-md:top-0 max-md:z-50 max-md:px-4"
+              // One row, always, tall enough for the control it carries whether or not this
+              // state has one — the panes reserve this number, so a height that tracked the
+              // contents would leave a gap under the bar in some states and overlap the
+              // header in others (it did: a wrapped 73px bar against a 36px reservation).
+              // It still GROWS when somebody opens the disclosure, and that growth overlays
+              // the pane rather than moving it — a notice you opened is one you are reading.
+              degradedBarHeight ]
+
+    /// The status word, and the only thing in the row that may be squeezed: an action is
+    /// useless truncated and the disclosure is one word, so the give has to come from here.
+    let degradedBarStatus = "min-w-0 truncate"
+    /// The way back, at the row's end. `ml-auto` rather than a spacer, so the states with no
+    /// action to offer close the gap instead of leaving a hole where one would be.
+    let degradedBarAction = "ml-auto shrink-0"
 
     /// The sign-in prompt, in the same slot and the same hairline as the degradation strip:
     /// a notice over the timeline, never a modal and never a blocker. It carries a real
@@ -620,6 +682,23 @@ module Style =
 
     /// The reason, taking the room between the status word and the button.
     let signInPromptReason = "mr-auto"
+
+    /// The mechanism behind a notice, folded away (the degradation strip, the sign-in
+    /// prompt, the reconnect card, a credential's fault, the history-store note, a terminal
+    /// that stopped marking). What every one of those surfaces has to say FIRST is what it
+    /// costs the reader; the provider's own words, the transport's reason and the browser's
+    /// storage rules are what they go looking for afterwards, and a notice that leads with
+    /// them buries the sentence somebody actually needed.
+    ///
+    /// A real `<details>`/`<summary>`, like every other disclosure in the product: the
+    /// browser's own, so it arrives keyboard-operable and correctly announced.
+    let detailNote = "min-w-0"
+    let detailSummary =
+        cls [ small; "cursor-pointer list-none"
+              "hover:text-ink-dim transition-colors duration-150 ease-out"
+              focusRing ]
+    /// The words inside, on the summary's own column so they read as its continuation.
+    let detailBody = small + " block pt-1"
 
     // --- Editable session title ------------------------------------------------------------
 
@@ -702,8 +781,14 @@ module Style =
     /// says things like `/home/user/.yession/sessions/AAZFRYD.../repos`, so a token wider than
     /// the column is the ordinary case, not the pathological one. `overflow-wrap` inherits, so
     /// the rule is stated once for everything the timeline will ever hold.
+    /// The leading gap is the first child's MARGIN, not this box's padding, and that is load
+    /// bearing rather than a spelling preference. A sticky child's `top-0` pins it to this
+    /// scroller's padding box — so a top padding here is a strip the pinned author line can
+    /// never reach, and scrolled text rides up through it above the name. Carried in flow
+    /// instead, the gap scrolls away with everything else and the line pins flush.
     let timeline =
-        "flex-1 overflow-y-auto px-8 py-6 flex flex-col gap-6 max-md:px-4 max-md:py-4 max-md:gap-5 break-words"
+        "flex-1 overflow-y-auto px-8 pb-6 flex flex-col gap-6 [&>*:first-child]:mt-6 "
+        + "max-md:px-4 max-md:pb-4 max-md:gap-5 max-md:[&>*:first-child]:mt-4 break-words"
 
     /// One actor's consecutive run — their messages, the commands they ran, the tools they
     /// called — under ONE author line. Attribution is said where it CHANGES, which is how a
@@ -712,14 +797,26 @@ module Style =
     let messageGroup = "flex flex-col gap-3 max-w-[46rem]"
 
     /// The author line: avatar and name, STICKY — while a long run scrolls, who is speaking
-    /// stays readable at the top of the column. The upward padding (cancelled by the negative
-    /// margin, so nothing moves at rest) is what the stuck line's ground covers: without it,
-    /// content scrolls visibly through the timeline's own top padding above the name. It is
-    /// ground over ground until the moment it is needed.
-    /// (`pb-1 -mb-1` is the same trick downward, one step: without it the stuck line's ground
-    /// ends exactly at the label's last pixel and scrolled text touches the name.)
+    /// stays readable at the top of the column.
+    ///
+    /// `pb-1 -mb-1` gives the stuck line's ground one step past the label, so scrolled text
+    /// does not touch the name: padding paints it, the negative margin keeps it out of flow.
+    ///
+    /// There was a `pt-6 -mt-6` above it meant to do the same upward — and it did neither
+    /// thing it claimed. Padding pushes content DOWN inside a box; a negative top margin pulls
+    /// the FOLLOWING siblings up rather than lifting this box. Measured, the pair put the name
+    /// 48px below the column top instead of 24 and laid the first message 16px UP INTO this
+    /// opaque `bg-bg z-10` band — so every conversation opened with its first line sliced in
+    /// half under the speaker's name, and the ground it was buying extended nowhere above the
+    /// box at all.
+    ///
+    /// What it was reaching for is real, and `timeline` now holds it: the column's leading gap
+    /// is the first child's margin rather than the scroller's padding, so `top-0` pins this
+    /// line flush to the scrollport's own top edge and there is no strip left above the name
+    /// for scrolled text to show through. The rule that fixes it lives with the box that
+    /// creates it, which is why it is stated there and not compensated for here.
     let messageGroupHead =
-        "sticky top-0 z-10 bg-bg flex items-center gap-3 pt-6 -mt-6 max-md:pt-4 max-md:-mt-4 pb-1 -mb-1"
+        "sticky top-0 z-10 bg-bg flex items-center gap-3 pb-1 -mb-1"
 
     /// One item inside a group: its (rare) meta line over its body.
     let messageItem = "flex flex-col gap-1"
@@ -947,7 +1044,10 @@ module Style =
               "group-focus-within:max-h-64 group-focus-within:overflow-y-auto motion-reduce:transition-none"
               fieldBare
               messageVoice false
-              "text-body text-ink placeholder:text-ink-faint px-4 py-2"; touchType ]
+              // No `placeholder:` variant: this field is a mounted editor, not an `<input>`,
+              // so it has no placeholder attribute for that variant to have ever matched. The
+              // prompt is drawn on the editor itself — `[data-rich-body]` in `tailwind.css`.
+              "text-body text-ink px-4 py-2"; touchType ]
 
     /// The writing side of the box: whose message it is, then the message. A column only
     /// because someone else's draft says so above the words; your own — the case that is
@@ -1060,6 +1160,7 @@ module Style =
         + "md:transition-[width] md:duration-200 md:ease-out md:[.term-resizing_&]:transition-none "
         + "md:[.term-closed_&]:w-0 md:[.term-closed_&]:border-l-0 "
         + "max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:w-full max-md:border-l-0 "
+        + degradedBarRoom + " "
         + "max-md:transition-transform max-md:duration-200 max-md:ease-out "
         + "max-md:[.term-closed_&]:translate-x-[101%] motion-reduce:transition-none"
 

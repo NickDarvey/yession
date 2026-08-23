@@ -67,7 +67,12 @@ let private runOnPty (executable: string) (arguments: string list) : Async<Resul
 /// event log, a count of how many times the drain was re-armed, and a way to ADVANCE the
 /// manager's clock — which is how the idle timeout is driven without a test that waits five
 /// real minutes.
-let private withLiveTerminal
+/// `prepare` runs against the manager BEFORE the terminal is opened — the only place a
+/// setting that decides how a terminal opens (Plan 25's shell profile) can be established.
+/// It is a hook rather than a second fixture because a test that opened its own second
+/// terminal would collide with the fixture's single minted id.
+let private withPreparedTerminal
+    (prepare: SessionTerminals.SessionTerminals -> Async<unit>)
     (name: string)
     (body: SessionTerminals.SessionTerminals
              -> TerminalId
@@ -133,17 +138,25 @@ let private withLiveTerminal
                     (fun () -> TerminalId.create ("term-" + name) |> expect)
                     (let mutable n = 0 in fun () -> n <- n + 1; BlockId.create (sprintf "b-%d" n) |> expect)
                     (fun () -> name + "-nonce")
+                    (let mutable n = 0 in fun () -> n <- n + 1; MessageId.create (sprintf "m-%d" n) |> expect)
                     (fun _ _ _ -> ())
+                    // What a peer would be told; this fixture has none.
+                    ignore
                     (fun () -> reDrains <- reDrains + 1)
                     AttachTerminal.unavailable
                     Classifier.approveAll
                     []
+                    ShellProfileProjection.empty
+            do! prepare terminals
             match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) (SandboxShell SandboxName.defaultName) name with
             | Error e -> failwith e
             | Ok id ->
                 do! body terminals id records log (fun () -> reDrains) advance
                 do! sandbox.Dispose ()
     }
+
+let private withLiveTerminal (name: string) body =
+    withPreparedTerminal (fun _ -> async { return () }) name body
 
 /// A queue entry for a terminal, as the drain would hand one over.
 let private queueEntry (terminal: TerminalId) (author: ActorRef) (n: string) : PendingAct =
@@ -279,7 +292,7 @@ let private liveModeTests =
                                  |> Seq.filter (fun r -> r.Kind = TranscriptInput)
                                  |> Seq.map (fun r -> r.Data)
                                  |> List.ofSeq)
-                                [ "echo drained\n" ]
+                                [ "echo drained\r\n" ]
                                 "the drain's command line is recorded as input, and it alone"
                 })
 
@@ -508,7 +521,7 @@ let private agentLeaseTests =
                 async {
                     // `execute_command` answers with what a command printed — except for the
                     // one command that has not printed an answer and never will on its own.
-                    match! terminals.Tail id with
+                    match! terminals.Tail id None None with
                     | Ok _ -> failwith "a shell's output is its blocks', and reading it twice is two answers to one question"
                     | Error reason -> Expect.stringContains reason "execute_command" "so it is refused, and says where the answer is"
 
@@ -522,7 +535,7 @@ let private agentLeaseTests =
                             20000)
                     let! wedged = until 8000 (fun () -> terminals.Interactive id)
                     Expect.isTrue wedged "the block took the screen"
-                    match! terminals.Tail id with
+                    match! terminals.Tail id None None with
                     | Error e -> failwithf "there is no command answer to read instead, so the screen is the only one: %s" e
                     | Ok _ ->
                         match! terminals.Write id ActorRef.Agent "yes\r" with
@@ -743,6 +756,29 @@ let tests =
                         do! sandbox.Dispose ()
                         Expect.isTrue true "Exited resolved after Kill"
             }
+
+        // The shell profile (Plan 25), end to end: the only tier that can prove the promise
+        // as a person experiences it — a real instrumented shell, asked where it is.
+        testCaseAsync "a shell opened under a profile really starts there" <|
+            (let directory = mkdtemp nodeFs nodeOs
+             withPreparedTerminal
+                 (fun terminals ->
+                     async {
+                         match! terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some directory) with
+                         | Error e -> failwithf "the profile would not set: %s" e
+                         | Ok _ -> ()
+                     })
+                 "profile"
+                 (fun terminals id records _ _ _ ->
+                     async {
+                         let ada = PeerRef (PeerId.create "ada" |> expect)
+                         do! terminals.RunBlock id (queueEntry id ada "1") "pwd" ignore
+                         let printed () = records |> Seq.map (fun r -> r.Data) |> String.concat ""
+                         let! saw = until 5000 (fun () -> (printed ()).Contains directory)
+                         let visible =
+                             (printed ()).Replace("\u001b", "<ESC>").Replace("\r", "<CR>").Replace("\n", "<LF>").Replace("\u0007", "<BEL>")
+                         Expect.isTrue saw (sprintf "the shell started in %s, got: %s" directory visible)
+                     }))
 
         liveModeTests
         agentLeaseTests

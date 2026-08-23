@@ -307,8 +307,8 @@ let tests =
                     let view = TerminalProjection.tryFind terminal m.Terminals |> Option.get
                     let block = view.Blocks |> List.find (fun b -> b.Command = "echo hello")
                     TerminalFeed.outputText block.FromSeq (Option.defaultValue 0 block.ToSeq) (ClientModel.terminalFeed terminal m)
-                Expect.equal (outputOf a) "hello from the sandbox\n" "Ada sees the output"
-                Expect.equal (outputOf b) "hello from the sandbox\n" "and so does Bob"
+                Expect.equal (outputOf a) "hello from the sandbox\r\n" "Ada sees the output"
+                Expect.equal (outputOf b) "hello from the sandbox\r\n" "and so does Bob"
 
                 // The composer emptied on send, and the queue is clear again.
                 Expect.equal

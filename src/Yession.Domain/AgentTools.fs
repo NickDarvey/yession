@@ -60,10 +60,63 @@ module private ToolArgs =
                 get.Optional.Field "forward" (Decode.list Decode.string) |> Option.defaultValue []))
             json
 
+    /// `set_shell_profile`'s pair, both optional: where shells opened from now on start,
+    /// and whose sandbox. An absent `cwd` is the CLEAR, and an absent `sandbox` is the
+    /// default one — so a bare call means "put the default sandbox back the way it was".
+    let cwdSandbox (json: string) : Result<string option * string, string> =
+        read
+            (Decode.object (fun get ->
+                get.Optional.Field "cwd" Decode.string,
+                get.Optional.Field "sandbox" Decode.string |> Option.defaultValue ""))
+            json
+
     let two (first: string) (second: string) (json: string) : Result<string * string, string> =
         read
             (Decode.object (fun get ->
                 get.Required.Field first Decode.string, get.Required.Field second Decode.string))
+            json
+
+    /// `read_terminal`'s three: which terminal, where to read from, and what to wait for. An
+    /// absent `from` is the tail and an absent `wait_for` is a read that does not wait, which
+    /// is what the optional parameters degrade to. A `timeout_seconds` without a `wait_for` is
+    /// nothing to bound, so the wait is only assembled when there is something to wait FOR.
+    let terminalRead (json: string) : Result<string * int option * TerminalWait option, string> =
+        let decoded =
+            read
+                (Decode.object (fun get ->
+                    get.Required.Field "terminal" Decode.string,
+                    get.Optional.Field "from" Decode.int,
+                    get.Optional.Field "wait_for" Decode.string |> Option.filter (fun s -> s <> ""),
+                    get.Optional.Field "wait_for_pattern" Decode.string |> Option.filter (fun s -> s <> ""),
+                    get.Optional.Field "timeout_seconds" Decode.float |> Option.defaultValue 10.0))
+                json
+        match decoded with
+        | Error e -> Error e
+        | Ok (terminal, from, literal, pattern, timeout) ->
+            // Two fields rather than one and a mode flag, because a flag makes the meaning of
+            // `wait_for` depend on another argument: a caller that sets one and forgets the
+            // other gets a LITERAL match on a regex string, which is wrong, silent, and looks
+            // exactly like a device that never answered. Two fields make that a refusal.
+            match literal, pattern with
+            | Some _, Some _ ->
+                Error "wait_for and wait_for_pattern are two ways to say the same thing — give one"
+            | None, None -> Ok (terminal, from, None)
+            | Some literal, None ->
+                Ok (terminal, from, Some { Until = MatchLiteral literal; TimeoutSeconds = timeout })
+            | None, Some source ->
+                // Compiled HERE, so a pattern outside the subset is an answer to this call
+                // rather than something discovered part-way through a wait that then has to
+                // explain itself.
+                TerminalPattern.compile source
+                |> Result.map (fun compiled ->
+                    terminal, from, Some { Until = MatchPattern (compiled, source); TimeoutSeconds = timeout })
+
+    /// `remove_repo`'s pair: which repo, and whether uncommitted changes may go with it.
+    let repoForce (json: string) : Result<string * bool, string> =
+        read
+            (Decode.object (fun get ->
+                get.Required.Field "repo" Decode.string,
+                get.Optional.Field "force" Decode.bool |> Option.defaultValue false))
             json
 
     let repoBranchCreate (json: string) : Result<string * string * bool, string> =
@@ -232,14 +285,46 @@ module AgentTools =
     /// Read a live-only terminal (Plan 19). Same rendering as a block's output, because it is
     /// the same question — what did this print — and a model should not have to learn two
     /// shapes for one answer.
-    let private readTerminal (capabilities: AgentCapabilities) (id: TerminalId) : Async<string> =
+    let private readTerminal
+        (capabilities: AgentCapabilities)
+        (id: TerminalId)
+        (from: int option)
+        (waitFor: TerminalWait option)
+        : Async<string> =
         async {
-            match! capabilities.ReadTerminal id with
+            match! capabilities.ReadTerminal id from waitFor with
             | Error reason -> return sprintf "could not read terminal %s: %s" (TerminalId.value id) reason
-            | Ok tail when tail.Text = "" -> return sprintf "terminal %s has said nothing" (TerminalId.value id)
-            | Ok tail when tail.Elided > 0 ->
-                return sprintf "[%d earlier characters omitted]\n%s" tail.Elided tail.Text
-            | Ok tail -> return tail.Text
+            | Ok tail when tail.Text = "" && tail.Length = 0 ->
+                return sprintf "terminal %s has said nothing" (TerminalId.value id)
+            | Ok tail ->
+                // The bounds are stated on EVERY answer, not only when something was lost. A
+                // model told the text alone cannot tell "this is everything" from "this is
+                // the last 2000 characters of a day", and it will read it as the first —
+                // which is how an agent concludes a boot log is three lines long.
+                let where =
+                    if tail.Through >= tail.Length then
+                        sprintf "lines %d-%d of %d, up to date" tail.From tail.Through tail.Length
+                    else
+                        sprintf
+                            "lines %d-%d of %d — read on with from: %d"
+                            tail.From
+                            tail.Through
+                            tail.Length
+                            tail.Through
+                let omitted =
+                    if tail.Elided > 0 then sprintf "\n[%d earlier characters omitted]" tail.Elided else ""
+                // A timeout is an ANSWER, not an error: what was said while waiting is
+                // usually where the reason it never arrived is written.
+                let waited =
+                    match tail.Matched, waitFor with
+                    | Some false, Some wait ->
+                        sprintf
+                            "\n(%s did not appear within %gs — this is what it said instead)"
+                            (TerminalMatch.describe wait.Until)
+                            wait.TimeoutSeconds
+                    | _ -> ""
+                if tail.Text = "" then return sprintf "%s%s%s\n(nothing printed in these lines)" where omitted waited
+                else return sprintf "%s%s%s\n%s" where omitted waited tail.Text
         }
 
     let private setSecret (capabilities: AgentCapabilities) (name: string) (value: string) : Async<string> =
@@ -288,6 +373,14 @@ module AgentTools =
                 | Error e -> return sprintf "could not add the repo: %s" e
             })
 
+    let private removeRepo (capabilities: AgentCapabilities) (raw: string) (force: bool) : Async<string> =
+        withRepo raw (fun repo ->
+            async {
+                match! capabilities.RemoveRepo repo force with
+                | Ok outcome -> return renderCommandOutcome outcome
+                | Error e -> return sprintf "could not remove the repo: %s" e
+            })
+
     let private switchBranch (capabilities: AgentCapabilities) (raw: string) (branch: string) (create: bool) : Async<string> =
         withRepo raw (fun repo ->
             async {
@@ -327,6 +420,20 @@ module AgentTools =
                 match! capabilities.StopWorkSandbox name with
                 | Ok outcome -> return renderCommandOutcome outcome
                 | Error e -> return sprintf "could not stop the sandbox: %s" e
+            })
+
+    /// Where terminals opened from now on start (Plan 25). The sandbox defaults, so the
+    /// common call is one argument.
+    let private setShellProfile (capabilities: AgentCapabilities) (raw: string) (cwd: string option) : Async<string> =
+        let raw = if raw = "" then SandboxName.value SandboxName.defaultName else raw
+        // An empty string is the CLEAR, like an absent one: a model that computed a path and
+        // got nothing must not be told it set the profile to "".
+        let cwd = cwd |> Option.map (fun path -> path.Trim ()) |> Option.filter (fun path -> path <> "")
+        withSandbox raw (fun name ->
+            async {
+                match! capabilities.SetShellProfile name cwd with
+                | Ok outcome -> return renderCommandOutcome outcome
+                | Error e -> return sprintf "could not set the shell profile: %s" e
             })
 
     let private readQuery (capabilities: AgentCapabilities) (def: QueryDef) () : Async<string> =
@@ -467,16 +574,32 @@ module AgentTools =
 
           tool
               "read_terminal"
-              "Read what a terminal has said, when its answer does not come back as a command's output — one streaming something live, or a shell terminal where a command has opened a full-screen program and is waiting for a keystroke. Returns the tail of it, saying how much it left out. Reading takes nothing from anybody: whoever is typing keeps the terminal. Refused on a shell terminal running ordinary commands, where what one printed comes back from execute_command instead."
-              [ ToolField.required "terminal" "string" "the terminal id, from the terminal that was opened for the stream" ]
+              "Read what a terminal has said, and optionally wait for it to say something. Use it when the answer does not come back as a command's output — a terminal streaming something live, or a shell terminal where a command has opened a full-screen program and is waiting for a keystroke. With `wait_for` the read is held until that exact text appears, which is what you want after typing at a device: it answers as soon as the text arrives, and on a timeout it answers with what was said instead, which is usually where the reason it never came is written. With no `from` you get the tail: what it is saying now, capped, saying how much it left out. With `from` you get a page starting at that line and the line to carry into the next call, which is how you read what a terminal said BEFORE you arrived, however long ago. Every answer says which lines it covers and how many the terminal has, so you can tell a whole answer from the end of a long one. Reading takes nothing from anybody: whoever is typing keeps the terminal. Refused on a shell terminal running ordinary commands, where what one printed comes back from execute_command instead."
+              [ ToolField.required "terminal" "string" "the terminal id, from the terminal that was opened for the stream"
+                ToolField.optional
+                    "from"
+                    "integer"
+                    "the line to read forward from, as reported by a previous read; omit for the tail"
+                ToolField.optional
+                    "wait_for"
+                    "string"
+                    "hold the read until this exact text appears, e.g. \"login: \". Literal text — for a pattern use wait_for_pattern"
+                ToolField.optional
+                    "wait_for_pattern"
+                    "string"
+                    "hold the read until output matches this pattern, e.g. \"[#$>] $\" for a shell prompt. Takes literal text, `.`, `[classes]`, `*`, `+`, `?`, `|`, groups, and `^`/`$` anchored to a LINE. No backreferences, lookaround or non-greedy quantifiers"
+                ToolField.optional
+                    "timeout_seconds"
+                    "number"
+                    "how long to hold before answering with what was said instead; default 10" ]
               (fun args ->
                   async {
-                      match ToolArgs.string "terminal" args with
+                      match ToolArgs.terminalRead args with
                       | Error e -> return Error e
-                      | Ok terminal ->
+                      | Ok (terminal, from, waitFor) ->
                           match TerminalId.create terminal with
                           | Error e -> return Error (sprintf "not a terminal id: %s" e)
-                          | Ok id -> return! ok (readTerminal capabilities id)
+                          | Ok id -> return! ok (readTerminal capabilities id from waitFor)
                   })
 
           tool
@@ -512,9 +635,21 @@ module AgentTools =
 
           tool
               "add_repo"
-              "Clone a GitHub repo into this session's shared repos directory (visible to everyone here, and inside the work environment). Takes owner/repo — never a URL — and only repos the session's GitHub credential can reach: GitHub says \"not found\" for a repo it will not show you, so a not-found on a repo that exists means nobody has connected GitHub here — say that rather than retrying. Answers with the path the checkout is at: that is the path to cd to in a terminal, so use it rather than guessing one. Read-only bootstrap: to commit or push, use execute_command in a terminal. Already-added repos just report their current state."
+              "Clone a GitHub repo into this session's shared repos directory (visible to everyone here, and inside the work environment). Takes owner/repo — never a URL — and only repos the session's GitHub credential can reach: GitHub says \"not found\" for a repo it will not show you, so a not-found on a repo that exists means nobody has connected GitHub here — say that rather than retrying. Answers with the checkout's path as a terminal here reaches it — usually relative to where a terminal starts, so `cd` it as given, pass it to set_shell_profile as given, and never rebuild it from a longer one. Read-only bootstrap: to commit or push, use execute_command in a terminal. Already-added repos just report their current state."
               [ ToolField.required "repo" "string" "the repo as owner/name, e.g. \"octocat/hello-world\"" ]
               (ofRepo (addRepo capabilities))
+
+          tool
+              "remove_repo"
+              "Delete a repo's checkout from this session. Use it when a checkout is unreadable and add_repo told you to, and when the session is finished with a repo — everyone here sees it go from the repos list. A checkout with uncommitted changes is REFUSED unless you pass `force`, because removing it deletes that work and adding the repo again brings back the commits and nothing else: read the refusal and decide, rather than passing force by reflex. If terminals were set to start inside the checkout, they go back to starting wherever the sandbox puts them, and the answer says so. add_repo is the way back."
+              [ ToolField.required "repo" "string" "the repo as owner/name, e.g. \"octocat/hello-world\""
+                ToolField.optional "force" "boolean" "true to delete uncommitted changes along with the checkout" ]
+              (fun args ->
+                  async {
+                      match ToolArgs.repoForce args with
+                      | Error e -> return Error e
+                      | Ok (repo, force) -> return! ok (removeRepo capabilities repo force)
+                  })
 
           tool
               "switch_branch"
@@ -565,6 +700,21 @@ module AgentTools =
                       match ToolArgs.string "name" args with
                       | Error e -> return Error e
                       | Ok name -> return! ok (stopWorkSandbox capabilities name)
+                  })
+
+          tool
+              "set_shell_profile"
+              "Say where terminals opened from now on should start. Use it once after add_repo, with the path add_repo gave you, and stop putting `cd` at the front of every command — every terminal opened afterwards starts there, yours and the people's, and it survives a restart. It takes a DIRECTORY, not a script: there is nothing to run here, and execute_command is still the only way to run anything. The directory must already exist inside that sandbox — this checks, and says so rather than leaving you a terminal that opens nowhere. A path from add_repo or the repos query goes in as given: the sandbox resolves it against the directory its terminals start in. Omit `cwd` to put it back the way it was. Terminals that are already open keep the directory they are in; the one exception is the terminal your plain execute_command runs in, which is reopened for you."
+              [ ToolField.optional
+                    "cwd"
+                    "string"
+                    "an absolute path inside the sandbox, e.g. \"/repos/hello-world\"; omit it to clear the profile"
+                ToolField.optional "sandbox" "string" "the work sandbox this is about; omit for the default one" ]
+              (fun args ->
+                  async {
+                      match ToolArgs.cwdSandbox args with
+                      | Error e -> return Error e
+                      | Ok (cwd, sandbox) -> return! ok (setShellProfile capabilities sandbox cwd)
                   }) ]
 
     /// The session's QUERIES (Plan 15), generated from the registry rather than written out

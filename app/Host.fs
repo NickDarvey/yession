@@ -234,6 +234,11 @@ let startFull
             replayed.Events
             |> List.fold (fun proj e -> TerminalProjection.applyEvent proj e.Event) TerminalProjection.empty
         terminalProjection <- replayedTerminals
+        // Where a shell opened in each sandbox starts (Plan 25), from the same replay — which
+        // is what makes a restarted session open its next terminal where the last one started.
+        let replayedProfiles =
+            replayed.Events
+            |> List.fold (fun proj e -> ShellProfileProjection.applyEvent proj e.Event) ShellProfileProjection.empty
 
         // The session's WorkSandboxes (Plan 15, stage 2): a registry keyed by name, each
         // entry lazily created on first need. `default` is the one every session has had,
@@ -280,6 +285,18 @@ let startFull
             |> Map.iter (fun _ channel ->
                 Async.StartImmediate (channel.Send (Terminal (TerminalRecord (terminal, seq, record)))))
 
+        // A terminal now EXISTS, which a peer that is already connected cannot learn any
+        // other way: it was not here to be told at accept, and `Screens.Sync` folds records
+        // only into an emulator a snapshot created — so without this every record of a
+        // terminal opened mid-session is dropped on arrival.
+        //
+        // Seq 0 and an empty screen, because that is the whole truth at open: there is
+        // nothing yet to catch up on, and a client cannot invent the origin for itself.
+        let broadcastTerminalOpened (terminal: TerminalId) =
+            connections
+            |> Map.iter (fun _ channel ->
+                Async.StartImmediate (channel.Send (Terminal (TerminalSnapshot (terminal, 0, "")))))
+
         let terminals =
             SessionTerminals.create
                 log
@@ -295,7 +312,9 @@ let startFull
                 // at all, since the whole point is that output nobody trusted cannot forge a
                 // block's outcome.
                 Interop.randomSecret
+                mintMessageId
                 broadcastTerminalRecord
+                broadcastTerminalOpened
                 // Re-arm the terminal drain when a lease ends (Plan 13, stage 2e). The
                 // scheduler is built from `terminals`, so this is the one indirection the
                 // cycle needs: a lease that ends inside the manager — the alt-screen flip, a
@@ -309,6 +328,7 @@ let startFull
                 // classifier exists; this root supplies it and computes nothing.
                 Classifier.approveAll
                 (replayedTerminals |> TerminalProjection.openTerminals |> List.map (fun t -> t.TerminalId))
+                replayedProfiles
 
         // The agent's ONE execution path (Plan 13, stage 3b). It queues a command where
         // people can see it and then WAITS — bounded by the command timeout — so the agent
@@ -489,6 +509,7 @@ let startFull
               // SessionMain's dispatching wrapper — the token is the TURN ACTOR's, and
               // only the dispatcher knows who that is.
               AddRepo = AgentCapabilities.none.AddRepo
+              RemoveRepo = AgentCapabilities.none.RemoveRepo
               SwitchRepoBranch = AgentCapabilities.none.SwitchRepoBranch
               FetchRepo = AgentCapabilities.none.FetchRepo
               RepoStatus = AgentCapabilities.none.RepoStatus
@@ -505,6 +526,7 @@ let startFull
               // dispatcher knows who that is.
               StartWorkSandbox = AgentCapabilities.none.StartWorkSandbox
               StopWorkSandbox = AgentCapabilities.none.StopWorkSandbox
+              SetShellProfile = AgentCapabilities.none.SetShellProfile
               RecordToolUse = toolUseLogFor turnId
               // Snapshotted HERE, which is what makes a turn's tool list stable: a set
               // change mid-turn lands on the next turn, never underneath the model. Each is
@@ -717,10 +739,21 @@ let startFull
                             // countdown without waiting up to a beat for it.
                             notifyActivity ()
                             do! ch.Send (State (StateSync (DocSync.fullState doc)))
-                            // How much terminal history exists, per open terminal. A hint,
-                            // exactly like `PeerAccepted.LatestOffset`: the client decides
-                            // whether it is behind and reads the transcript itself.
+                            // What each open terminal LOOKS like, and then how much of it
+                            // there is. Both, and in that order, because they compose: the
+                            // snapshot is where this client's screen starts, and the length
+                            // is what sends it to fetch the lines from there. A hint with no
+                            // origin to fold onto is a fetch with nowhere to put what it
+                            // gets — which is what this was, because nothing sent the
+                            // snapshot at all. `Screens.Sync` only folds records into an
+                            // emulator a snapshot created, so every live terminal rendered
+                            // an empty screen and a device looked like a panel with nothing
+                            // in it.
                             for (terminal, length) in terminals.Lengths () do
+                                match! terminals.Snapshot terminal with
+                                | Some (seq, screen) ->
+                                    do! ch.Send (Terminal (TerminalSnapshot (terminal, seq, screen)))
+                                | None -> ()
                                 do! ch.Send (Terminal (TerminalTranscriptAvailable (terminal, length)))
                             return
                                 fun () ->

@@ -198,7 +198,7 @@ let private tableTemplate
         | _, true -> "no filter selected — pick active or archived above"
         | _, false ->
             let hidden = List.length all - List.length views
-            sprintf "no sessions match this filter — %d hidden" hidden
+            sprintf "no sessions match — %d hidden" hidden
     let rows =
         match views with
         | [] ->
@@ -315,12 +315,10 @@ let private script =
       history.replaceState(null, '', a.getAttribute('href'))
       openRows()
     })
-    document.addEventListener('submit', async (e) => {
-      const f = e.target.closest('[data-create-session]'); if (!f) return
-      e.preventDefault()
-      const r = await fetch('/sessions' + location.search, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(new FormData(f)) })
-      if (r.ok) { swap(sessionsEl(), await r.text()); f.reset() }
-    })
+    // Creating is deliberately NOT intercepted here: the form is a real POST, and the browser
+    // follows its redirect into the new session. Swapping a table in instead would leave this
+    // page in charge of an act whose whole point is to leave it — and every other page learns
+    // about the new session from the rows stream anyway.
     // Declaring an MCP server (Plan 17): the only place a url is written, and the only
     // management action that can be REFUSED for a reason a human needs to read — a name
     // clash. So this one reports, where create/launch/stop only swap.
@@ -387,7 +385,7 @@ let private mcpTemplate (views: ProcessManager.SessionView list) (declarations: 
         | [] ->
             [ html $"""
                 <tr>
-                  <td colspan="4" class="py-10 text-center {Style.small}">no MCP servers declared — a session reaches only its own tools</td>
+                  <td colspan="4" class="py-10 text-center {Style.small}">no MCP servers — a session reaches only its own tools</td>
                 </tr>""" ]
         | declarations -> declarations |> List.map (mcpRowTemplate views)
     let options =
@@ -465,13 +463,16 @@ let private bodyTemplate
             <header class="h-[88px] shrink-0 flex items-end pb-5 border-b border-hair">
               <h1 class="{Style.wordmark}">yession<span class="text-green">.</span> <span class="{Style.label}">manager</span></h1>
             </header>
-            <!-- The id is minted server-side (a Docker-safe Crockford id); only a human
-                 name is entered here. -->
-            <form class="flex flex-col gap-3 pt-6 pb-8" data-create-session>
-              <label class="{Style.label}" for="new-session-name">new session</label>
+            <!-- Creating takes nothing but the press. The id is minted server-side (a
+                 Docker-safe Crockford one) and a session is NAMED from inside itself, in the
+                 title field at the top of its own header, which reports back here over the
+                 control channel. Asking for the name here as well made two naming surfaces
+                 out of one fact: what was typed on this page never reached the session, so a
+                 session created as "design review" opened as its raw id with an empty title
+                 field, and the name had to be typed a second time to have any effect. -->
+            <form class="flex flex-col gap-3 pt-6 pb-8" method="post" action="/sessions" data-create-session>
+              <span class="{Style.label}">new session</span>
               <div class="flex flex-wrap items-center gap-3">
-                <input id="new-session-name" name="name" placeholder="display name" autocomplete="off"
-                  class="{Style.fieldOf "w-72 max-w-full"}">
                 <button type="submit" class="{Style.btnPrimary}">Create</button>
               </div>
             </form>
@@ -542,55 +543,119 @@ let private respond (res: ServerResponse) (status: int) (contentType: string) (b
 
 let private html (res: ServerResponse) (body: string) = respond res 200 "text/html; charset=utf-8" body
 
+/// POST-redirect-GET. `303` rather than `302` so the browser is required to follow it with a
+/// GET: what the caller lands on is a resource, not a resubmission of the form waiting to be
+/// re-fired by a reload.
+let private seeOther (res: ServerResponse) (location: string) =
+    res.writeHead (303, createObj [ "location", box location; "cache-control", box "no-store" ]) |> ignore
+    res.``end`` ""
+
 /// A string as a JS literal, for the one inline script below — so a URL containing a quote
 /// is data rather than syntax.
 [<Fable.Core.Emit("JSON.stringify($0)")>]
 let private jsonLiteral (s: string) : string = Fable.Core.Util.jsNative
+
+/// GET a URL and report the status its answer carried; `0` when nothing answered at all.
+/// Redirects are followed, because a session that bounces its shell through sign-in has
+/// still answered.
+[<Fable.Core.Emit("fetch($0, { redirect: 'follow', cache: 'no-store' }).then(r => r.status, () => 0)")>]
+let private statusOf (url: string) : Fable.Core.JS.Promise<int> = Fable.Core.Util.jsNative
+
+/// Is something answering FOR this address yet?
+///
+/// A front door that has not mapped this session yet does not stay silent — it answers, which
+/// is the whole trap: `404` (nothing routed here) or a gateway status (a route to nothing).
+/// `0` is nothing answering at all. Everything else, the `401` an authenticating proxy gives
+/// included, is somebody answering for this address, which is the question being asked.
+let private answeredFor (status: int) : bool =
+    status <> 0 && status <> 404 && not (status >= 502 && status <= 504)
+
+/// One of the Manager's own standalone pages: the two below are the only surfaces a browser
+/// reaches that are not the management page, and they wear the same plain sheet.
+///
+/// HTML, and that is the point rather than a detail. Every other answer this file gives is
+/// read by the page's script, so `text/plain` is right for them — but these are NAVIGATIONS
+/// by construction: a browser is the only thing that ever lands on `/open`. A browser that is
+/// handed `text/plain` does not necessarily show it; a phone downloads it, so an operator who
+/// pressed Create is left holding a file called `document.txt` and no idea what went wrong.
+let private standalonePage (title: string) (body: string) : string =
+    sprintf
+        """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>%s</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem}p{color:#444}</style>
+</head><body>
+<h1>%s</h1>
+%s
+</body></html>"""
+        (Ssr.escapeText title)
+        (Ssr.escapeText title)
+        body
+
+/// What `/open` says when it cannot hand the browser over: the refusal, and the way back to
+/// the page that can do something about it.
+let private problemPage (title: string) (detail: string) : string =
+    standalonePage
+        title
+        (sprintf """<p>%s</p>
+<p><a href="/">Back to the session manager</a></p>""" (Ssr.escapeText detail))
+
+/// A refusal a BROWSER is holding: the status it deserves, and a page that says so.
+let private problem (res: ServerResponse) (status: int) (title: string) (detail: string) =
+    respond res status "text/html; charset=utf-8" (problemPage title detail)
+
+/// Where the opening page asks whether the front door has caught up. Spelled once, beside
+/// the page that fetches it and the route that answers it.
+let private readyRoute (sessionId: SessionId) : string =
+    sprintf "/sessions/%s/ready" (SessionId.value sessionId)
 
 /// The `/sessions/{id}/open` landing page (Plan 11).
 ///
 /// Not a bare 302. A session that had to be launched is reachable at its own address only
 /// once the operator's proxy has a mapping for it, and a reconciler driven by
 /// `/sessions/stream` gets there in a few hundred milliseconds — quick, but a race against
-/// a redirect the browser follows immediately. So the page polls its own target and goes
-/// when it answers.
+/// a redirect the browser follows immediately. So the page waits until the address really
+/// answers and only then goes.
+///
+/// It asks the MANAGER, at `/sessions/{id}/ready`, rather than probing the target itself —
+/// see that route for why the browser is the one place this question cannot be answered.
 ///
 /// Bounded, and it says why it gave up. An `/open` that spins forever is indistinguishable
 /// from one that is about to work, which is the failure mode this whole feature is supposed
 /// to remove rather than add.
-let private openingPage (target: string) : string =
-    sprintf
-        """<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Opening session</title>
-<style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem}p{color:#444}</style>
-</head><body>
-<h1>Opening your session…</h1>
-<p id="status">Waiting for it to answer.</p>
+let private openingPage (target: string) (readyUrl: string) : string =
+    standalonePage
+        "Opening session…"
+        (sprintf
+            """<p id="status">Waiting for it to answer.</p>
 <p><a id="target" href="%s">Open it directly</a></p>
 <script>
   const target = %s
+  const ready = %s
   let attempts = 0
   async function poll () {
     attempts++
     try {
-      await fetch(target, { mode: 'no-cors', cache: 'no-store' })
-      location.replace(target)
+      // `ok`, not "the request settled". A front door that has not mapped this session yet
+      // answers — with a 404, or a gateway error — and a fetch that only caught THROWN
+      // requests reads that as the session answering, redirects into it, and leaves whoever
+      // pressed Create looking at the front door's 404. This route reports the difference.
+      const answer = await fetch(ready, { cache: 'no-store' })
+      if (answer.ok) { location.replace(target); return }
+    } catch (e) { /* the Manager itself is unreachable: the same wait, bounded the same way */ }
+    if (attempts >= 40) {
+      document.getElementById('status').textContent =
+        'The session started, but its address is not answering after 20 seconds. ' +
+        'If this deployment maps session ports through a proxy, that mapping has not appeared.'
       return
-    } catch (e) {
-      if (attempts >= 40) {
-        document.getElementById('status').textContent =
-          'The session started, but its address is still not answering after 20 seconds. ' +
-          'If this deployment maps session ports through a proxy, that mapping has not appeared.'
-        return
-      }
-      setTimeout(poll, 500)
     }
+    setTimeout(poll, 500)
   }
   poll()
-</script>
-</body></html>"""
-        (Ssr.escapeAttr target)
-        (jsonLiteral target)
+</script>"""
+            (Ssr.escapeAttr target)
+            (jsonLiteral target)
+            (jsonLiteral readyUrl))
 
 /// Handle a management-UI request against the Manager. Returns false for paths that
 /// are not the UI's (the composing server falls through — e.g. to the control routes).
@@ -664,6 +729,16 @@ let tryHandle
                     createObj [ "content-type", box "image/png"; "cache-control", box CachePolicy.shell ])
                 |> ignore
                 res.``end`` (decodeBase64 WebApp.iconPngBase64))
+        // Creating a session is asking to WORK in one. It used to answer with a refreshed
+        // table, which left the primary path at three acts — create, find the row, Launch —
+        // and then a fourth to open what you had just made. So the answer says where the
+        // session now is, and `/open` (below) does what it has always done: launch it if it
+        // is stopped and land the browser on its address.
+        //
+        // One answer, for every caller. A route that returned a fragment to some callers and
+        // a redirect to others would be two contracts wearing one address, and the one nobody
+        // was looking at is the one that would rot — which is precisely how the vanishing-row
+        // bug lived: two renderings of the session list, only one of them exercised.
         | "POST", "/sessions" ->
             Some (fun () ->
                 readBody req (fun body ->
@@ -673,8 +748,11 @@ let tryHandle
                         match formField body "id" with
                         | "" -> SessionId.value (SessionId.mint ())
                         | provided -> provided
-                    match pm.CreateSession id (formField body "name") with
-                    | Ok _ -> html res (tableNow ())
+                    // No name: a session is named from inside itself and reports it back
+                    // (`setDisplayName`), so `DisplayName` starts as the minted id and the
+                    // list shows that until somebody names it.
+                    match pm.CreateSession id "" with
+                    | Ok record -> seeOther res (sprintf "/sessions/%s/open" (SessionId.value record.SessionId))
                     | Error e -> respond res 400 "text/plain" e))
         // Declaring an MCP server (Plan 17). The ONE act that names a url, and the only
         // one that is not read-only. There is deliberately no per-session enable beside it:
@@ -777,12 +855,12 @@ let tryHandle
             | "GET", [| id; "open" |] ->
                 Some (fun () ->
                     match SessionId.create id with
-                    | Error e -> respond res 400 "text/plain" e
+                    | Error e -> problem res 400 "That is not a session id" e
                     | Ok sessionId ->
                         Async.StartImmediate (
                             async {
                                 match pm.TryFind sessionId with
-                                | None -> respond res 404 "text/plain" (sprintf "unknown session %s" id)
+                                | None -> problem res 404 "No such session" (sprintf "This Manager has no session %s." id)
                                 | Some view ->
                                     // Already running is the common case once a client has
                                     // reconnected on its own; asking for the port it already
@@ -793,11 +871,49 @@ let tryHandle
                                         | ProcessManager.NotRunning
                                         | ProcessManager.Exited _ -> pm.Launch sessionId
                                     match port with
-                                    | Error reason -> respond res (refusalStatus sessionId) "text/plain" reason
+                                    | Error reason -> problem res (refusalStatus sessionId) "Cannot open this session" reason
                                     | Ok port ->
                                         let address = PublicAccess.sessionAddress sessionId port pm.Public
-                                        html res (openingPage (sprintf "%s/" address.Url))
+                                        html res (openingPage (sprintf "%s/" address.Url) (readyRoute sessionId))
                             }))
+            // Does this deployment's front door reach the session yet? The question the
+            // opening page above is really asking, answered HERE because here is the only
+            // place it CAN be answered: a browser can read the status of a same-origin
+            // address and learns nothing at all about a cross-origin one (an opaque `no-cors`
+            // answer carries status `0` whether the session served the page or the proxy
+            // served a 404), while this process has no origin to be blinded by. The page that
+            // guessed instead redirected whoever pressed Create straight into the front
+            // door's 404, a few hundred milliseconds before the mapping appeared.
+            //
+            // Read by a script, so `text/plain` — unlike `/open` beside it, nothing navigates
+            // here.
+            | "GET", [| id; "ready" |] ->
+                Some (fun () ->
+                    match SessionId.create id with
+                    | Error e -> respond res 400 "text/plain" e
+                    | Ok sessionId ->
+                        match pm.TryFind sessionId with
+                        | None -> respond res 404 "text/plain" (sprintf "unknown session %s" id)
+                        | Some view ->
+                            match view.Status with
+                            // Not running is not ready, and it is not an error either: `/open`
+                            // launches, and a session can exit under a reader who is watching.
+                            | ProcessManager.NotRunning
+                            | ProcessManager.Exited _ ->
+                                respond res 503 "text/plain" "the session is not running"
+                            | ProcessManager.Running (port, _) ->
+                                let address = PublicAccess.sessionAddress sessionId port pm.Public
+                                Async.StartImmediate (
+                                    async {
+                                        let! status = statusOf (sprintf "%s/" address.Url) |> awaitPromise
+                                        if answeredFor status then respond res 200 "text/plain" "ready"
+                                        else
+                                            respond
+                                                res
+                                                503
+                                                "text/plain"
+                                                (sprintf "%s answered %d" address.Url status)
+                                    }))
             | _ -> None
         | _ -> None
     match route with

@@ -55,6 +55,11 @@ surface.
 
 ## The directory
 
+> Amended since: the directory moved INSIDE the workspace —
+> `<dataDir>/workspace/repos/<owner>/<repo>` — because that is where a terminal opens, and
+> a checkout beside it was one nobody saw without being told its path first.
+> `Sandboxes.SessionLayout` says where both live; everything below still holds.
+
 `<dataDir>/repos/<owner>/<repo>`, created at session boot:
 
 - host/srt WorkSandbox: added to the sandbox policy's write paths beside the workspace;

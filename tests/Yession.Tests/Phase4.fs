@@ -702,7 +702,7 @@ let private uiRenderTests =
         testCase "the MCP section renders its declarations, and the form that adds one" <| fun () ->
             let views = [ { ProcessManager.Record = uiRecord; ProcessManager.Status = ProcessManager.NotRunning } ]
             let empty = ManagerUi.mcpSection views []
-            Expect.isTrue (empty.Contains "no MCP servers declared") "an empty registry says so rather than showing a bare table"
+            Expect.isTrue (empty.Contains "no MCP servers") "an empty registry says so rather than showing a bare table"
             Expect.isTrue (empty.Contains "data-declare-mcp") "and still offers the form"
 
             let declared =
@@ -782,14 +782,27 @@ let private postForm (url: string) (body: string) : JS.Promise<obj> = Fable.Core
 
 /// A GET that keeps its status. `Interop.getText` discards it, and a route whose whole job
 /// is to distinguish "here it is" from "no such session" needs the number.
-[<Emit("fetch($0).then(async r => ({ status: r.status, cacheControl: '', body: await r.text() }))")>]
+[<Emit("fetch($0).then(async r => ({ status: r.status, cacheControl: '', contentType: r.headers.get('content-type') || '', body: await r.text() }))")>]
 let private getReply (url: string) : JS.Promise<obj> = Fable.Core.Util.jsNative
 
 [<Emit("$0.status")>]
 let private statusOfReply (reply: obj) : int = Fable.Core.Util.jsNative
 
+/// What the answer said it WAS. A route a browser navigates to is not fully described by its
+/// status: `text/plain` is a message on a laptop and a downloaded `document.txt` on a phone.
+[<Emit("$0.contentType")>]
+let private contentTypeOfReply (reply: obj) : string = Fable.Core.Util.jsNative
+
 [<Emit("$0.body")>]
 let private bodyOfReply (reply: obj) : string = Fable.Core.Util.jsNative
+
+/// A form POST that does NOT follow its redirect. Where the create route points is the
+/// contract; an auto-following fetch would swallow it and assert the destination instead.
+[<Emit("fetch($0, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: $1 }).then(async r => ({ status: r.status, cacheControl: '', location: r.headers.get('location') || '', body: await r.text() }))")>]
+let private postFormHere (url: string) (body: string) : JS.Promise<obj> = Fable.Core.Util.jsNative
+
+[<Emit("$0.location")>]
+let private locationOfReply (reply: obj) : string = Fable.Core.Util.jsNative
 
 /// A Manager with its management endpoint up, over real child processes. Hoisted because
 /// the archiving cases below each pin ONE invariant and each needs one of these; the setup
@@ -801,6 +814,100 @@ let private managerWithUi (name: string) =
         { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
             Strategy = Some Strategy.localhost }
         (Some ManagerUi.tryHandle)
+
+/// A deployment's front door that has not mapped anything yet — and can be told it has.
+///
+/// It answers `404 not found`, because that is what a reverse proxy with no route for an
+/// address says, and that is the whole hazard: an address that ANSWERS and a session that
+/// answers are different facts. A reconciler driven by `/sessions/stream` reaches a
+/// just-created session a few hundred milliseconds after the Manager has launched it, and
+/// everything that arrives in that window meets this.
+let private startFrontDoor () : Async<Interop.HttpServer * string * (unit -> unit)> =
+    async {
+        let mutable mapped = false
+        let handler (_: Interop.IncomingMessage) (res: Interop.ServerResponse) =
+            if mapped then
+                res.writeHead (200, Fable.Core.JsInterop.createObj [ "content-type", box "text/html; charset=utf-8" ]) |> ignore
+                res.``end`` "<!doctype html><title>a session</title>"
+            else
+                res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
+                res.``end`` "not found"
+        let server = Interop.createServer handler
+        let! listening =
+            Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
+        return listening, sprintf "http://127.0.0.1:%d" (Interop.serverPort listening), (fun () -> mapped <- true)
+    }
+
+/// A Manager publishing its sessions at a front door this test owns, with one session created
+/// and running. Hoisted because the two cases below need exactly this arrangement and differ
+/// only in what the door is doing when they ask.
+let private managerBehindFrontDoor (name: string) =
+    async {
+        let! door, doorOrigin, mapIt = startFrontDoor ()
+        let dataDir =
+            sprintf "tests/Yession.Tests/out/.data/%s-%d" name (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+        let! managerPort = freePort ()
+        let origin = sprintf "http://127.0.0.1:%d" managerPort
+        let! pm =
+            ProcessManager.createWithUi
+                { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                    Strategy = Some Strategy.localhost
+                    ManagerPort = Some managerPort
+                    // Two origins deliberately. The Manager keeps its own, because it is the
+                    // OIDC issuer a launched session fetches discovery against and that has
+                    // to be an address which really answers; the SESSIONS are published at
+                    // the door, which is the half `/open` has to wait for.
+                    Public = PublicAccess.create origin (doorOrigin + "/s/{id}") |> expect }
+                (Some ManagerUi.tryHandle)
+        pm.CreateSession name "" |> expect |> ignore
+        let sessionId = SessionId.create name |> expect
+        let! launched = pm.Launch sessionId
+        Expect.isTrue (Result.isOk launched) "the session launches"
+        return pm, origin, mapIt, door
+    }
+
+/// `/sessions/{id}/ready`: whether this deployment's front door reaches the session yet.
+///
+/// The question `/open`'s landing page asks before it hands the browser over, and the one it
+/// used to answer by GUESSING — a `no-cors` fetch of the address, which settles for the front
+/// door's 404 exactly as it settles for the session, so whoever pressed Create was redirected
+/// into that 404 a beat before the mapping appeared. On a phone a `text/plain` body is not
+/// even a message: it is a file called `document.txt`.
+let private readinessTests =
+    testList "Is the session reachable yet (Plan 11)" [
+        testCaseAsync "a session the front door has not mapped yet is not ready" <|
+            async {
+                let! pm, baseUrl, _, door = managerBehindFrontDoor "ready-miss"
+                let! answer = getReply (baseUrl + "/sessions/ready-miss/ready") |> Async.AwaitPromise
+                Expect.equal (statusOfReply answer) 503 "the session is running and its published address is not"
+                do! pm.StopAll ()
+                door.close ignore
+            }
+
+        testCaseAsync "a session whose published address answers is ready" <|
+            async {
+                let! pm, baseUrl, mapIt, door = managerBehindFrontDoor "ready-hit"
+                mapIt ()
+                let! answer = getReply (baseUrl + "/sessions/ready-hit/ready") |> Async.AwaitPromise
+                Expect.equal (statusOfReply answer) 200 "the door routes to it now, so it is reachable"
+                do! pm.StopAll ()
+                door.close ignore
+            }
+
+        // The downstream half of the same fault. Whatever goes wrong upstream, a browser is
+        // the only thing that ever lands on `/open` — so what it lands on has to be readable
+        // by one. `text/plain` reads as a download on a phone, which is how a refusal with
+        // words in it reached its operator as a file called `document.txt`.
+        testCaseAsync "an /open that cannot hand the browser over answers a page, not a download" <|
+            async {
+                let! pm = managerWithUi "open-page"
+                let baseUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
+                let! missing = getReply (baseUrl + "/sessions/no-such-session/open") |> Async.AwaitPromise
+                Expect.equal (statusOfReply missing) 404 "an unknown session is still a 404"
+                Expect.stringContains (contentTypeOfReply missing) "text/html" "and it is a page a browser can show"
+                do! pm.StopAll ()
+            }
+    ]
 
 /// The half of archiving that cannot be decided purely: it stops a real child, and the
 /// refusal has to hold over the wire and not just over a value.
@@ -851,6 +958,59 @@ let private archiveFlowTests =
             }
     ]
 
+// -----------------------------------------------------------------------------
+// Every registry write announces itself. `createSession` used to save the record and
+// tell only the MCP hub, so the session hub retained a PRE-CREATE list until the next
+// launch, exit or rename — SSR rendered the new session, then the rows stream handed
+// any page connecting in that window a list without it and the row vanished in front
+// of whoever had just made it. Invisible to the person creating it (their page swaps
+// from the POST answer, and nothing published over it) and invisible to every test
+// that launched straight afterwards, because the launch published a correct list.
+//
+// So both halves are asserted against the HUB — what a subscriber is actually handed —
+// and neither launches anything: the gap only exists before the first lifecycle event.
+// -----------------------------------------------------------------------------
+
+let private managerAlone (name: string) =
+    let dataDir =
+        sprintf "tests/Yession.Tests/out/.data/%s-%d" name (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+    ProcessManager.create
+        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+            Strategy = Some Strategy.localhost }
+
+let private registryPublishTests =
+    testList "Registry writes announce themselves (UX review P0)" [
+        testCaseAsync "creating a session pushes it to a subscriber already listening" <|
+            async {
+                let! pm = managerAlone "pub-live"
+                let frames = ResizeArray<ProcessManager.SessionView list> ()
+                let cancel = pm.SubscribeSessions frames.Add
+                let seen = frames.Count
+                pm.CreateSession "pub-live" "Published live" |> expect |> ignore
+                Expect.isTrue
+                    (frames
+                     |> Seq.skip seen
+                     |> Seq.exists (fun f -> f |> List.exists (fun v -> SessionId.value v.Record.SessionId = "pub-live")))
+                    "the create itself pushed a frame carrying the new session"
+                cancel.Stop ()
+                do! pm.StopAll ()
+            }
+
+        testCaseAsync "a subscriber connecting after a create is handed it" <|
+            async {
+                let! pm = managerAlone "pub-retained"
+                pm.CreateSession "pub-retained" "Published retained" |> expect |> ignore
+                let mutable first : ProcessManager.SessionView list option = None
+                let cancel = pm.SubscribeSessions (fun f -> if first.IsNone then first <- Some f)
+                Expect.equal
+                    (first |> Option.map (List.map (fun v -> SessionId.value v.Record.SessionId)))
+                    (Some [ "pub-retained" ])
+                    "the retained snapshot is current, not the list from before the create"
+                cancel.Stop ()
+                do! pm.StopAll ()
+            }
+    ]
+
 let private uiFlowTests =
     testList "Management UI flow (Step 25)" [
         testCaseAsync "create -> launch -> open -> stop -> resume -> crash, all over the management endpoint, with live status pushed on the rows stream" <|
@@ -877,11 +1037,14 @@ let private uiFlowTests =
                 let! css = Interop.getText (baseUrl + "/" + styleSheetUrl) |> Async.AwaitPromise
                 Expect.isTrue (css.Length > 500) "the shared local stylesheet serves from the endpoint (no CDN)"
 
-                // Create over the form endpoint.
-                let! created = postForm (baseUrl + "/sessions") "id=ui-1&name=UI+One" |> Async.AwaitPromise
-                Expect.equal (statusOfReply created) 200 "created"
-                Expect.isTrue ((bodyOfReply created).Contains (Dom.attr Dom.Manager.session "ui-1")) "the refreshed table holds the new session"
-                let! duplicate = postForm (baseUrl + "/sessions") "id=ui-1&name=Again" |> Async.AwaitPromise
+                // Create over the form endpoint. The answer is where the session now IS —
+                // creating one is asking to work in it, and `/open` is the stable route that
+                // launches it and lands you there. Not followed here: this case still wants
+                // it stopped, and what /open does with it is /open's own case below.
+                let! created = postFormHere (baseUrl + "/sessions") "id=ui-1&name=UI+One" |> Async.AwaitPromise
+                Expect.equal (statusOfReply created) 303 "creating hands the browser onward, rather than a table to look at"
+                Expect.equal (locationOfReply created) "/sessions/ui-1/open" "onward is the session's stable open route"
+                let! duplicate = postFormHere (baseUrl + "/sessions") "id=ui-1&name=Again" |> Async.AwaitPromise
                 Expect.equal (statusOfReply duplicate) 400 "duplicates are rejected"
 
                 // Launch from the UI; the fragment reflects it and the child REALLY serves.
@@ -956,7 +1119,9 @@ let private uiFlowTests =
                 let baseUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
                 let sessionId = SessionId.create "open-1" |> expect
 
-                let! _ = postForm (baseUrl + "/sessions") "id=open-1&name=Open+One" |> Async.AwaitPromise
+                // Registered in-process: creating over the form endpoint now LANDS you in the
+                // session, and what this case is about is `/open` finding one stopped.
+                pm.CreateSession "open-1" "Open One" |> expect |> ignore
 
                 // Stopped: /open has to start it before there is any address to give.
                 Expect.equal (pm.TryFind sessionId).Value.Status ProcessManager.NotRunning "created, not launched"
@@ -1026,7 +1191,7 @@ let private reapingTests =
                         (Some ManagerUi.tryHandle)
                 let baseUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
                 let sessionId = SessionId.create "reap-1" |> expect
-                let! _ = postForm (baseUrl + "/sessions") "id=reap-1&name=Reap+One" |> Async.AwaitPromise
+                pm.CreateSession "reap-1" "Reap One" |> expect |> ignore
 
                 // The address this deployment publishes for the session, before it has ever
                 // run: derived from the id alone, which is why it needs no port to compute.
@@ -1170,9 +1335,11 @@ let private compositionTests =
 
                 let! manager = startPackagedManager env
 
-                // Create and launch a session from the management UI.
-                let! created = postForm (manager.UiUrl + "sessions") "id=composed&name=Composed" |> Async.AwaitPromise
-                Expect.equal (statusOfReply created) 200 "created via the UI"
+                // Create and launch a session from the management UI. The redirect is not
+                // followed: creating now launches and opens, and this case wants the launch
+                // to be its own act so the fragment it answers with names the port below.
+                let! created = postFormHere (manager.UiUrl + "sessions") "id=composed&name=Composed" |> Async.AwaitPromise
+                Expect.equal (statusOfReply created) 303 "created via the UI"
                 let! launched = postForm (manager.UiUrl + "sessions/composed/launch") "" |> Async.AwaitPromise
                 let row = bodyOfReply launched
                 Expect.isTrue (row.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning)) "launched via the UI"
@@ -1942,6 +2109,10 @@ let tests =
         Tag.needs "Session registry stream over SSE (Plan 09)" [ Tag.Ports; Tag.Native ] (fun () -> registryStreamTests)
         Tag.needs "Management UI flow (Step 25)" [ Tag.Ports; Tag.Native ] (fun () -> uiFlowTests)
         Tag.needs "Archiving over the process boundary" [ Tag.Ports; Tag.Native ] (fun () -> archiveFlowTests)
+        Tag.needs "Is the session reachable yet (Plan 11)" [ Tag.Ports; Tag.Native ] (fun () -> readinessTests)
+        // `Ports` only: a ProcessManager binds its control endpoint on creation, but nothing
+        // here launches a child — the invariant is about the moment BEFORE the first launch.
+        Tag.needs "Registry writes announce themselves (UX review P0)" [ Tag.Ports ] (fun () -> registryPublishTests)
         Tag.needs "Idle reaping over the process boundary (Plan 11)" [ Tag.Ports; Tag.Native ] (fun () -> reapingTests)
         // `Srt` for the same reason: the packaged child picks the sandbox DEFAULT, and this
         // suite waits on an environment that reached Running and a command that exited 0 —

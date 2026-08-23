@@ -18,6 +18,8 @@ namespace Yession.Domain
 /// saying up front what it cannot host, rather than failing the first time somebody needs
 /// it. The three are genuinely independent: a serial line has no size and no exit code but
 /// carries bytes perfectly well, and a remote shell may have all three.
+///
+/// What each one buys the provider that claims it is in `docs/streams.md`.
 type SourceCapabilities =
     { /// Can the OSC 133 bootstrap be typed into it, so its output resolves into blocks with
       /// exit codes? False means LIVE ONLY: the transcript records everything, the lease
@@ -85,6 +87,8 @@ module StreamOffer =
     /// Reverse-DNS prefixed because it IS an extension: if MCP grows a standard streaming
     /// affordance, the decoder learns that one, reads both for a release, and this is
     /// deleted. A bare `stream` would make that a flag day.
+    ///
+    /// The offer's shape, and the wire behind the url, are specified in `docs/streams.md`.
     let metaKey = "dev.yession/stream"
 
     /// The host of an absolute url, lowercased, with any port and userinfo removed. `None`
@@ -178,6 +182,24 @@ module TerminalSource =
         function
         | SandboxShell name -> Some name
         | Attached _ -> None
+
+    /// How a source ENDING is stated, given what that source said it has.
+    ///
+    /// Here rather than at the call site because it is a rule about a declaration: only a
+    /// source that claimed an exit code is described as having exited with one. Saying
+    /// "exit 0" about a serial line that merely went quiet would invent the exact fact
+    /// `HasExitCode = false` exists to deny — and it is the fact somebody deciding whether
+    /// to reattach is reading.
+    ///
+    /// A failure carries the provider's own words, whether it said them in band
+    /// (`{"type":"failed"}`) or simply vanished, because `AttachWs` already maps both here
+    /// and the second one's "the stream closed without saying why" is the honest thing to
+    /// put in front of a person.
+    let endedReason (capabilities: SourceCapabilities) (ending: SandboxRun) : string =
+        match ending with
+        | SandboxExited code when capabilities.HasExitCode -> sprintf "the stream ended with code %d" code
+        | SandboxExited _ -> "the stream ended"
+        | SandboxRunFailed reason -> reason
 
 /// Reach a byte stream somebody else is producing, and hand back a handle shaped exactly
 /// like a pty's.

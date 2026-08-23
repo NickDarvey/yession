@@ -546,7 +546,12 @@ module SessionTerminals =
           /// a close and an open, and those already exist. `None` for an ATTACHED source
           /// (Plan 16, part D) — its process is somebody else's, in nothing we run.
           Sandbox : SandboxName option
-          mutable Shell : PtyHandle option }
+          mutable Shell : PtyHandle option
+          /// Whether the last output chunk this terminal captured ended in `\r` — the carry
+          /// `Onlcr.normalize` needs to leave a CRLF split across two reads alone. Mutable
+          /// for the same reason `Shell` is: it is a property of the live capture, not of
+          /// the terminal's identity, and it changes on every chunk.
+          mutable OutputEndedCr : bool }
 
     /// Bytes of output one block may write to the transcript. Beyond it, output is dropped
     /// and the drop is RECORDED (`TerminalTranscriptTruncated`) — a runaway `yes` must not
@@ -568,6 +573,20 @@ module SessionTerminals =
     /// rather than characters because that is what a range read is addressed by; the
     /// character bound is `TerminalDigest.tailCap`, applied after.
     let private tailWindow = 500
+
+    /// The longest a read may be held waiting for a device to speak (Plan 25). The same
+    /// number as a command's deadline and for the same reason — a tool call that could be
+    /// asked to wait an hour is a turn somebody loses — and `TerminalCommands.commandTimeout`
+    /// is derived from it so there is one bound rather than two that can drift apart.
+    let internal turnBoundSeconds = 120.0
+
+    /// How often a held read looks again. Re-reading the TRANSCRIPT is what makes a wait
+    /// unable to miss output: bytes are durable before they are visible, so anything said
+    /// between two looks is still there at the second. A signal from `emit` would lower this
+    /// latency and change nothing about correctness, at the cost of a registry to clean up on
+    /// timeout, on close, and on a caller that went away. Plan 17 made the same trade for the
+    /// MCP poll, and for the same reason: one mechanism, not two.
+    let private lookAgainMs = 25
 
     /// A command line, as bytes to type into a shell's line editor. Three things, and none of
     /// them is cosmetic.
@@ -653,13 +672,16 @@ module SessionTerminals =
           /// write tool can be refused while its stream is attached, which is what keeps one
           /// device to one door.
           Write : TerminalId -> ActorRef -> string -> Async<Result<unit, string>>
-          /// The tail of what such a terminal has SAID (Plan 19) — `Write`'s other half, and
-          /// beside it because the rule that admits one admits the other: blocks or bytes.
+          /// What such a terminal has SAID (Plan 19) — `Write`'s other half, and beside it
+          /// because the rule that admits one admits the other: blocks or bytes.
           ///
           /// Not its mirror image, though. A write has to be arbitrated, which is what the
           /// lease is for; a reader is not a second writer, so this takes nothing and blocks
           /// nobody — a person can be typing while the agent reads over their shoulder.
-          Tail : TerminalId -> Async<Result<TerminalTail, string>>
+          ///
+          /// `None` is the live tail; `Some line` reads FORWARD from a line a previous read
+          /// handed back. The two are bounded differently on purpose — see `TerminalTail`.
+          Tail : TerminalId -> int option -> TerminalWait option -> Async<Result<TerminalTail, string>>
           /// The lease holder's viewport size, applied to the pty and the emulator. `false`
           /// when dropped, on the same terms as `Input`.
           Resize : TerminalId -> ActorRef -> int -> int -> bool
@@ -684,6 +706,24 @@ module SessionTerminals =
           /// Type the instrumentation into the shell that is there now. Refused when the
           /// terminal is not lost, or has no persistent shell to type into.
           Rearm : TerminalId -> Async<Result<unit, string>>
+          /// Set (or clear) where a shell opened in one sandbox starts, from now on (Plan 25).
+          ///
+          /// ONE verb, because the three things it does cannot be separated: an actor able to
+          /// append without validating is an actor who can point every future terminal at a
+          /// directory that is not there, and an actor able to validate without appending has
+          /// only asked a question. `None` clears it.
+          SetProfile : ActorRef -> SandboxName -> string option -> Async<Result<string, string>>
+          /// Clear every profile whose directory is inside this tree, because the tree is
+          /// about to stop existing (Plan 26; Plan 25's upstream half). Answers with the
+          /// sandboxes it cleared, so the caller can say so.
+          ///
+          /// Here rather than at the caller for the reason `SetProfile` is: whoever is
+          /// deleting a tree knows only that it is going, and a caller left to work out
+          /// WHICH profiles that invalidates is a caller that can get it wrong somewhere no
+          /// cheap test reaches.
+          ClearProfilesUnder : ActorRef -> string -> Async<SandboxName list>
+          /// Every sandbox's profile as it stands — what the `shell_profile` query reads.
+          Profiles : unit -> ShellProfileProjection
           /// Reclaim any lease that has gone idle with something queued behind it (Plan 13,
           /// stage 3c). Called on a beat; a no-op when nothing qualifies, which is the usual
           /// case. `holdOf` is passed in rather than computed here because it needs the doc,
@@ -719,7 +759,7 @@ module SessionTerminals =
           PeerGone = fun _ -> async { return () }
           Input = fun _ _ _ -> false
           Write = fun _ _ _ -> async { return Error "this session has no terminals" }
-          Tail = fun _ -> async { return Error "this session has no terminals" }
+          Tail = fun _ _ _ -> async { return Error "this session has no terminals" }
           Resize = fun _ _ _ _ -> false
           ApplySize = fun _ _ -> ()
           Busy = fun () -> Set.empty
@@ -727,6 +767,9 @@ module SessionTerminals =
           Lost = fun () -> Set.empty
           Interactive = fun _ -> false
           Rearm = fun _ -> async { return Error "this session has no terminals" }
+          SetProfile = fun _ _ _ -> async { return Error "this session has no terminals" }
+          ClearProfilesUnder = fun _ _ -> async { return [] }
+          Profiles = fun () -> ShellProfileProjection.empty
           ReclaimIdle = fun _ -> async { return () }
           IsOpen = fun _ -> false
           Lengths = fun () -> []
@@ -762,7 +805,16 @@ module SessionTerminals =
         // a guessable nonce is no nonce at all — the whole point is that output nobody
         // trusted cannot forge a block's outcome.
         (mintNonce: unit -> string)
+        // The timeline note a profile change lands as (Plan 25). Injected like every other
+        // mint, for the reason all of them are: a test that cannot predict an id cannot
+        // assert on the record it appears in.
+        (mintMessageId: unit -> MessageId)
         (onRecord: TerminalId -> int -> TranscriptRecord -> unit)
+        // A terminal now exists. Separate from `onRecord` rather than folded into it because
+        // the two are different facts arriving at different times — "here is a line" and
+        // "here is where a screen starts" — and only the second can reach a peer that was
+        // already connected when the terminal opened.
+        (onOpened: TerminalId -> unit)
         // Re-arm the terminal drain (Plan 13, stage 2e). A lease ending frees a terminal
         // exactly as a block finishing does, so whatever queued behind it must start now —
         // and unlike block completion, a lease can end from inside here (the alt-screen flip,
@@ -779,6 +831,11 @@ module SessionTerminals =
         // close — and an async decision taken before the busy mark could reorder the queue.
         (classifier: Classifier)
         (openAtBoot: TerminalId list)
+        // Where a shell opened in each sandbox starts, folded from the same durable replay
+        // that produced `openAtBoot` (Plan 25). Taken at creation rather than read from the
+        // log here, because the log is read once at boot and this is one of the things that
+        // read produced — and it is what makes the profile survive a restart.
+        (profilesAtBoot: ShellProfileProjection)
         : SessionTerminals =
 
         let live = Collections.Generic.Dictionary<string, LiveTerminal> ()
@@ -832,6 +889,10 @@ module SessionTerminals =
         let mutable busy : Set<string> = Set.empty
         let mutable lost : Set<string> = Set.empty
         let mutable leases = TerminalLeases.empty
+        /// Where a shell opened in each sandbox starts (Plan 25). Held HERE, with the code
+        /// that opens shells, rather than above it: a profile a caller had to remember to
+        /// apply would not be a profile.
+        let mutable profiles = profilesAtBoot
         let mutable leftOpen : Set<string> = openAtBoot |> List.map TerminalId.value |> Set.ofList
 
         /// The sandbox a terminal's shell lives in. `default` for one this process has no
@@ -867,6 +928,26 @@ module SessionTerminals =
             let transcript = terminal.Transcript
             let emulator = terminal.Emulator
             let key = TerminalId.value id
+            // The tty's ONLCR, for the sources that never had a tty (Plan 25, stage 1). Here
+            // rather than at either destination, because this is the one point both of them
+            // are fed from: normalizing at the cast builder would fix the player and leave
+            // the emulator — and therefore every keyframe, and every ranged replay painted
+            // from one — still drawing the staircase. Before the cap, so the cap counts the
+            // bytes the transcript actually keeps.
+            //
+            // Recordings written before this stay as they were captured: the store is
+            // append-only and nothing rewrites it.
+            let data =
+                match kind with
+                | TranscriptOutput | TranscriptStderr ->
+                    let normalized, endedCr = Onlcr.normalize terminal.OutputEndedCr data
+                    terminal.OutputEndedCr <- endedCr
+                    normalized
+                // The command echo, which a tty would have echoed as CRLF when the line was
+                // submitted. It is not part of the output stream, so it neither reads nor
+                // moves that stream's carry.
+                | TranscriptInput -> fst (Onlcr.normalize false data)
+                | TranscriptResize -> data
             // The transcript's lifetime ceiling (Plan 13, stage 3d). Output only: input and
             // resize records are the audit's spine and are bounded by the number of commands
             // rather than by what any of them printed.
@@ -1069,15 +1150,45 @@ module SessionTerminals =
                                         note (clean.Length - kept.Length)
                                         emit id current TranscriptOutput kept
                                 | _ -> emit id current TranscriptOutput clean
-                    let! spawned =
+                    // The profile is applied by the SPAWN, never as a `cd` typed at the
+                    // prompt (Plan 25). A typed one would echo into the transcript on the
+                    // re-arm path below — which re-types this bootstrap into whatever shell
+                    // is there NOW — so the audit trail would carry a command nobody ran; it
+                    // would need quoting for a path this code did not choose; and it cannot
+                    // fail visibly, because `cd /gone` prints into a terminal that carries on
+                    // regardless. The OS answers a spawn's cwd at the one moment something
+                    // is listening.
+                    let profileCwd = ShellProfileProjection.workingDirectory sandbox profiles
+                    let spawnPty (cwd: string option) =
                         (environmentFor sandbox).SpawnPty
                             { Executable = shell.Executable
                               Arguments = shell.InteractiveArguments
                               Env = Map.empty
-                              WorkingDirectory = None }
+                              WorkingDirectory = cwd }
                             80
                             24
                             onOutput
+                    let! attempted = spawnPty profileCwd
+                    // The directory can go away between being set and being opened in — an
+                    // `rm -rf` in a terminal, an unmounted volume. A terminal that refuses to
+                    // open because of a DEFAULT is a worse failure than the default being
+                    // wrong, so fall back once and say why where everyone reads it. The
+                    // profile is left alone: it is a person's to fix, not ours to guess at.
+                    let! spawned =
+                        match attempted, profileCwd with
+                        | Error reason, Some path ->
+                            async {
+                                emit
+                                    id
+                                    terminal
+                                    TranscriptStderr
+                                    (sprintf
+                                        "yession: could not start a shell in %s (%s) — starting where the sandbox puts them instead\r\n"
+                                        path
+                                        reason)
+                                return! spawnPty None
+                            }
+                        | _ -> async { return attempted }
                     match spawned with
                     | Error _ -> return ()
                     | Ok pty ->
@@ -1131,25 +1242,23 @@ module SessionTerminals =
                             rearmers.Remove key |> ignore
             }
 
-        /// Attach to a stream somebody else is producing (Plan 16, part D). The same output
-        /// path a shell gets — the emulator, the transcript, the broadcast — over bytes this
-        /// process did not spawn. No mark scanning and no rc bootstrap: an uninstrumentable
-        /// source has no prompt to bootstrap, and typing one at a serial device would put
-        /// our instrumentation on somebody's wire.
-        let openAttached (id: TerminalId) (terminal: LiveTerminal) (ticket: AttachTicket) : Async<unit> =
-            async {
-                let key = TerminalId.value id
-                let onOutput (data: string) =
-                    match live.TryGetValue key with
-                    | false, _ -> ()
-                    | true, current -> emit id current TranscriptOutput data
-                let! attached = attach ticket 80 24 onOutput
-                match attached with
-                | Error _ -> return ()
-                | Ok handle -> terminal.Shell <- Some handle
-            }
+        /// Where an attached source's bytes go once there is a terminal to put them in
+        /// (Plan 16, part D). The same output path a shell gets — the emulator, the
+        /// transcript, the broadcast — over bytes this process did not spawn. No mark
+        /// scanning and no rc bootstrap: an uninstrumentable source has no prompt to
+        /// bootstrap, and typing one at a serial device would put our instrumentation on
+        /// somebody's wire.
+        let attachedSink (id: TerminalId) : string -> unit =
+            let key = TerminalId.value id
+            fun data ->
+                match live.TryGetValue key with
+                | false, _ -> ()
+                | true, current -> emit id current TranscriptOutput data
 
-        let openTerminal (openedBy: ActorRef) (source: TerminalSource) (title: string) : Async<Result<TerminalId, string>> =
+        // Mutually recursive with `closeTerminal`, because a stream that ends closes its own
+        // terminal and the watcher for that is armed at open. One direction only in practice:
+        // closing never opens anything.
+        let rec openTerminal (openedBy: ActorRef) (source: TerminalSource) (title: string) : Async<Result<TerminalId, string>> =
             async {
                 // A SHELL terminal is a need, and the need is identified before the terminal
                 // exists — so a failed environment start is reported as a failed open
@@ -1165,6 +1274,33 @@ module SessionTerminals =
                 match ensured with
                 | EnvironmentUnavailable reason -> return Error reason
                 | EnvironmentAvailable ->
+                // An attached source is DIALLED FIRST, before anything durable exists, and a
+                // dial that fails is a failed open. This is where it parts company with a
+                // shell, and the difference is not an inconsistency: `openShell` failing
+                // leaves `Shell = None`, which is a designed state where blocks still run as
+                // separate spawns, so a shell that would not start is still a terminal. A
+                // stream that would not open is not one — nothing to type into, nothing to
+                // read, and a transcript that would only ever hold its own header. It used
+                // to be swallowed, and the model was told "Opened as terminal X" about a
+                // terminal with no source behind it.
+                //
+                // Bytes are HELD rather than dropped in the gap between the socket opening
+                // and the terminal existing: a provider is free to speak the instant it is
+                // attached to, and the head of a stream is exactly where a boot banner lives.
+                let queued = ResizeArray<string> ()
+                let sink = ref (fun (data: string) -> queued.Add data)
+                let! dialled =
+                    match source with
+                    | SandboxShell _ -> async { return Ok None }
+                    | Attached offer ->
+                        async {
+                            match! attach offer.Ticket 80 24 (fun data -> sink.Value data) with
+                            | Error reason -> return Error reason
+                            | Ok handle -> return Ok (Some handle)
+                        }
+                match dialled with
+                | Error reason -> return Error reason
+                | Ok dialledHandle ->
                     let id = mintTerminalId ()
                     let openedAt = clock ()
                     let transcript =
@@ -1178,7 +1314,8 @@ module SessionTerminals =
                           OpenedAt = openedAt
                           Emulator = openEmulator 80 24
                           Sandbox = sandbox
-                          Shell = None }
+                          Shell = None
+                          OutputEndedCr = false }
                     // In the live map BEFORE the shell starts: the pty's output callback finds
                     // the terminal by id, and bytes can arrive the instant it spawns.
                     live.[TerminalId.value id] <- terminal
@@ -1187,7 +1324,15 @@ module SessionTerminals =
                     sources.[TerminalId.value id] <- TerminalSource.capabilities source
                     match source with
                     | SandboxShell name -> do! openShell id terminal name
-                    | Attached offer -> do! openAttached id terminal offer.Ticket
+                    | Attached _ ->
+                        dialledHandle |> Option.iter (fun handle -> terminal.Shell <- Some handle)
+                        // Point the sink at the terminal, then let go of what arrived before
+                        // there was one — in that order, so nothing said early is published
+                        // after something said late.
+                        sink.Value <- attachedSink id
+                        for held in queued do
+                            sink.Value held
+                        queued.Clear ()
                     let renewable =
                         match source with
                         | Attached offer -> offer.Renewable
@@ -1201,25 +1346,76 @@ module SessionTerminals =
                                   Title = title
                                   Sandbox = sandbox
                                   Renewable = renewable })
+                    // After the open is on the record, so a peer told a terminal exists can
+                    // find it in the projection it is folding.
+                    onOpened id
+                    // A stream that ends closes its terminal. Armed here and nowhere else,
+                    // and AFTER the open is on the record so a source that has already gone
+                    // cannot close a terminal nothing has yet been told about.
+                    //
+                    // `RunBlock` awaits `Exited` for the shells it SPAWNS, which a live-only
+                    // source never reaches — it has no blocks, so nothing enters that path.
+                    // A device that stopped therefore left its terminal open for ever: no
+                    // exit, no reason, and `CanReattach` (which wants `not IsOpen`) dark, so
+                    // the only way back was pressing Kill on something already dead.
+                    match dialledHandle with
+                    | Some handle ->
+                        let capabilities = TerminalSource.capabilities source
+                        // A stream ends once, and this acts once. `Exited` PROMISES to resolve
+                        // exactly once, so the flag is not that promise restated — it is the
+                        // guard for a handle that breaks it. Closing a terminal kills its
+                        // handle, so a handle that resolved again on kill would re-enter the
+                        // close it was called from: `isOpen` is still true at that point,
+                        // because the kill happens before the terminal leaves the live map.
+                        // One test double did exactly this and looped until the suite gave up.
+                        let mutable ending = false
+                        // `StartImmediate` because Fable has no other kind — `Async.Start` is
+                        // a compile error there rather than a silent difference. It runs as
+                        // far as the first suspension, which is the await below, so a source
+                        // that has not ended yet parks exactly where it should.
+                        Async.StartImmediate (
+                            async {
+                                let! outcome = handle.Exited
+                                // Also idempotent against a deliberate close, which is the
+                                // ordinary case: `closeTerminal` refuses a terminal that is
+                                // not open, and a `Kill` a person asked for resolves this too.
+                                if not ending && isOpen id then
+                                    ending <- true
+                                    do!
+                                        closeTerminal id (TerminalSource.endedReason capabilities outcome)
+                                        |> Async.Ignore
+                            })
+                    | None -> ()
                     return Ok id
             }
 
-        let closeTerminal (id: TerminalId) (reason: string) : Async<Result<unit, string>> =
+        and closeTerminal (id: TerminalId) (reason: string) : Async<Result<unit, string>> =
             async {
                 if not (isOpen id) then return Error "terminal is not open"
                 else
+                    // OUT of the live map before the handle is killed, because killing it is
+                    // what makes its stream end — and an attached source's ending closes its
+                    // terminal. Taken in the other order, a close asked for by a person fires
+                    // the stream watcher while `isOpen` is still true, and the terminal is
+                    // closed twice: once as "the stream ended" and once for the reason
+                    // somebody actually gave. Two answers to when this ended, and the wrong
+                    // one first.
+                    let closing =
+                        match live.TryGetValue (TerminalId.value id) with
+                        | true, terminal -> Some terminal
+                        | _ -> None
+                    live.Remove (TerminalId.value id) |> ignore
+                    leftOpen <- Set.remove (TerminalId.value id) leftOpen
                     // The emulator is a live JS object; a closed terminal keeps its blocks
                     // (the audit outlives the process) but not its screen.
-                    match live.TryGetValue (TerminalId.value id) with
-                    | true, terminal ->
+                    match closing with
+                    | Some terminal ->
                         terminal.Emulator.Dispose ()
                         terminal.Shell |> Option.iter (fun pty -> pty.Kill ())
-                    | _ -> ()
+                    | None -> ()
                     pending.Remove (TerminalId.value id) |> ignore
                     runningAuthor.Remove (TerminalId.value id) |> ignore
                     appliedSize.Remove (TerminalId.value id) |> ignore
-                    live.Remove (TerminalId.value id) |> ignore
-                    leftOpen <- Set.remove (TerminalId.value id) leftOpen
                     busy <- Set.remove (TerminalId.value id) busy
                     // The lease goes with the terminal, and WITHOUT an event: `TerminalClosed`
                     // already clears the holder in the projection, so appending a release
@@ -1388,7 +1584,19 @@ module SessionTerminals =
                                             { Executable = shell.Executable
                                               Arguments = shell.Arguments @ [ command ]
                                               Env = Map.empty
-                                              WorkingDirectory = None }
+                                              // The profile applies here TOO (Plan 25). This
+                                              // path gets a fresh process per block and carries
+                                              // nothing between them, so it is applied per
+                                              // block — the same promise, kept by the only
+                                              // means this path has. Wiring only the pty would
+                                              // make a degraded terminal silently ignore the
+                                              // profile, and the difference between the two
+                                              // would surface as "the same command answers
+                                              // differently in two terminals".
+                                              WorkingDirectory =
+                                                terminal.Sandbox
+                                                |> Option.bind (fun sandbox ->
+                                                    ShellProfileProjection.workingDirectory sandbox profiles) }
                                             onChunk
                                     match spawned with
                                     | Error reason -> return CommandExecutionFailed reason
@@ -1539,7 +1747,7 @@ module SessionTerminals =
         /// window. A CLOSED terminal has no live length to count back from, so it reads what
         /// the store still holds — already bounded by the per-terminal retention cap, and
         /// still worth answering, because a device's recording outlives its stream.
-        let tail (id: TerminalId) : Async<Result<TerminalTail, string>> =
+        let tail (id: TerminalId) (from: int option) (waitFor: TerminalWait option) : Async<Result<TerminalTail, string>> =
             async {
                 let key = TerminalId.value id
                 // Refused where a command's own answer carries what it printed — and that is
@@ -1554,16 +1762,88 @@ module SessionTerminals =
                         Error
                             "this terminal's output comes back as blocks — run it with execute_command, whose answer carries what it printed"
                 else
-                    let from =
+                    // The live edge, whether or not the terminal is still open: a closed one
+                    // reads back from its recording, and its length stopped moving with it.
+                    let lengthNow () =
                         match live.TryGetValue key with
-                        | true, terminal -> max 0 (terminal.Transcript.NextSeq () - tailWindow)
-                        | _ -> 0
-                    let printed = readTranscript id from None |> Transcript.printed
-                    let elided = max 0 (printed.Length - TerminalDigest.tailCap)
-                    return
-                        Ok
-                            { Text = (if elided > 0 then printed.Substring elided else printed)
-                              Elided = elided }
+                        | true, terminal -> terminal.Transcript.NextSeq ()
+                        | _ -> readTranscript id 0 None |> List.length
+                    // A held read looks from where the CALLER is, so what it waits for is
+                    // output that caller has not been handed. Text it was already shown
+                    // cannot satisfy a later wait — which is how an agent that power-cycled
+                    // a board used to match the login prompt from before the reboot,
+                    // instantly, and carry on as though it were up.
+                    let waited =
+                        match waitFor with
+                        | None -> async { return Ok None }
+                        | Some wait ->
+                            let bound = max 0.0 (min wait.TimeoutSeconds turnBoundSeconds)
+                            let start = match from with Some requested -> max 0 requested | None -> max 0 (lengthNow () - tailWindow)
+                            let rec look (waitedMs: float) =
+                                async {
+                                    let seen = readTranscript id start None |> Transcript.printed
+                                    match TerminalMatch.isMet wait.Until seen with
+                                    // The matcher could not answer. Carried out rather than
+                                    // read as "not yet": a broken matcher reporting a timeout
+                                    // looks exactly like a device that never spoke, and the
+                                    // caller would go looking at the device.
+                                    | Error fault -> return Error fault
+                                    | Ok true -> return Ok (Some true)
+                                    | Ok false ->
+                                        if waitedMs >= bound * 1000.0 then return Ok (Some false)
+                                        // A closed terminal will not say anything else, so
+                                        // waiting one out is waiting for nothing.
+                                        elif not (isOpen id) then return Ok (Some false)
+                                        else
+                                            do! Async.Sleep lookAgainMs
+                                            return! look (waitedMs + float lookAgainMs)
+                                }
+                            look 0.0
+                    match! waited with
+                    | Error fault -> return Error fault
+                    | Ok matched ->
+
+                    let length = lengthNow ()
+                    match from with
+                    | None ->
+                        // The tail, bounded by CHARACTERS, because what it is for is fitting
+                        // in a context window. It reaches the live edge by construction, so
+                        // `Through` is the length.
+                        let start = max 0 (length - tailWindow)
+                        let printed = readTranscript id start None |> Transcript.printed
+                        let elided = max 0 (printed.Length - TerminalDigest.tailCap)
+                        return
+                            Ok
+                                { Text = (if elided > 0 then printed.Substring elided else printed)
+                                  Elided = elided
+                                  From = start
+                                  Through = length
+                                  Length = length
+                                  Matched = matched }
+                    | Some requested ->
+                        // A page, bounded by where it STOPPED, because what it is for is
+                        // being resumed. Nothing is elided from a page: `Through` says where
+                        // to carry on, and a page that dropped part of itself would make that
+                        // number a lie about what comes next.
+                        let start = max 0 requested
+                        // Bounded in LINES, and the range is asked for in lines rather than
+                        // counted out of what comes back. A transcript line is a position in
+                        // an asciicast file — the header is line 0 — so a page that counted
+                        // the RECORDS it received would report a cursor one short of where it
+                        // actually stopped, and the next read would hand back what this one
+                        // already returned. Which is the stale-read bug this verb exists to
+                        // make unexpressible, reintroduced one layer down.
+                        let window = min tailWindow (max 0 (length - start))
+                        let text =
+                            readTranscript id start (Some (start + window)) |> Transcript.printed
+                        return
+                            Ok
+                                { Text = text
+                                  Elided = 0
+                                  From = start
+                                  Through = start + window
+                                  Length = length
+                                  Matched = matched }
             }
 
         let resize (id: TerminalId) (by: ActorRef) (cols: int) (rows: int) : bool =
@@ -1681,6 +1961,160 @@ module SessionTerminals =
             }
 
 
+        /// Set (or clear) where a shell opened in this sandbox starts, from now on (Plan 25).
+        ///
+        /// Validate, append, apply, answer — one verb, because a caller that could do the
+        /// second without the first is a caller that can point every future terminal at a
+        /// directory that is not there.
+        let setProfile (actor: ActorRef) (sandbox: SandboxName) (cwd: string option) : Async<Result<string, string>> =
+            async {
+                let name = SandboxName.value sandbox
+                // Checked INSIDE the sandbox, by asking it. A host-side existence check
+                // would be wrong twice over: under docker the path is in a container this
+                // process cannot see, and under srt the sandbox's read scope is not ours.
+                // The path rides as an argv element and is never interpolated into a
+                // command line — the one place this feature could become a second door.
+                let! ensured =
+                    match cwd with
+                    | Some _ -> (environmentFor sandbox).Ensure None "the shell profile was set"
+                    | None -> async { return EnvironmentAvailable }
+                // Checked AND RESOLVED in one spawn, by the sandbox, because the sandbox
+                // is the only thing that knows both. `cd` lands a relative path against
+                // the sandbox's own working directory — the same root a terminal opens in,
+                // which is what makes `repos/octo/hello` mean anything — and `pwd` says
+                // where that turned out to be. What gets stored is always the absolute
+                // answer, so the projection, the spawn and Plan 26's tree matching never
+                // see a path whose meaning depends on where anyone stood.
+                //
+                // This is why a relative path is no longer refused. The old objection was
+                // that "relative to what" is the very thing being set — true of a SHELL's
+                // idea of relative, and not true of the sandbox's, which is fixed and
+                // known before any of this runs.
+                let! checked' =
+                    match ensured, cwd with
+                    | EnvironmentUnavailable reason, _ -> async { return Error reason }
+                    | EnvironmentAvailable, None -> async { return Ok None }
+                    | EnvironmentAvailable, Some path ->
+                        async {
+                            let mutable answered = ""
+                            let! spawned =
+                                (environmentFor sandbox).Spawn
+                                    { Executable = shell.Executable
+                                      Arguments = shell.Arguments @ [ "cd \"$1\" && pwd"; "sh"; path ]
+                                      Env = Map.empty
+                                      WorkingDirectory = None }
+                                    (fun (stream, chunk) ->
+                                        match stream with
+                                        | Stdout -> answered <- answered + chunk
+                                        | Stderr -> ())
+                            match spawned with
+                            | Error reason -> return Error reason
+                            | Ok handle ->
+                                match! handle.Exited with
+                                | SandboxExited 0 ->
+                                    match answered.Trim () with
+                                    | "" ->
+                                        // `cd` succeeded and `pwd` said nothing, which no
+                                        // shell does. Refused rather than stored: a profile
+                                        // of "" is a terminal that opens nowhere.
+                                        return
+                                            Error (
+                                                sprintf
+                                                    "the %s sandbox could not say where %s is, so nothing was set."
+                                                    name
+                                                    path)
+                                    | resolved -> return Ok (Some resolved)
+                                | SandboxExited _ ->
+                                    return
+                                        Error (
+                                            sprintf
+                                                "there is no directory %s in the %s sandbox. The paths add_repo and the repos query answer with are what this takes."
+                                                path
+                                                name)
+                                | SandboxRunFailed reason -> return Error reason
+                        }
+                match checked' with
+                | Error reason -> return Error reason
+                | Ok resolved ->
+                    // ONE event, appended and then folded — rather than a durable write
+                    // beside a separate assignment, which is two mechanisms for one fact
+                    // and free to disagree the moment a replay disagrees with a live set.
+                    let event =
+                        SessionEvent.ShellProfileSet
+                            { MessageId = mintMessageId ()
+                              Sandbox = sandbox
+                              // The RESOLVED path, never what the caller typed.
+                              WorkingDirectory = resolved
+                              Actor = actor }
+                    do! appendAs actor event
+                    profiles <- ShellProfileProjection.applyEvent profiles event
+                    // The agent's GENERAL-PURPOSE terminal in this sandbox is retired, and
+                    // only that one. Left alone, a profile change would be invisible in
+                    // exactly the flow that motivates it: set the profile, run `pwd`, get
+                    // the old directory, conclude the tool did nothing. It is the manager's
+                    // own — minted on demand, never named by anyone — so the next command
+                    // reopens it in the new directory and nothing is lost but a shell's
+                    // history. Terminals the agent NAMED, and the people's, were asked for:
+                    // taking somebody's shell away because a default changed is not a
+                    // default's business. A BUSY one is left alone too, because killing a
+                    // running command to change a default is the wrong trade in the one
+                    // direction that cannot be undone.
+                    let retired =
+                        match agentTerminals.TryGetValue name with
+                        | true, id when isOpen id -> Some (id, not (Set.contains (TerminalId.value id) busy))
+                        | _ -> None
+                    match retired with
+                    | Some (id, true) ->
+                        let! _ = closeTerminal id "the shell profile changed"
+                        ()
+                    | _ -> ()
+                    let where =
+                        match cwd with
+                        | Some path -> sprintf "new terminals in %s start in %s." name path
+                        | None -> sprintf "new terminals in %s start where the sandbox puts them." name
+                    let mine =
+                        match retired with
+                        | Some (_, true) -> [ "Your command terminal was closed and reopens there on your next command." ]
+                        | Some (_, false) ->
+                            [ "Your command terminal has a command running, so it was left alone and keeps the directory it is in." ]
+                        | None -> []
+                    return
+                        Ok (
+                            String.concat
+                                " "
+                                ([ where ]
+                                 @ mine
+                                 @ [ "Terminals you opened, and the people's, keep the directory they are in." ]))
+        }
+
+        /// Every profile pointing inside a tree that is about to go, cleared (Plan 26).
+        ///
+        /// No validation and no retirement, unlike `SetProfile`: this is not a decision
+        /// somebody is making about where terminals should start, it is the disappearance of
+        /// a place they already start in. The terminals open in it keep running — a shell
+        /// whose directory is deleted is a fact of the filesystem, not ours to tidy — and the
+        /// next one to open lands somewhere that exists.
+        let clearProfilesUnder (actor: ActorRef) (tree: string) : Async<SandboxName list> =
+            async {
+                let affected =
+                    ShellProfileProjection.listed profiles
+                    |> List.filter (fun (_, profile) ->
+                        match profile.WorkingDirectory with
+                        | Some cwd -> ShellProfile.isInside tree cwd
+                        | None -> false)
+                    |> List.map fst
+                for sandbox in affected do
+                    let event =
+                        SessionEvent.ShellProfileSet
+                            { MessageId = mintMessageId ()
+                              Sandbox = sandbox
+                              WorkingDirectory = None
+                              Actor = actor }
+                    do! appendAs actor event
+                    profiles <- ShellProfileProjection.applyEvent profiles event
+                return affected
+            }
+
         { Open = openTerminal
           AgentTerminal = agentTerminal
           OpenAgentTerminal = openAgentTerminal
@@ -1700,6 +2134,9 @@ module SessionTerminals =
           Lost = fun () -> lost
           Interactive = fun id -> TerminalLeases.autoHeld id leases
           Rearm = rearm
+          SetProfile = setProfile
+          ClearProfilesUnder = clearProfilesUnder
+          Profiles = fun () -> profiles
           ReclaimIdle = reclaimIdle
           IsOpen = isOpen
           Lengths =
@@ -1848,7 +2285,7 @@ module TerminalCommands =
 
     /// How long a RUNNING command is waited for: the same bound the retired `execute_command`
     /// used. Keeping it is not a new risk, it is the existing one.
-    let commandTimeout = TimeSpan.FromSeconds 120.0
+    let commandTimeout = TimeSpan.FromSeconds SessionTerminals.turnBoundSeconds
 
     /// Register a listener for "something that could change an outcome happened" — a log
     /// append, a doc update. Returns the unsubscribe.

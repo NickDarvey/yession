@@ -25,8 +25,14 @@ let private expect =
 
 let private sessionId = SessionId.create (Interop.envOr "YESSION_SESSION" "local-session") |> expect
 let private port = Interop.envOr "YESSION_PORT" "0" |> int
+// ABSOLUTE, whatever it was given. The default below is relative, and so is what the test
+// harness passes; every path this session stores, binds into a sandbox, or reports to a
+// person is derived from it. A relative one still WORKS for anything resolved once — which
+// is why it survived this long — and silently breaks whatever resolves it twice. `Repos`
+// guards its own boundary too (see `Repos.create`): that is the same rule at the place a
+// relative path becomes a wrong answer rather than the place it is born.
 let private dataDir =
-    Interop.envOr "YESSION_SESSION_DATA" (sprintf ".yession/sessions/%s" (SessionId.value sessionId))
+    Fs.absolute (Interop.envOr "YESSION_SESSION_DATA" (sprintf ".yession/sessions/%s" (SessionId.value sessionId)))
 
 // The control channel to the Manager (Step 24): supervision reports, secrets custody,
 // AND this launch's OAuth client registration all authenticate with the same
@@ -102,18 +108,29 @@ let private secretsCapabilitiesFor (sessionId: SessionId) =
 // The session's repos directory (Plan 14): one host path both sandboxes see — the git
 // verbs clone into it, the WorkSandbox reads and builds it. Created at boot so its
 // existence is never a per-operation question, and living in the data dir so a checkout
-// survives idle reaping and relaunch with the session.
-let private reposDir = sprintf "%s/repos" dataDir
-do Fs.ensureDir reposDir
+// survives idle reaping and relaunch with the session. WHERE under the data dir is
+// `Sandboxes.SessionLayout`'s to say, because the answer is a statement about the
+// workspace a terminal opens in and not something this file can decide alone.
+let private reposDir = Sandboxes.SessionLayout.prepareReposDir dataDir
 
-/// The session's WorkSandboxes (Plan 15, stage 2), by name. `default` is the sandbox
-/// every session has always had and keeps its workspace path, so nothing about an
-/// existing session changes; a named one gets its own workspace under `sandboxes/<name>`,
-/// because two sandboxes exist precisely so that what happens in one does not happen in
-/// the other. The repos directory is shared by all of them — that is what it is for.
-/// `credentials` is a parameter rather than a module value because resolving one is a
-/// Plan 08 question answered further down this file (it needs the control channel and the
-/// connection-status cache), and a composition root should not have to be read backwards.
+/// Where a work sandbox works. Host-family sandboxes work under the session's own data
+/// directory; a docker sandbox's workspace is the image's, which nothing here composes.
+///
+/// Module level because two things need it and they are not near each other: the sandboxes
+/// themselves, and the path a repo verb ANSWERS with — which is relative to the terminal's
+/// working directory or it is not relative to anything.
+let private workspaceFor (sandbox: SandboxName) =
+    match workBackend with
+    | HostBackend
+    | SrtBackend -> Some (Sandboxes.SessionLayout.workspaceFor dataDir sandbox)
+    | DockerBackend -> EnvironmentSpec.defaults.WorkingDirectory
+
+/// The session's WorkSandboxes (Plan 15, stage 2), by name — each in the workspace
+/// `SessionLayout` gives it, all of them sharing the one repos directory, which is what
+/// it is for. `credentials` is a parameter rather than a module value because resolving
+/// one is a Plan 08 question answered further down this file (it needs the control channel
+/// and the connection-status cache), and a composition root should not have to be read
+/// backwards.
 let private makeSandboxes
     (credentials: WorkSandboxes.CredentialSource list)
     : Yession.SessionProcess.EventLog<SessionEvent> -> WorkSandboxes.WorkSandboxes =
@@ -131,15 +148,6 @@ let private makeSandboxes
                         Mode = ReadWrite } ] }
         | HostBackend
         | SrtBackend -> EnvironmentSpec.defaults
-    // Host-family sandboxes work under the session's own data directory; a docker
-    // sandbox's workspace lives at the spec/backend default inside the container.
-    let workspaceFor (sandbox: SandboxName) =
-        match workBackend with
-        | HostBackend
-        | SrtBackend ->
-            if sandbox = SandboxName.defaultName then Some (sprintf "%s/workspace" dataDir)
-            else Some (sprintf "%s/sandboxes/%s/workspace" dataDir (SandboxName.value sandbox))
-        | DockerBackend -> workSpec.WorkingDirectory
     let sharedRepos =
         match workBackend with
         | HostBackend
@@ -329,6 +337,11 @@ let mutable private queryRegistry : Queries.QueryRegistry = Queries.empty
 // which no turn can run, because nothing is listening.
 let mutable private workSandboxes : WorkSandboxes.WorkSandboxes = WorkSandboxes.unavailable
 
+// The terminal manager (Plan 25 needs it here for the `shell_profile` query and the command
+// that changes it). Filled from the Host beside the sandboxes above, and for the same
+// reason: the Host owns the log both are built over.
+let mutable private terminals : SessionTerminals.SessionTerminals = SessionTerminals.unavailable
+
 // The MCP servers this session was given (Plan 17). Composed HERE rather than by the Host,
 // unlike the other reverse legs, because what arrives on that leg has two consumers: a
 // turn's registry, which the Host builds, and the `mcp_servers` query, which is this
@@ -415,6 +428,7 @@ let private reportGitHubNetworkFailure (credentialActor: ActorRef) (_gitSaid: st
 let private commandServices : Commands.CommandServices =
     { Repos = fun () -> reposService
       Sandboxes = fun () -> workSandboxes
+      Terminals = fun () -> terminals
       Invalidate = fun name -> queryRegistry.Invalidate name }
 
 /// The credential a party's calls on the provider run on (Plan 08): the session's own
@@ -582,7 +596,13 @@ Async.StartImmediate (
                       ReposDir = reposDir
                       // What the verbs SAY a checkout is at is the work sandbox's view of
                       // it, not the git sandbox's: nobody runs a build in the git sandbox.
-                      VisibleAt = Sandboxes.reposVisibleAt workBackend reposDir
+                      // Relative to where a terminal starts, when it can be: `repos/…` is
+                      // what anyone here can act on, and `set_shell_profile` resolves it
+                      // against the same root. The absolute path stays the sandbox's.
+                      VisibleAt =
+                        Sandboxes.reposReachedFrom
+                            (workspaceFor SandboxName.defaultName)
+                            (Sandboxes.reposVisibleAt workBackend reposDir)
                       ExtraReadPaths = []
                       Git = Repos.gitExecutable (Sandboxes.ambientEnv ())
                       AllowedDomains = [ "github.com" ]
@@ -606,6 +626,7 @@ Async.StartImmediate (
                   // Reads the cell rather than a value: the registry is the Host's, and
                   // the Host has not been started yet. By the time anyone reads it, it is.
                   WorkSandboxes.query (fun () -> workSandboxes)
+                  ShellProfile.query (fun () -> terminals)
                   McpClient.query (fun () -> mcpServers) ]
             match Queries.create registrations with
             | Ok registry -> queryRegistry <- registry
@@ -687,6 +708,7 @@ Async.StartImmediate (
         // capabilities and the `work_sandboxes` query read is filled here — before the
         // readiness line, and therefore before any turn or any browser can ask.
         workSandboxes <- host.Sandboxes
+        terminals <- host.Terminals
         // How each gated command is carried out, handed to the gate the Host owns. Here —
         // and not closed over a turn — because the table is built from the services, and the
         // services are composed here.

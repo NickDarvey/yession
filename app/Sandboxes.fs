@@ -76,6 +76,59 @@ let egressFor (backend: SandboxBackend) (ambient: Map<string, string>) : string 
         |> List.ofArray
         |> Some
 
+/// Where a session's workspaces and its checkouts sit under its data directory.
+///
+/// One module because these are not independent facts. A terminal starts in the
+/// workspace, so a checkout that is not under it is a checkout nobody sees without being
+/// told its absolute path first — and an agent told to find one spends its step ceiling
+/// looking. Computed apart, in the composition root, they drifted into siblings: `ls` in
+/// a fresh terminal showed an empty directory while the clones sat next door.
+module SessionLayout =
+
+    /// The workspace a host-family sandbox works in. `default` keeps the session's own
+    /// `workspace` path, so nothing about an existing session changes; a named one gets
+    /// its own, because two sandboxes exist precisely so that what happens in one does
+    /// not happen in the other.
+    let workspaceFor (dataDir: string) (sandbox: SandboxName) : string =
+        if sandbox = SandboxName.defaultName then sprintf "%s/workspace" dataDir
+        else sprintf "%s/sandboxes/%s/workspace" dataDir (SandboxName.value sandbox)
+
+    /// The session's repos directory, INSIDE the workspace a terminal opens in. One
+    /// directory for the whole session — the git verbs clone into it, every work sandbox
+    /// reads and builds it — so a NAMED sandbox reaches it at this same absolute path,
+    /// carried as a write path rather than as a child of its own workspace.
+    let reposDir (dataDir: string) : string =
+        sprintf "%s/repos" (workspaceFor dataDir SandboxName.defaultName)
+
+    /// Where a session that predates the layout above left its checkouts: beside the
+    /// workspace instead of inside it.
+    let legacyReposDir (dataDir: string) : string = sprintf "%s/repos" dataDir
+
+    /// The session's repos directory, ready to be cloned into: anything a pre-layout
+    /// session left adopted, the directory itself created, the path returned.
+    ///
+    /// One verb rather than two calls, because the order between them is load-bearing and
+    /// invisible — creating the directory first is exactly what would make the adoption
+    /// find a live layout and decline — and the caller that gets that wrong strands
+    /// somebody's work without any of this failing.
+    ///
+    /// The adoption is there because a session's data directory outlives its process, which
+    /// is what makes a checkout survive idle reaping and relaunch. A session cloned into
+    /// before this layout relaunches with its repos at the old path; left there they are
+    /// not deleted, they are INVISIBLE — the listing scans the new path, reports nothing,
+    /// and the agent re-clones over work that was never committed. It declines when both
+    /// paths exist, because a rename onto a non-empty directory throws and this runs at
+    /// boot: a session that somehow had both would fail to start instead. Delete the
+    /// adoption once no live session predates the layout.
+    let prepareReposDir (dataDir: string) : string =
+        let legacy = legacyReposDir dataDir
+        let current = reposDir dataDir
+        if legacy <> current && Fs.exists legacy && not (Fs.exists current) then
+            Fs.ensureDir (workspaceFor dataDir SandboxName.defaultName)
+            Fs.rename legacy current
+        Fs.ensureDir current
+        current
+
 /// Where the session's repos directory is reachable from INSIDE a work sandbox. The
 /// host-family backends share the directory itself (srt binds the same absolute path, so
 /// the name does not change); the docker backend cannot share a host path by policy and
@@ -92,15 +145,43 @@ let reposVisibleAt (backend: SandboxBackend) (hostReposDir: string) : string =
     | SrtBackend -> hostReposDir
     | DockerBackend -> "/repos"
 
+/// The checkout path a repo verb ANSWERS with: relative to where a terminal starts, when the
+/// repos directory is under it.
+///
+/// `repos/octo/hello` is the whole path anybody in the session can act on, and it stays the
+/// same length however long the operator's data directory is. The absolute form is the same
+/// fact wearing the operator's home directory —
+/// `/Users/someone/.yession/sessions/40V9FY6MT534HDMBX6W5HS8PGR/workspace/repos/…` — which
+/// every answer then carries and nobody here can do anything with.
+///
+/// It is passable straight to `set_shell_profile`, which resolves it against the sandbox's
+/// own working directory: the same root a terminal opens in, which is what makes a relative
+/// path mean anything. That is the abstraction — the absolute path is the SANDBOX's business
+/// and never has to leave it.
+///
+/// Falls back to the absolute path when the repos directory is NOT under the terminal's
+/// working directory: the docker backend, whose workspace is the image's and whose repos
+/// arrive on a bind mount at `/repos`, and any named sandbox reaching the shared directory
+/// from its own workspace. A relative path that is only true somewhere else is worse than a
+/// long one.
+let reposReachedFrom (workingDirectory: string option) (visibleAt: string) : string =
+    match workingDirectory with
+    | Some cwd when visibleAt.StartsWith (cwd.TrimEnd '/' + "/") ->
+        visibleAt.Substring ((cwd.TrimEnd '/').Length + 1)
+    | _ -> visibleAt
+
 let policyFor
     (backend: SandboxBackend)
     (ambient: Map<string, string>)
     (resolved: Map<string, string>)
     (workspace: string option)
     // The session's repos directory (Plan 14), shared into the WorkSandbox so a
-    // bootstrap clone is visible the moment it lands. For the host-family backends it
-    // is a write path beside the workspace; the docker backend carries it as a bind
-    // mount on the spec instead (`SessionMain`), so it is None there.
+    // bootstrap clone is visible the moment it lands. A write path in its own right
+    // under the host-family backends, whether or not this sandbox's workspace already
+    // contains it — the DEFAULT sandbox's does (`SessionLayout`), a named one's does
+    // not, and a path named twice costs nothing while a path named never costs the
+    // checkout. The docker backend carries it as a bind mount on the spec instead
+    // (`SessionMain`), so it is None there.
     (reposDir: string option)
     : SandboxPolicy =
     let env =
@@ -678,6 +759,26 @@ type SrtConfig =
       /// Egress and credential env scrubbing are untouched. Undo when it can be a path.
       FilesystemDisabled : bool }
 
+/// What a manager start that FAILED actually settled — and so whether the sandbox after
+/// it is handed that refusal or starts one of its own.
+///
+/// srt's dependency check is not a stat. `whichSync` forks `which` — a shell script on a
+/// Debian-derived host, so two execs — under a one-second timeout, and reports EVERY way
+/// that fork can fail as `<tool> not found`: no `which` on this process's PATH, a box too
+/// busy to hand out a fork inside a second, EMFILE, ENOMEM. A NAMED bwrap or socat escapes
+/// that (srt checks those with `accessSync(X_OK)`); only ripgrep's named path goes through
+/// `which`. Which is why the whole tier fails on that one line, about a file sitting right
+/// there, executable, while the other two tools it needs are never mentioned.
+type StartFailure =
+    /// A tool the config names cannot be executed by this process either. Nothing about
+    /// that changes while the process lives, so the refusal is kept and every later
+    /// sandbox is given it instead of paying to rediscover it.
+    | HostCannotConfine
+    /// Every tool the config names is executable right here, so a refusal that blames one
+    /// of them settled nothing about this host: srt's probe did not run. Forgotten, and
+    /// the next sandbox asks again.
+    | NothingSettled
+
 /// OS-level confinement via `@anthropic-ai/sandbox-runtime` (bubblewrap on Linux,
 /// Seatbelt on macOS): a wrapped spawn, no container, and egress that is ENFORCED —
 /// the network namespace is unshared, so the only route out is srt's filtering proxy.
@@ -936,11 +1037,8 @@ module SrtSandbox =
     [<Emit("$0.SandboxManager.initialize($1)")>]
     let private initialize (srt: obj) (config: obj) : JS.Promise<unit> = jsNative
 
-    [<Emit("$0.SandboxManager.checkDependenciesAsync()")>]
-    let private checkDependencies (srt: obj) : JS.Promise<obj> = jsNative
-
-    [<Emit("(($0.errors ?? []).join('; '))")>]
-    let private dependencyErrors (check: obj) : string = jsNative
+    [<Emit("$0.SandboxManager.reset()")>]
+    let private resetManager (srt: obj) : JS.Promise<unit> = jsNative
 
     [<Emit("$0.SandboxManager.wrapWithSandboxArgv($1, undefined, $2, undefined, $3 || undefined)")>]
     let private wrapArgv (srt: obj) (command: string) (custom: obj) (cwd: string) : JS.Promise<obj> = jsNative
@@ -958,11 +1056,55 @@ module SrtSandbox =
     let mutable private starting : JS.Promise<obj> option = None
     let mutable private allowed : Set<string> = Set.empty
 
-    /// Reset the memoized process-wide manager. For tests that drive a fresh session in
-    /// the same process — production initializes once and keeps it until the process ends.
-    let forgetManager () =
-        starting <- None
-        allowed <- Set.empty
+    /// The tools this config names srt must run. macOS names none — Seatbelt ships with
+    /// the OS — so the list is empty there, and so is what a failed start there settles.
+    let namedTools (config: SrtConfig) : string list =
+        [ config.Bwrap; config.Socat; config.Ripgrep ] |> List.choose id
+
+    /// What a failed start settled, read against what this process can see of the tools it
+    /// named. Pure in the predicate, so the decision is pinned in the cheap tier — without
+    /// a sandbox, and without a box that has to be having a bad minute.
+    let startFailure (executable: string -> bool) (config: SrtConfig) : StartFailure =
+        if namedTools config |> List.forall executable then NothingSettled else HostCannotConfine
+
+    /// How many times a start that settled nothing is asked again, and how long it waits in
+    /// between. A fork that could not be taken is a condition that passes — but only for
+    /// somebody who waits and asks again, and srt asks exactly once.
+    let private startAttempts = 3
+    let private startBackoffMs = 250
+
+    /// What a start that asked and never got an answer says. srt's own sentence — `ripgrep
+    /// (/nix/store/…-ripgrep-15.2.0/bin/rg) not found` — sends whoever reads it to look for
+    /// a tool that is right there, so it is quoted rather than passed on, next to the thing
+    /// that contradicts it.
+    let probeDidNotRun (config: SrtConfig) (attempts: int) (reason: string) : string =
+        sprintf
+            "srt refused to start %d times running: %s. Every tool it needs is executable in this process (%s), so what failed is srt's own dependency probe — a forked `which` under a one-second timeout, which reports a fork it could not take as a tool that is not there — and not the tool it names."
+            attempts
+            reason
+            (namedTools config |> String.concat ", ")
+
+    /// Forget the process-wide manager: this module's memo AND srt's own, which the memo
+    /// only fronts. Both, because `initialize` returns early once srt has a manager — the
+    /// dependency probe included — so forgetting one half is not a fresh start, it is a
+    /// start that skips the very thing a fresh one exists to redo. Called when a start
+    /// settled nothing, and by tests that drive a fresh session in the same process;
+    /// production starts once and keeps it until the process ends.
+    let forgetManager () : Async<unit> =
+        async {
+            match starting with
+            | None -> ()
+            | Some promise ->
+                starting <- None
+                allowed <- Set.empty
+                try
+                    let! srt = Interop.awaitPromise promise
+                    do! Interop.awaitPromise (resetManager srt)
+                with _ -> ()
+        }
+
+    [<Emit("$0.catch($1)")>]
+    let private whenRejected (promise: JS.Promise<obj>) (handler: obj -> unit) : unit = jsNative
 
     let private managerFor (config: SrtConfig) : Async<obj> =
         match starting with
@@ -978,26 +1120,43 @@ module SrtSandbox =
         | None ->
             allowed <- Set.ofList config.AllowedDomains
             // Started once, here, and memoized as its promise — including a start that
-            // FAILED, so every later sandbox reports the same reason instead of retrying
-            // an initialization the host cannot support.
+            // failed BECAUSE THIS HOST CANNOT CONFINE, so every later sandbox reports the
+            // reason instead of rediscovering it. A start that settled nothing is not
+            // that: it is asked again below, and forgotten if it still cannot answer.
             let promise =
                 Async.StartAsPromise (
                     async {
                         let! srt = Interop.awaitPromise (importSrt ())
                         if not (supportedPlatform srt) then
                             return failwith "this platform has no srt sandbox"
-                        // Always CONFINED, whichever sandbox got here first: srt reads
-                        // the session config for anything a spawn does not name, so an
-                        // exempt one initializing the manager would hand its exemption
-                        // to the session. The exemption rides `customConfig` per spawn,
-                        // which wins outright over this.
-                        do! Interop.awaitPromise (initialize srt (toJs { config with FilesystemDisabled = false }))
-                        let! check = Interop.awaitPromise (checkDependencies srt)
-                        match dependencyErrors check with
-                        | "" -> return srt
-                        | errors -> return failwith errors
+                        let rec attempt (left: int) =
+                            async {
+                                try
+                                    // Always CONFINED, whichever sandbox got here first: srt
+                                    // reads the session config for anything a spawn does not
+                                    // name, so an exempt one initializing the manager would
+                                    // hand its exemption to the session. The exemption rides
+                                    // `customConfig` per spawn, which wins outright over this.
+                                    do! Interop.awaitPromise (initialize srt (toJs { config with FilesystemDisabled = false }))
+                                    return srt
+                                with ex ->
+                                    match startFailure Fs.executable config with
+                                    | HostCannotConfine -> return raise ex
+                                    | NothingSettled when left > 1 ->
+                                        do! Async.Sleep startBackoffMs
+                                        return! attempt (left - 1)
+                                    | NothingSettled -> return failwith (probeDidNotRun config startAttempts ex.Message)
+                            }
+                        return! attempt startAttempts
                     })
             starting <- Some promise
+            // The forgetting rides the PROMISE rather than a caller: attached before anyone
+            // else can be handed it, it runs once and ahead of every awaiter's continuation,
+            // so no caller can clear a start that is not the one it watched fail.
+            whenRejected promise (fun _ ->
+                match startFailure Fs.executable config with
+                | HostCannotConfine -> ()
+                | NothingSettled -> forgetManager () |> Async.StartImmediate)
             Interop.awaitPromise promise
 
     let create (tools: SrtTools) : CreateSandbox =

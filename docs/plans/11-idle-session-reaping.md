@@ -118,15 +118,30 @@ per session:
 
 ```
 GET /sessions/{id}/open      launch if stopped -> wait -> land at the session's address
+GET /sessions/{id}/ready     does this deployment's front door reach it yet?
 ```
 
 The address comes from `PublicAccess.sessionAddress`, so one route is correct in every
-deployment shape. It answers with a small page that polls its target before redirecting,
-rather than a bare 302: a session that had to be launched is reachable only once the
-operator's proxy has a mapping for it, and a reconciler driven by `/sessions/stream` gets
-there in a few hundred milliseconds — quick, but a race against a redirect the browser
-follows immediately. It gives up after 20 seconds and says what it suspects, because an
-`/open` that spins forever is indistinguishable from one that is about to work.
+deployment shape. `/open` answers with a small page that waits before redirecting, rather
+than a bare 302: a session that had to be launched is reachable only once the operator's
+proxy has a mapping for it, and a reconciler driven by `/sessions/stream` gets there in a
+few hundred milliseconds — quick, but a race against a redirect the browser follows
+immediately. It gives up after 20 seconds and says what it suspects, because an `/open`
+that spins forever is indistinguishable from one that is about to work.
+
+**What it waits ON is `/ready`, not the address**, and that is the whole of the second
+route. A front door with no mapping for an address does not stay silent — it answers, with
+a `404` or a gateway error — so "the request settled" and "the session answered" are
+different facts. The page cannot tell them apart: same-origin it could read the status,
+cross-origin a `no-cors` answer is opaque (status `0`) whether the session served the page
+or the proxy served a miss. The Manager has no origin to be blinded by, so it makes the
+request and reports what came back — anything but nothing-answering, a `404`, or a gateway
+status means somebody is answering for that address. The page that guessed instead
+redirected whoever pressed Create into the front door's 404, a beat before the mapping
+appeared; as `text/plain`, a phone downloaded that as `document.txt`.
+
+Which is why every outcome of `/open` is an HTML page. A browser is the only thing that
+ever lands there, and `text/plain` is a message on a laptop and a download on a phone.
 
 ### The client offers it where the status word used to be
 

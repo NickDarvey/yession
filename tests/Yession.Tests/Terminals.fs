@@ -1126,6 +1126,39 @@ let private recorded (records: int) : Yession.Host.TranscriptStore.TranscriptSto
         transcript.Append { At = 0.0; Kind = TranscriptOutput; Data = string i } |> ignore
     store
 
+let private onlcrTests =
+    testList "ONLCR at capture (Plan 25, stage 1)" [
+        // What a tty's line discipline does to a bare LF on the way out, applied to the
+        // sources that never had a tty. Without it a VT — the player, and the emulator the
+        // keyframes are serialized from — starts every line where the last one ended.
+        testCase "a lone newline becomes a carriage return and a newline" <| fun () ->
+            Expect.equal (Onlcr.normalize false "total 4\nfile\n" |> fst) "total 4\r\nfile\r\n" "each LF gains its CR"
+
+        testCase "a newline that already has its carriage return is left alone" <| fun () ->
+            // Which is what lets pty bytes pass through untouched, and what makes normalizing
+            // twice the same as normalizing once.
+            Expect.equal (Onlcr.normalize false "done\r\n" |> fst) "done\r\n" "no second CR"
+
+        testCase "a carriage return split across two chunks does not gain a second one" <| fun () ->
+            // The one thing a chunk cannot see for itself. A progress bar rewriting its line
+            // reads back at exactly this boundary, and a doubled CR is a byte the terminal
+            // never printed sitting in the record whose purpose is fidelity.
+            let first, carry = Onlcr.normalize false "done\r"
+            Expect.equal first "done\r" "the CR passes through"
+            Expect.isTrue carry "and is remembered"
+            Expect.equal (Onlcr.normalize carry "\nnext" |> fst) "\nnext" "so the LF that follows is already paired"
+
+        testCase "a carriage return without a newline is not a line ending" <| fun () ->
+            // `\r` alone returns the cursor and keeps the row: how a progress bar overwrites
+            // itself. Treating it as a line ending would insert breaks a reader never saw.
+            Expect.equal (Onlcr.normalize false "50%\r100%" |> fst) "50%\r100%" "untouched"
+
+        testCase "an empty chunk keeps the carry it was given" <| fun () ->
+            // A stream can be read empty at any moment; forgetting the carry there would let
+            // the next chunk double a CR that arrived before it.
+            Expect.equal (Onlcr.normalize true "") ("", true) "nothing in, nothing changed"
+    ]
+
 let private transcriptTests =
     testList "Transcript" [
         // Plan 22. A client numbers an answer from what it ASKED, because a transcript line
@@ -1549,10 +1582,11 @@ let private mintFrom (ids: string list) =
         if remaining.Count > 1 then remaining.RemoveAt 0
         next
 
-let private makeTerminalsGated attach classifier (log: EventLog<SessionEvent>) environment openTranscript readTranscript openAtBoot =
+let private makeTerminalsFrom attach classifier (log: EventLog<SessionEvent>) environment openTranscript readTranscript openAtBoot profilesAtBoot =
     let mintTerminal = mintFrom [ "term-a"; "term-b"; "term-c"; "term-d"; "term-e"; "term-f" ]
     let mintBlock = mintFrom [ "b-1"; "b-2"; "b-3" ]
     let records = ResizeArray<TerminalId * int * TranscriptRecord> ()
+    let opens = ResizeArray<TerminalId> ()
     let terminals =
         SessionTerminals.create
             log
@@ -1572,7 +1606,9 @@ let private makeTerminalsGated attach classifier (log: EventLog<SessionEvent>) e
             (fun () -> BlockId.create (mintBlock ()) |> expect)
             // Fixed, because a test that cannot predict the nonce cannot assert on a mark.
             (fun () -> "test-nonce")
+            (mintFrom [ "m-1"; "m-2"; "m-3" ] >> (fun raw -> MessageId.create raw |> expect))
             (fun id seq record -> records.Add (id, seq, record))
+            (fun id -> opens.Add id)
             // No scheduler in these tests: the drain's re-arm is exercised where the drain is
             // (`TerminalScheduler`), and wiring a real one here would test the scheduler twice
             // while making every manager assertion depend on it.
@@ -1580,7 +1616,13 @@ let private makeTerminalsGated attach classifier (log: EventLog<SessionEvent>) e
             attach
             classifier
             openAtBoot
-    terminals, records
+            profilesAtBoot
+    terminals, records, opens
+
+/// No shell profile (Plan 25) — what a session that has never set one replays as, and what
+/// every case here but the profile ones is about.
+let private makeTerminalsGated attach classifier log environment openTranscript readTranscript openAtBoot =
+    makeTerminalsFrom attach classifier log environment openTranscript readTranscript openAtBoot ShellProfileProjection.empty
 
 /// The bypass classifier, which is what ships (Plan 23). A case about the classifier's
 /// verdict passes its own.
@@ -1597,7 +1639,7 @@ let private managerTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 Expect.isTrue (terminals.IsOpen id) "it is open"
@@ -1615,7 +1657,7 @@ let private managerTests =
                 let environment, spawned =
                     scriptedEnvironment (fun _ -> [ Stdout, "hello\n"; Stderr, "warn\n" ], 0)
                 let openTranscript, linesOf, _, _, readTranscript = recordingTranscripts ()
-                let terminals, records = makeTerminals log environment openTranscript readTranscript []
+                let terminals, records, _ = makeTerminals log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 let entry = entry "a1" id (PeerRef ada) 1.0
@@ -1647,9 +1689,9 @@ let private managerTests =
                 let recordsOf kind =
                     transcript
                     |> List.choose (function TranscriptRecordLine r when r.Kind = kind -> Some r.Data | _ -> None)
-                Expect.equal (recordsOf TranscriptInput) [ "echo hello\n" ] "what was typed is recorded too"
-                Expect.equal (recordsOf TranscriptOutput) [ "hello\n" ] "stdout"
-                Expect.equal (recordsOf TranscriptStderr) [ "warn\n" ] "and stderr, still told apart"
+                Expect.equal (recordsOf TranscriptInput) [ "echo hello\r\n" ] "what was typed is recorded too"
+                Expect.equal (recordsOf TranscriptOutput) [ "hello\r\n" ] "stdout"
+                Expect.equal (recordsOf TranscriptStderr) [ "warn\r\n" ] "and stderr, still told apart"
                 match transcript with
                 | TranscriptHeaderLine _ :: _ -> ()
                 | other -> failwithf "a transcript starts with its header, got %A" other
@@ -1660,12 +1702,34 @@ let private managerTests =
                     "every record is broadcast with the line index it was written at"
             }
 
+        testCaseAsync "output captured off a pipe is recorded as a tty would have shown it" <|
+            // Plan 25, stage 1. A block on an uninstrumented shell runs through pipes, so
+            // nothing puts a line discipline between the program and us and its `\n` arrives
+            // bare. Fed to a VT that is the staircase: every line starting where the last one
+            // ended. The transcript is what both the player and the keyframe emulator read,
+            // so the conversion belongs at capture and this is where it is pinned.
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "total 4\nfile\n" ], 0)
+                let openTranscript, linesOf, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let id = opened |> expect
+                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "ls" ignore
+                let output =
+                    linesOf id
+                    |> List.choose (function
+                        | TranscriptRecordLine r when r.Kind = TranscriptOutput -> Some r.Data
+                        | _ -> None)
+                Expect.equal output [ "total 4\r\nfile\r\n" ] "every line ending is one a terminal would have written"
+            }
+
         testCaseAsync "a failing command keeps its output and reports the exit code" <|
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stderr, "no such file\n" ], 2)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "cat missing" ignore
@@ -1684,7 +1748,7 @@ let private managerTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "\u001b[31mred\r\n" ], 0)
                 let openTranscript, _, readKeyframes, awaitKeyframes, readTranscript = recordingTranscripts ()
-                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "first" ignore
@@ -1714,7 +1778,7 @@ let private managerTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id ActorRef.Agent 1.0) "rm -rf build" ignore
@@ -1734,7 +1798,7 @@ let private managerTests =
                 let flood = String.replicate 200 (String.replicate 40000 "y")
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, flood ], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "yes" ignore
@@ -1753,7 +1817,7 @@ let private managerTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let terminals, _ = makeTerminals log environment openTranscript readTranscript [ terminalA; terminalB ]
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript [ terminalA; terminalB ]
                 Expect.isTrue (terminals.IsOpen terminalA) "before boot reconciliation it still reads as open"
                 do! terminals.ReconcileAtBoot ()
                 let! events = eventsOf log
@@ -1768,7 +1832,7 @@ let private managerTests =
                 let log = newLog ()
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 let! _ = terminals.Close id "closed by a peer"
@@ -1790,7 +1854,7 @@ let private schedulerTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "ok\n" ], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
@@ -1815,7 +1879,7 @@ let private schedulerTests =
                 let log = newLog ()
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
@@ -1840,7 +1904,7 @@ let private schedulerTests =
                             | TerminalAct (_, "rm -rf /") -> return Rejected "not in this session"
                             | _ -> return Approved
                         }
-                let terminals, _ =
+                let terminals, _, _ =
                     makeTerminalsGated AttachTerminal.unavailable refuseFirst log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
@@ -1877,7 +1941,7 @@ let private schedulerTests =
                             asked.Add (author, act)
                             return Approved
                         }
-                let terminals, _ =
+                let terminals, _, _ =
                     makeTerminalsGated AttachTerminal.unavailable recording log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
@@ -1902,7 +1966,7 @@ let private schedulerTests =
                 let log = newLog ()
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
@@ -1972,29 +2036,81 @@ let private refusingEnvironment () =
     let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
     { environment with Ensure = fun _ _ -> async { return EnvironmentUnavailable "no sandbox here" } }, spawned
 
-/// A stream that records what was written to it and never ends on its own.
+/// A stream that records what was written to it and never ends until a test says so.
+///
+/// The third member is that latch. `Exited` used to resolve immediately, which was harmless
+/// while nobody awaited it and became a trap the moment something did: every attached
+/// terminal would close the instant it opened, and nine tests about something else would
+/// fail for a reason none of them names. A stream ending is now a thing a test DOES, which
+/// is also the only way to pin what happens when one does.
 let private loopback () =
     let written = ResizeArray<string> ()
+    // What the device says, on demand. A fixture that could only speak once at attach could
+    // not produce a transcript long enough to READ ACROSS, which is exactly where a cursor
+    // is wrong or right.
+    let mutable say : string -> unit = ignore
+    let mutable ended : SandboxRun option = None
+    let mutable resume : (SandboxRun -> unit) option = None
+    // Both orders work: a test that ends the stream before anything awaits it, and one that
+    // ends it after. A latch that only handled the second would turn a scheduling detail
+    // into a hang.
+    // A stream ends ONCE — `PtyHandle.Exited` says so, and a double that resolved twice sent
+    // the real thing into a loop: closing a terminal kills its handle, the kill re-fired the
+    // continuation, and the close ran again, for ever.
+    let finish (run: SandboxRun) =
+        match ended with
+        | Some _ -> ()
+        | None ->
+            ended <- Some run
+            match resume with
+            | Some ok ->
+                resume <- None
+                ok run
+            | None -> ()
+    let exited =
+        Async.FromContinuations (fun (ok, _, _) ->
+            match ended with
+            | Some run -> ok run
+            | None -> resume <- Some ok)
     let attach : AttachTerminal =
         fun _ _ _ onData ->
             async {
+                say <- onData
                 return
                     Ok
                         { Write = fun text -> written.Add text
                           Resize = fun _ _ -> ()
-                          Kill = ignore
-                          Exited = async { return SandboxExited 0 }
+                          Kill = fun () -> finish (SandboxExited 0)
+                          Exited = exited
                           }
                     |> Result.map (fun handle ->
                         onData "ready\n"
                         handle)
             }
-    attach, written
+    attach, written, finish, (fun (text: string) -> say text)
+
+/// A stream that will not dial — the provider is down, the url is wrong, nothing is
+/// listening. `AttachWs` answers exactly this way, in the caller's own words.
+let private refusingStream () : AttachTerminal =
+    fun _ _ _ _ -> async { return Error "could not attach to ws://127.0.0.1:0/device" }
 
 let private deviceTicket =
     { Url = "ws://127.0.0.1:0/device"
       Capabilities = SourceCapabilities.byteStream
       Label = "USB serial" }
+
+/// A source that DID claim an exit code — a remote shell rather than a serial line — so
+/// "is the code reported" and "is one invented" are two different questions with two
+/// different tickets.
+let private codedTicket =
+    { deviceTicket with Capabilities = { SourceCapabilities.byteStream with HasExitCode = true } }
+
+/// The reasons a terminal was closed for, in order.
+let private closureReasons (log: EventLog<SessionEvent>) =
+    async {
+        let! events = eventsOf log
+        return events |> List.choose (function SessionEvent.TerminalClosed e -> Some e.Reason | _ -> None)
+    }
 
 let private sourceTests =
     testList "Foreign terminal sources" [
@@ -2006,12 +2122,407 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = refusingEnvironment ()
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _ = loopback ()
-                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let attach, _, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 Expect.isError shell "a shell terminal IS a need, so a refused sandbox refuses the open"
                 let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 Expect.isOk device "an attached one needs nothing this session runs"
+            }
+
+        // A peer already connected when a terminal opens was not there to be told at accept,
+        // and `Screens.Sync` folds records only into an emulator a snapshot created — so
+        // without this every record of a terminal opened mid-session is dropped on arrival.
+        testCaseAsync "opening a terminal says so, so a peer already here can start a screen" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, _ = loopback ()
+                let terminals, _, opens = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                Expect.equal (List.ofSeq opens) [ id ] "exactly the terminal that opened"
+            }
+
+        // The other half of the same rule, and it fails separately: announcing a terminal
+        // that does not exist would seed a screen for one, and every record that never comes
+        // would be folded into it.
+        testCaseAsync "a stream that will not open says nothing to anybody" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _, opens = makeTerminalsWith (refusingStream ()) log environment openTranscript readTranscript []
+                let! _ = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                Expect.isEmpty (List.ofSeq opens) "nothing opened, so nothing is announced"
+            }
+
+        // The splice: a client folds records from the snapshot's seq forward, so the two have
+        // to be counted in the same currency. Report a seq from a different one and a joining
+        // peer either redraws for ever or skips a record permanently.
+        testCaseAsync "a snapshot's seq is the same number the length hint carries" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! snapshot = terminals.Snapshot id
+                let length = terminals.Lengths () |> List.tryFind (fst >> (=) id) |> Option.map snd
+                match snapshot, length with
+                | Some (seq, _), Some hinted -> Expect.equal seq hinted "one currency, or the client splices at the wrong line"
+                | other -> failwithf "expected a snapshot and a length, got %A" other
+            }
+
+        // An attached source has no degraded mode to fall back to, unlike a shell that would
+        // not start — so a dial that fails is a failed OPEN. It used to be swallowed, and the
+        // caller was handed an id for a terminal with nothing behind it.
+        testCaseAsync "a stream that will not open is not a terminal" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _, _ = makeTerminalsWith (refusingStream ()) log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                Expect.isError opened "the open carries the dial's own reason"
+            }
+
+        // The other half, and it fails separately: an open that reported an error while still
+        // appending the event would leave an open-looking terminal in every projection,
+        // reattachable, listed, and answering reads about a stream that never existed.
+        testCaseAsync "a stream that will not open records no terminal either" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _, _ = makeTerminalsWith (refusingStream ()) log environment openTranscript readTranscript []
+                let! _ = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! events = eventsOf log
+                let opens =
+                    events |> List.choose (function SessionEvent.TerminalOpened e -> Some e | _ -> None)
+                Expect.isEmpty opens "nothing durable says a terminal was opened"
+            }
+
+        // `RunBlock` awaits `Exited` for the shells it spawns, which a live-only source never
+        // reaches — it has no blocks. So a device that stopped used to leave its terminal open
+        // for ever, and the only way back was pressing Kill on something already dead.
+        testCaseAsync "a stream that ends closes its terminal" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, endStream, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                endStream (SandboxExited 0)
+                do! Async.Sleep 20
+                Expect.isFalse (terminals.IsOpen id) "the terminal goes with the stream that fed it"
+            }
+
+        // A serial line has no exit code, and `HasExitCode = false` is the source saying so.
+        // Reporting "exit 0" for one that merely went quiet invents the exact fact that flag
+        // exists to deny — and it is the fact somebody deciding whether to reattach reads.
+        testCaseAsync "a source that claimed no exit code is not given one" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, endStream, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let _ = opened |> expect
+                endStream (SandboxExited 0)
+                do! Async.Sleep 20
+                let! reasons = closureReasons log
+                match reasons with
+                | [ reason ] ->
+                    Expect.stringContains reason "ended" "it says the stream ended"
+                    Expect.isFalse (reason.Contains "code") "and claims no code it was never given"
+                | other -> failwithf "expected one closure, got %A" other
+            }
+
+        testCaseAsync "a source that claimed an exit code reports it" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, endStream, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = codedTicket; Renewable = false }) "remote shell"
+                let _ = opened |> expect
+                endStream (SandboxExited 7)
+                do! Async.Sleep 20
+                let! reasons = closureReasons log
+                Expect.equal reasons [ "the stream ended with code 7" ] "the code it declared it would have"
+            }
+
+        // `{"type":"failed"}` and an abrupt close both arrive here as `SandboxRunFailed`, and
+        // the provider's own words are the only thing worth putting in front of a person.
+        // They used to reach no surface at all.
+        testCaseAsync "a stream that failed says why, in the provider's words" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, endStream, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let _ = opened |> expect
+                endStream (SandboxRunFailed "the exporter went away")
+                do! Async.Sleep 20
+                let! reasons = closureReasons log
+                Expect.equal reasons [ "the exporter went away" ] "carried through unchanged"
+            }
+
+        // A `Kill` we sent resolves `Exited` too, so the watcher fires on a terminal already
+        // closed. Two closures for one ending would be two answers to "when did this end".
+        testCaseAsync "a terminal closed by hand is not closed twice by its own stream" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! closed = terminals.Close id "closed by a peer"
+                Expect.isOk closed "the hand close succeeds"
+                do! Async.Sleep 20
+                let! reasons = closureReasons log
+                Expect.equal reasons [ "closed by a peer" ] "one closure, and it is the one a person asked for"
+            }
+
+        // The invariant that did not exist: an agent could only ever see the last 500 lines,
+        // so a device that had been talking since before it arrived was unreadable from the
+        // beginning however much of it was on disk.
+        testCaseAsync "a read from the beginning returns the beginning" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! head = terminals.Tail id (Some 0) None
+                let page = head |> expect
+                Expect.equal page.From 0 "it starts where it was asked to"
+                Expect.stringContains page.Text "ready" "and carries what the device said first"
+            }
+
+        // Reading ACROSS a transcript, which is the only way a cursor can be caught being
+        // wrong. Asserting `next.From = first.Through` checks the cursor against itself and
+        // passes while off by one; the question that bites is whether the pages, laid end to
+        // end, are the transcript — no line twice, none missing.
+        //
+        // This is the test that would have caught the off-by-one shipped in the paging step:
+        // `readTranscript` indexes LINES and line 0 is the asciicast header, so a page that
+        // counted the RECORDS it received reported a cursor one short, and the next read
+        // handed back what the last one already had.
+        testCaseAsync "pages laid end to end are the transcript, with nothing said twice" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, say = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                // Distinct lines, so a repeat is visible as a repeat rather than as a longer
+                // run of the same thing.
+                for line in [ "alpha\n"; "bravo\n"; "charlie\n"; "delta\n" ] do
+                    say line
+                let! whole = terminals.Tail id (Some 0) None
+                let whole = (whole |> expect).Text
+                // Walk it in pages, following the cursor exactly as an agent would.
+                let rec walk (at: int) (seen: string) (guard: int) =
+                    async {
+                        if guard <= 0 then return failwith "the cursor never reached the end"
+                        let! page = terminals.Tail id (Some at) None
+                        let page = page |> expect
+                        if page.Through >= page.Length then return seen + page.Text
+                        else return! walk page.Through (seen + page.Text) (guard - 1)
+                    }
+                let! walked = walk 0 "" 20
+                Expect.equal walked whole "the same bytes, in the same order, exactly once"
+            }
+
+        // The tail's promise, asked of a page: a window that reached the end says so. With
+        // the cursor counted in the wrong currency this is off by exactly the header, so it
+        // fails without needing a transcript long enough to page.
+        testCaseAsync "a page that reached the end is up to date, exactly as a tail is" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, say = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                say "one\n"
+                say "two\n"
+                let! page = terminals.Tail id (Some 0) None
+                let page = page |> expect
+                Expect.equal page.Through page.Length "a page holding everything has reached the live edge"
+            }
+
+        // The other direction, and it fails separately: a cursor that ran AHEAD would skip
+        // lines silently, which is the failure a duplicate at least makes visible.
+        testCaseAsync "a read from the cursor misses nothing the previous one did not return" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, say = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                say "before\n"
+                let! first = terminals.Tail id (Some 0) None
+                let first = first |> expect
+                say "after\n"
+                let! second = terminals.Tail id (Some first.Through) None
+                let second = second |> expect
+                Expect.stringContains second.Text "after" "what arrived since is returned"
+                Expect.isFalse (second.Text.Contains "before") "and what was already handed over is not"
+            }
+
+        // How a reader tells a whole answer from the end of a long one. The tail reaches the
+        // live edge by construction, and saying so is what stops a model reading "the last
+        // 2000 characters of a day" as "everything this device ever said".
+        testCaseAsync "the tail says it has reached the live edge" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! tail = terminals.Tail id None None
+                let tail = tail |> expect
+                Expect.equal tail.Through tail.Length "a tail is up to date, and says so"
+            }
+
+        // A wait whose text is already there is not a wait at all. `loopback` says "ready\n"
+        // on attach, so this answers from the transcript without holding anything.
+        testCaseAsync "a wait for something already said returns it at once" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! answer = terminals.Tail id (Some 0) (Some { Until = MatchLiteral "ready"; TimeoutSeconds = 5.0 })
+                let answer = answer |> expect
+                Expect.equal answer.Matched (Some true) "it arrived"
+                Expect.stringContains answer.Text "ready" "and the text carries it"
+            }
+
+        // The bug this whole verb exists to make unexpressible. An agent that power-cycled a
+        // board and waited for its login prompt used to match the one from BEFORE the reboot,
+        // instantly, and carry on as though the board were up. A wait looks forward from the
+        // caller's own cursor, so what it has already been handed cannot satisfy it.
+        testCaseAsync "a wait cannot be satisfied by output the caller already read" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! first = terminals.Tail id (Some 0) None
+                let first = first |> expect
+                Expect.stringContains first.Text "ready" "the caller has been handed it"
+                // Waiting from where that read stopped: "ready" is behind the cursor now.
+                let! again = terminals.Tail id (Some first.Through) (Some { Until = MatchLiteral "ready"; TimeoutSeconds = 0.05 })
+                let again = again |> expect
+                Expect.equal again.Matched (Some false) "what it already saw does not count as having arrived"
+            }
+
+        // A timeout is an ANSWER: what was said while waiting is usually where the reason it
+        // never came is written.
+        testCaseAsync "a wait that times out says what was said instead" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! answer = terminals.Tail id (Some 0) (Some { Until = MatchLiteral "never-appears"; TimeoutSeconds = 0.05 })
+                let answer = answer |> expect
+                Expect.equal answer.Matched (Some false) "it did not arrive"
+                Expect.stringContains answer.Text "ready" "and what DID arrive is the answer"
+            }
+
+        // The cursor rule has to hold for a PATTERN too, and it gets its own case rather than
+        // an assumption of symmetry: a pattern takes a different path through the matcher, and
+        // "the stale match is unexpressible" would be a much weaker promise if it turned out to
+        // be true only of literals.
+        testCaseAsync "a pattern cannot be satisfied by output the caller already read" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, say = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                say "root@box:~# "
+                let pattern = TerminalPattern.compile "[#$>] $" |> expect
+                let! first = terminals.Tail id (Some 0) None
+                let first = first |> expect
+                Expect.stringContains first.Text "#" "the prompt has been handed over"
+                let! again =
+                    terminals.Tail
+                        id
+                        (Some first.Through)
+                        (Some { Until = MatchPattern (pattern, "[#$>] $"); TimeoutSeconds = 0.05 })
+                Expect.equal (again |> expect).Matched (Some false) "a prompt already read is not a prompt that just arrived"
+            }
+
+        testCaseAsync "a pattern matches output that arrives after the cursor" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, say = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! first = terminals.Tail id (Some 0) None
+                let first = first |> expect
+                say "U-Boot 2024.01\n"
+                let pattern = TerminalPattern.compile "U-Boot \\d+\\.\\d+" |> expect
+                let! found =
+                    terminals.Tail
+                        id
+                        (Some first.Through)
+                        (Some { Until = MatchPattern (pattern, "U-Boot"); TimeoutSeconds = 2.0 })
+                Expect.equal (found |> expect).Matched (Some true) "what arrived since is what a wait is for"
+            }
+
+        // A read that was not waiting says so, rather than reporting a wait nobody asked for.
+        testCaseAsync "a read that waited for nothing claims neither outcome" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! answer = terminals.Tail id None None
+                Expect.equal (answer |> expect).Matched None "no wait, no verdict"
             }
 
         testCaseAsync "an attached source's bytes reach the transcript" <|
@@ -2019,8 +2530,8 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, linesOf, _, _, readTranscript = recordingTranscripts ()
-                let attach, _ = loopback ()
-                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let attach, _, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
                 let printed =
@@ -2038,8 +2549,8 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, written = loopback ()
-                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let attach, written, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "make" ignore
@@ -2063,8 +2574,8 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _ = loopback ()
-                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let attach, _, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
                 let! taken = terminals.Take id (PeerRef ada)
@@ -2080,8 +2591,8 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, written = loopback ()
-                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let attach, written, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
 
@@ -2103,11 +2614,11 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _ = loopback ()
-                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let attach, _, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
 
-                match! terminals.Tail (expect device) with
+                match! terminals.Tail (expect device) None None with
                 | Error e -> failwithf "a device has nothing but its transcript to read: %s" e
                 | Ok tail ->
                     // `loopback` greets with "ready\n" on attach, so there is something to read
@@ -2123,14 +2634,14 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _ = loopback ()
-                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let attach, _, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = expect device
                 let! closed = terminals.Close id "the device went away"
                 Expect.isOk closed "the terminal closes"
 
-                match! terminals.Tail id with
+                match! terminals.Tail id None None with
                 | Error e -> failwithf "a closed device still has a recording: %s" e
                 | Ok tail -> Expect.stringContains tail.Text "ready" "and it still reads"
             }
@@ -2140,11 +2651,11 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _ = loopback ()
-                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let attach, _, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
 
-                match! terminals.Tail (expect shell) with
+                match! terminals.Tail (expect shell) None None with
                 | Ok _ -> failwith "a shell's output is its blocks', and reading it twice is two answers to one question"
                 | Error reason -> Expect.stringContains reason "execute_command" "and it says where the answer is"
             }
@@ -2154,8 +2665,8 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, written = loopback ()
-                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let attach, written, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 match! terminals.Write id ActorRef.Agent "rm -rf /\r" with
@@ -2247,6 +2758,36 @@ let private affordanceTests =
             Expect.isFalse (afforded true ran) "the commands it ran are the read instead"
             Expect.isFalse (afforded false (viewOf false false)) "and a recording the cap ate is no read at all"
             Expect.isFalse (afforded true (viewOf true false)) "a live terminal is not a recording yet"
+
+        testCase "the screen is the only read exactly where a live terminal has no blocks" <| fun () ->
+            // The live twin, and the rule a device needs. Gated on the LEASE, the screen
+            // appeared only while somebody was typing — so a serial port nobody had taken
+            // rendered an empty block list beside a stream arriving the whole time, and the
+            // only way to see anything was to claim the keyboard.
+            let afforded view = (TerminalAffordances.ofView true view).ScreenIsTheRead
+            let device = { viewOf true false with Sandbox = None }
+            Expect.isTrue (afforded device) "an open stream with no blocks is its screen"
+            Expect.isFalse (afforded (viewOf true false)) "a shell's read is the blocks it is about to have"
+            Expect.isFalse (afforded { device with IsOpen = false }) "a closed one is a recording, not a screen"
+
+        testCase "a stream that resolves into blocks reads as its blocks, not its screen" <| fun () ->
+            // Why the rule asks the BLOCKS as well as the sandbox. A source that declared
+            // `instrument` has no sandbox either, so the sandbox alone would take the block
+            // read away from exactly the source that has one.
+            let afforded view = (TerminalAffordances.ofView true view).ScreenIsTheRead
+            let instrumented =
+                { viewOf true false with
+                    Sandbox = None
+                    Blocks =
+                        [ { BlockId = block "1"
+                            QueueId = None
+                            Authority = Authority.ofAuthor (PeerRef ada)
+                            Command = "make"
+                            Background = false
+                            FromSeq = 1
+                            ToSeq = Some 3
+                            Status = BlockFinished (CommandSucceeded 0) } ] }
+            Expect.isFalse (afforded instrumented) "it has a cheaper read of the same history"
     ]
 
 // The agent's own terminal (Plan 15, stage 2), as a rule the manager owns rather than one the
@@ -2260,7 +2801,7 @@ let private agentTerminalTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
                 let! first = terminals.AgentTerminal SandboxName.defaultName "npm test"
                 let! again = terminals.AgentTerminal SandboxName.defaultName "npm run build"
                 Expect.equal again first "the second command lands in the shell the first one used"
@@ -2274,7 +2815,7 @@ let private agentTerminalTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
                 let other = SandboxName.create "test" |> expect
                 let! default' = terminals.AgentTerminal SandboxName.defaultName "npm test"
                 let! test = terminals.AgentTerminal other "npm test"
@@ -2288,7 +2829,7 @@ let private agentTerminalTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
                 let! first = terminals.AgentTerminal SandboxName.defaultName "npm test"
                 let id = first |> expect
                 let! _ = terminals.Close id "closed by a peer"
@@ -2296,6 +2837,437 @@ let private agentTerminalTests =
                 Expect.notEqual next first "a fresh terminal, because the old one has no process"
             }
 
+    ]
+
+// --- The shell profile (Plan 25) -----------------------------------------------------------
+//
+// One durable fact about a sandbox's terminals: where a shell opened in it starts. What is
+// worth pinning here is the SPAWN — the profile is applied by it and never as a `cd` typed at
+// a prompt, so the assertions are about the exec the sandbox was handed.
+
+/// A latch: something that has happened, and an async that resolves when it has. Both orders
+/// work, which is what makes it a latch rather than a race — no clock, no sleep, no ordering
+/// luck.
+let private latch () : (unit -> unit) * Async<unit> =
+    let mutable fired = false
+    let mutable resume : unit -> unit = ignore
+    (fun () ->
+        if not fired then
+            fired <- true
+            resume ()),
+    Async.FromContinuations (fun (cont, _, _) -> if fired then cont () else resume <- cont)
+
+/// The argv `SetProfile` validates a directory with, as this fixture reads it back. The verb
+/// asks the sandbox to `cd` there and say where it landed, so this is also where a RELATIVE
+/// path acquires its meaning.
+let private validatedPath (exec: SandboxExec) : string option =
+    match exec.Arguments with
+    | [ "-c"; body; "sh"; path ] when body.StartsWith "cd " -> Some path
+    | _ -> None
+
+/// This fixture's sandbox opens in `/ws`, so that is what a relative path resolves against —
+/// standing in for the workspace a real terminal starts in.
+let private fixtureWorkspace = "/ws"
+
+let private resolvedIn (path: string) : string =
+    if path.StartsWith "/" then path else sprintf "%s/%s" fixtureWorkspace path
+
+/// A sandbox that CAN host an instrumented shell, and that knows which directories it has.
+/// `present` is read on every call rather than captured, so a test can make a directory go
+/// away between the profile being set and a terminal being opened in it — which is the one
+/// thing the fallback exists for.
+let private profileEnvironment (present: unit -> Set<string>) =
+    let ptySpawned = ResizeArray<SandboxExec> ()
+    let exists path = Set.contains path (present ())
+    let environment : SessionEnvironment.SessionEnvironment =
+        { Ensure = fun _ _ -> async { return EnvironmentAvailable }
+          Spawn =
+            fun exec onChunk ->
+                async {
+                    let code =
+                        match validatedPath exec with
+                        | Some path ->
+                            let resolved = resolvedIn path
+                            if exists resolved then
+                                // What `pwd` prints once `cd` has landed: the absolute answer,
+                                // which is the only thing the verb stores.
+                                onChunk (Stdout, resolved + "\n")
+                                0
+                            else 1
+                        | None -> 0
+                    return
+                        Ok
+                            { WriteStdin = ignore
+                              CloseStdin = ignore
+                              Kill = ignore
+                              Exited = async { return SandboxExited code } }
+                }
+          SpawnPty =
+            fun exec _ _ onOutput ->
+                async {
+                    ptySpawned.Add exec
+                    match exec.WorkingDirectory with
+                    | Some path when not (exists path) -> return Error (sprintf "chdir %s: no such directory" path)
+                    | _ ->
+                        return
+                            Ok
+                                // The shell's own prompt hook, as this fixture's shell runs it:
+                                // the rc bootstrap is typed in, and the next prompt carries the
+                                // `A` mark that makes the terminal instrumented.
+                                { Write = fun _ -> onOutput "\u001b]133;A;y=test-nonce\u0007"
+                                  Resize = fun _ _ -> ()
+                                  Kill = ignore
+                                  Exited = async { return SandboxExited 0 } }
+                }
+          Stop = fun () -> async { return () }
+          CurrentRef = fun () -> Some "scripted" }
+    environment, ptySpawned
+
+/// A sandbox whose BLOCKS do not finish until the test says so — the only way to hold a
+/// terminal busy without a clock. Its `test -d` still answers, because the profile verb has to
+/// be able to validate while a block runs.
+let private blockingEnvironment () =
+    let release, finished = latch ()
+    let spawned = ResizeArray<SandboxExec> ()
+    let environment : SessionEnvironment.SessionEnvironment =
+        { Ensure = fun _ _ -> async { return EnvironmentAvailable }
+          Spawn =
+            fun exec onChunk ->
+                async {
+                    spawned.Add exec
+                    let exited =
+                        match validatedPath exec with
+                        | Some path ->
+                            onChunk (Stdout, resolvedIn path + "\n")
+                            async { return SandboxExited 0 }
+                        | None ->
+                            async {
+                                do! finished
+                                return SandboxExited 0
+                            }
+                    return Ok { WriteStdin = ignore; CloseStdin = ignore; Kill = ignore; Exited = exited }
+                }
+          SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
+          Stop = fun () -> async { return () }
+          CurrentRef = fun () -> Some "scripted" }
+    environment, spawned, release
+
+let private shellProfileTests =
+    let checkout = "/ws/repos/octo/hello"
+    /// A manager over a sandbox that has the checkout and can host a shell.
+    let fixture () =
+        let log = newLog ()
+        let mutable present = Set.singleton checkout
+        let environment, ptySpawned = profileEnvironment (fun () -> present)
+        let openTranscript, linesOf, _, _, readTranscript = recordingTranscripts ()
+        let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
+        terminals, log, ptySpawned, linesOf, (fun () -> present <- Set.empty)
+    let ptyDirectories (ptySpawned: ResizeArray<SandboxExec>) =
+        ptySpawned |> Seq.map (fun e -> e.WorkingDirectory) |> List.ofSeq
+    testList "The shell profile" [
+
+        testCaseAsync "a terminal opened afterwards starts its shell there" <|
+            async {
+                // The invariant the whole plan exists for, and it is asserted on the SPAWN:
+                // a `cd` typed at the prompt would echo into the audit trail on the re-arm
+                // path, need quoting for a path this code did not choose, and fail invisibly.
+                let terminals, _, ptySpawned, _, _ = fixture ()
+                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                Expect.isOk set "the directory is there, so the profile takes"
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                Expect.equal (ptyDirectories ptySpawned) [ Some checkout ] "the shell is spawned in the profile's directory"
+            }
+
+        testCaseAsync "a terminal opened BEFORE it keeps the directory it is in" <|
+            async {
+                // A shell's cwd is state its user is relying on. The one terminal that does
+                // move is the one nobody named, and it moves by being reopened.
+                let terminals, _, ptySpawned, _, _ = fixture ()
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                Expect.equal (ptyDirectories ptySpawned) [ None ] "nothing is re-spawned under a terminal already open"
+            }
+
+        testCaseAsync "the degraded per-block path runs its blocks there too" <|
+            async {
+                // A terminal with no pty gets a fresh process per block and carries nothing
+                // between them, so the profile is applied per block — the same promise, kept
+                // by the only means that path has. Wiring only the pty would make a degraded
+                // terminal silently ignore the profile.
+                let log = newLog ()
+                // The profile probe asks the sandbox to `cd` there and say where it landed;
+                // everything else this fixture runs says nothing.
+                let environment, spawned =
+                    scriptedEnvironment (fun arg -> (if arg = checkout then [ Stdout, checkout + "\n" ] else []), 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
+                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                Expect.isOk set "this fixture answers the probe with the directory it landed in"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let id = opened |> expect
+                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "pwd" ignore
+                Expect.equal
+                    (spawned
+                     |> Seq.filter (fun e -> validatedPath e |> Option.isNone)
+                     |> Seq.map (fun e -> e.WorkingDirectory)
+                     |> List.ofSeq)
+                    [ Some checkout ]
+                    "the block's own process starts in the profile's directory"
+            }
+
+        testCaseAsync "a directory the sandbox does not have is refused" <|
+            async {
+                // Asked of the SANDBOX, not of this process: under docker the path is inside a
+                // container we cannot see, and under srt the sandbox's read scope is not ours.
+                let terminals, _, _, _, _ = fixture ()
+                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some "/repos/gone")
+                match set with
+                | Ok _ -> failwith "a directory that is not there must not become the profile"
+                | Error reason -> Expect.isTrue (reason.Contains "/repos/gone") "the refusal names the path"
+            }
+
+        testCaseAsync "a refused directory leaves the profile as it was" <|
+            async {
+                let terminals, _, _, _, _ = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some "/repos/gone")
+                Expect.equal
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    (Some checkout)
+                    "a refusal changes nothing"
+            }
+
+        // A path from `add_repo` is relative to where a terminal starts, and that is exactly
+        // the root the sandbox resolves against — so what the repo tools answer with can be
+        // passed straight here. What gets STORED is always the absolute answer, so nothing
+        // downstream ever holds a path whose meaning depends on where somebody stood.
+        testCaseAsync "a relative path is resolved by the sandbox, and stored absolute" <|
+            async {
+                let terminals, _, _, _, _ = fixture ()
+                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some "repos/octo/hello")
+                Expect.isOk set "the path the repo tools answer with is a path this takes"
+                // Asserted on what is STORED, not on where a shell then opened: a relative
+                // string kept in the projection would still open the right shell in this
+                // fixture, and would be a path whose meaning moves the moment anything else
+                // reads it — Plan 26's tree matching, or a restart replaying the log.
+                Expect.equal
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    (Some checkout)
+                    "what the sandbox resolved, not what the caller typed"
+            }
+
+        testCaseAsync "a relative path that is nowhere in the sandbox is still refused" <|
+            async {
+                let terminals, _, _, _, _ = fixture ()
+                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some "repos/octo/absent")
+                Expect.isError set "resolving is not the same as accepting"
+            }
+
+        testCaseAsync "a clear returns new terminals to wherever the sandbox puts them" <|
+            async {
+                let terminals, _, ptySpawned, _, _ = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName None
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                Expect.equal (ptyDirectories ptySpawned) [ None ] "back to what every terminal did before there were profiles"
+            }
+
+        testCaseAsync "a profile set in one sandbox does not move another's terminals" <|
+            async {
+                let terminals, _, ptySpawned, _, _ = fixture ()
+                let other = SandboxName.create "test" |> expect
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell other) "build"
+                Expect.equal (ptyDirectories ptySpawned) [ None ] "a path is only a path inside the filesystem that has it"
+            }
+
+        testCaseAsync "a session that restarts still opens terminals where it left off" <|
+            async {
+                // The restart promise: the profile is folded from the durable log, exactly as
+                // the terminals left open are.
+                let log = newLog ()
+                let environment, ptySpawned = profileEnvironment (fun () -> Set.singleton checkout)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let replayed =
+                    [ SessionEvent.ShellProfileSet
+                        { MessageId = MessageId.create "m-old" |> expect
+                          Sandbox = SandboxName.defaultName
+                          WorkingDirectory = Some checkout
+                          Actor = ActorRef.Agent } ]
+                    |> List.fold ShellProfileProjection.applyEvent ShellProfileProjection.empty
+                let terminals, _, _ =
+                    makeTerminalsFrom
+                        AttachTerminal.unavailable
+                        Classifier.approveAll
+                        log
+                        environment
+                        openTranscript
+                        readTranscript
+                        []
+                        replayed
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                Expect.equal
+                    (ptyDirectories ptySpawned)
+                    [ Some checkout ]
+                    "a restarted session opens its next terminal where the last one started"
+            }
+
+        testCaseAsync "the agent's idle command terminal is retired, so its next command lands there" <|
+            async {
+                // Left alone, the change would be invisible in exactly the flow that motivates
+                // it: set the profile, run `pwd`, get the old directory, conclude the tool did
+                // nothing. It is the manager's own, so nothing is lost but a shell's history.
+                let terminals, _, _, _, _ = fixture ()
+                let! first = terminals.AgentTerminal SandboxName.defaultName "git status"
+                let before = first |> expect
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! next = terminals.AgentTerminal SandboxName.defaultName "git status"
+                Expect.notEqual (next |> expect) before "the next command runs in a shell opened under the new profile"
+            }
+
+        testCaseAsync "a terminal the agent NAMED is left alone" <|
+            async {
+                // It was asked for. Taking somebody's shell away because a default changed is
+                // not a default's business.
+                let terminals, _, _, _, _ = fixture ()
+                let! opened = terminals.OpenAgentTerminal SandboxName.defaultName "tests"
+                let id = opened |> expect
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                Expect.isTrue (terminals.IsOpen id) "a named terminal keeps its shell"
+            }
+
+        testCaseAsync "a terminal a person opened is left alone" <|
+            async {
+                let terminals, _, _, _, _ = fixture ()
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "mine"
+                let id = opened |> expect
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                Expect.isTrue (terminals.IsOpen id) "a human's shell is not a default's to end"
+            }
+
+        testCaseAsync "a BUSY command terminal is left alone" <|
+            async {
+                // Killing a running command to change a default is the wrong trade in the one
+                // direction that cannot be undone.
+                let log = newLog ()
+                let environment, _, release = blockingEnvironment ()
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
+                let! opened = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let id = opened |> expect
+                let started, awaitStarted = latch ()
+                Async.StartImmediate (terminals.RunBlock id (entry "a1" id ActorRef.Agent 1.0) "npm test" started)
+                do! awaitStarted
+                Expect.isTrue (terminals.Busy () |> Set.contains (TerminalId.value id)) "the block is running"
+                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                Expect.isOk set "the profile still changes"
+                Expect.isTrue (terminals.IsOpen id) "but the running command is not killed for it"
+                release ()
+            }
+
+        testCaseAsync "a shell that cannot start there opens anyway, and says why" <|
+            async {
+                // The directory can go away between being set and being opened in. A terminal
+                // that refuses to open because of a DEFAULT is a worse failure than the default
+                // being wrong, so it falls back once and records the reason where people read.
+                let terminals, _, _, linesOf, vanish = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                vanish ()
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let id = opened |> expect
+                Expect.isTrue (terminals.IsOpen id) "the terminal opens"
+                let printed =
+                    linesOf id
+                    |> List.choose (function TranscriptRecordLine r -> Some r.Data | _ -> None)
+                    |> String.concat ""
+                Expect.isTrue (printed.Contains checkout) "and the transcript names the directory it could not use"
+            }
+
+        testCaseAsync "a tree that goes away takes the profiles pointing into it" <|
+            async {
+                // Plan 25's upstream half (Plan 26): a profile pointing inside a checkout that
+                // has been deleted would send every future terminal somewhere that no longer
+                // exists.
+                let terminals, _, _, _, _ = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.ClearProfilesUnder ActorRef.Agent "/ws/repos/octo"
+                Expect.equal
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    None
+                    "the profile goes with the tree"
+            }
+
+        testCaseAsync "it answers with the sandboxes it cleared" <|
+            async {
+                // The caller says so in its own answer, so the model learns its next terminal
+                // moved without having to ask.
+                let terminals, _, _, _, _ = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! cleared = terminals.ClearProfilesUnder ActorRef.Agent checkout
+                Expect.equal (cleared |> List.map SandboxName.value) [ "default" ] "the one it cleared, named"
+            }
+
+        testCaseAsync "a profile in a sibling that shares a prefix is left alone" <|
+            async {
+                let terminals, _, _, _, _ = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! cleared = terminals.ClearProfilesUnder ActorRef.Agent "/ws/repos/octo/hell"
+                Expect.isEmpty cleared "a prefix is not a parent"
+                Expect.equal
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    (Some checkout)
+                    "and the profile still points where it did"
+            }
+
+        testCaseAsync "the next terminal after a cleared profile opens where the sandbox puts it" <|
+            async {
+                let terminals, _, ptySpawned, _, _ = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.ClearProfilesUnder ActorRef.Agent checkout
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                Expect.equal (ptyDirectories ptySpawned) [ None ] "nothing is asked for a directory that has gone"
+            }
+
+        testCaseAsync "the query reports where each sandbox's terminals start" <|
+            async {
+                // One registration reaches the agent as a read-only tool and the people as a
+                // settings section. Nobody writes a panel; what is pinned is that the rows say
+                // what the manager holds.
+                let terminals, _, _, _, _ = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let registration = Yession.Host.ShellProfile.query (fun () -> terminals)
+                match! registration.Read () with
+                | Error e -> failwithf "the query failed: %s" e
+                | Ok (RowsOf [ row ]) ->
+                    Expect.equal
+                        (row |> List.tryFind (fst >> (=) "cwd") |> Option.map snd)
+                        (Some (CellText checkout))
+                        "the row names the directory"
+                | Ok other -> failwithf "expected one row, got %A" other
+            }
+
+        testCaseAsync "the query answers in the shape it declares" <|
+            async {
+                let terminals, _, _, _, _ = fixture ()
+                let registration = Yession.Host.ShellProfile.query (fun () -> terminals)
+                match! registration.Read () with
+                | Error e -> failwithf "the query failed: %s" e
+                | Ok value -> Expect.isTrue (QueryValue.fits registration.Def.Shape value) "the registry would accept it"
+            }
+
+        testCaseAsync "the profile survives a shell that could not start there" <|
+            async {
+                // Left alone for a person to fix: a manager that cleared it on one failed spawn
+                // would silently undo a decision nobody revisited.
+                let terminals, _, _, _, vanish = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                vanish ()
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                Expect.equal
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    (Some checkout)
+                    "a failed spawn is not a decision"
+            }
     ]
 
 // The agent's own terminal verbs (Plan 20, stage 3): the same ones a person has, over the
@@ -2306,7 +3278,7 @@ let private agentVerbTests =
         let log = newLog ()
         let environment, _ = scriptedEnvironment (fun _ -> [], 0)
         let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-        let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+        let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
         terminals, log
     let openFour (terminals: SessionTerminals.SessionTerminals) =
         async {
@@ -2392,9 +3364,11 @@ let tests =
         waitTests
         digestTests
         ansiTests
+        onlcrTests
         transcriptTests
         agentTerminalTests
         agentVerbTests
+        shellProfileTests
         codecTests
         orderTests
         managerTests

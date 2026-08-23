@@ -122,7 +122,7 @@ let private writeOnly (schema: string) : (string * bool) list =
 /// `read_terminal` against a capability that answers with exactly this tail.
 let private readingTerminal (tail: TerminalTail) =
     let registry =
-        AgentTools.registry { AgentCapabilities.none with ReadTerminal = fun _ -> async { return Ok tail } }
+        AgentTools.registry { AgentCapabilities.none with ReadTerminal = fun _ _ _ -> async { return Ok tail } }
     registry.Invoke (call "yession" "read_terminal" """{"terminal":"t1"}""")
 
 let private sessionTests =
@@ -133,9 +133,9 @@ let private sessionTests =
             let allowed = ToolRegistry.allowedTools registry
             let expected =
                 [ "execute_command"; "check_pending"; "set_secret"; "list_secrets"
-                  "delete_secret"; "add_repo"; "switch_branch"; "fetch_repo"
+                  "delete_secret"; "add_repo"; "remove_repo"; "switch_branch"; "fetch_repo"
                   "repo_status"; "repo_log"; "repo_diff"
-                  "start_work_sandbox"; "stop_work_sandbox" ]
+                  "start_work_sandbox"; "stop_work_sandbox"; "set_shell_profile" ]
                 |> List.map (sprintf "mcp__yession__%s")
             Expect.containsAll allowed expected "every verb the agent had before is still declared"
             Expect.equal (List.length allowed) (List.length (List.distinct allowed)) "no name is declared twice"
@@ -151,6 +151,99 @@ let private sessionTests =
             Expect.equal repos.Title (Some "repos") "and the title the settings surface shows"
             Expect.equal (writeOnly repos.InputSchema) [] "a query is nullary"
         }
+
+        // remove_repo (Plan 26). `force` is what decides whether uncommitted work is deleted,
+        // so what matters at this seam is that its ABSENCE reaches the capability as a
+        // decision not to — a default that arrived as `true` would delete somebody's work on
+        // a call that never mentioned it.
+        testCaseAsync "remove_repo without force asks for a removal that spares uncommitted work" <|
+            async {
+                let mutable seen : (string * bool) option = None
+                let registry =
+                    AgentTools.registry
+                        { AgentCapabilities.none with
+                            RemoveRepo =
+                              fun repo force ->
+                                async {
+                                    seen <- Some (RepoRef.value repo, force)
+                                    return Ok { Status = CommandRan "removed"; Tool = "remove_repo"; Summary = "s"; Handle = None }
+                                } }
+                let! _ = registry.Invoke (call "yession" "remove_repo" """{"repo":"octo/hello"}""")
+                Expect.equal seen (Some ("octo/hello", false)) "an unmentioned force is a no"
+            }
+
+        testCaseAsync "remove_repo carries an explicit force through to the capability" <|
+            async {
+                let mutable seen : (string * bool) option = None
+                let registry =
+                    AgentTools.registry
+                        { AgentCapabilities.none with
+                            RemoveRepo =
+                              fun repo force ->
+                                async {
+                                    seen <- Some (RepoRef.value repo, force)
+                                    return Ok { Status = CommandRan "removed"; Tool = "remove_repo"; Summary = "s"; Handle = None }
+                                } }
+                let! _ = registry.Invoke (call "yession" "remove_repo" """{"repo":"octo/hello","force":true}""")
+                Expect.equal seen (Some ("octo/hello", true)) "the second decision reaches the thing that acts on it"
+            }
+
+        // The shell profile (Plan 25). What matters at this seam is that the tool's
+        // arguments reach the capability as the capability's own vocabulary — a directory
+        // or its absence — because "no directory" is the CLEAR and not a missing argument.
+        testCaseAsync "set_shell_profile hands the capability a directory" <|
+            async {
+                let mutable seen : (string * string option) option = None
+                let registry =
+                    AgentTools.registry
+                        { AgentCapabilities.none with
+                            SetShellProfile =
+                              fun name cwd ->
+                                async {
+                                    seen <- Some (SandboxName.value name, cwd)
+                                    return Ok { Status = CommandRan "set"; Tool = "set_shell_profile"; Summary = "s"; Handle = None }
+                                } }
+                let! _ =
+                    registry.Invoke (call "yession" "set_shell_profile" """{"cwd":"/repos/octo/hello"}""")
+                Expect.equal seen (Some ("default", Some "/repos/octo/hello")) "the default sandbox, and the path"
+            }
+
+        testCaseAsync "a set_shell_profile with no directory is the clear" <|
+            async {
+                let mutable seen : (string * string option) option = None
+                let registry =
+                    AgentTools.registry
+                        { AgentCapabilities.none with
+                            SetShellProfile =
+                              fun name cwd ->
+                                async {
+                                    seen <- Some (SandboxName.value name, cwd)
+                                    return Ok { Status = CommandRan "cleared"; Tool = "set_shell_profile"; Summary = "s"; Handle = None }
+                                } }
+                let! _ = registry.Invoke (call "yession" "set_shell_profile" """{"sandbox":"test"}""")
+                Expect.equal seen (Some ("test", None)) "an absent directory is the clear, not a missing argument"
+            }
+
+        testCaseAsync "a refused shell profile reads as a refusal, not a failure" <|
+            async {
+                let registry =
+                    AgentTools.registry
+                        { AgentCapabilities.none with
+                            SetShellProfile =
+                              fun _ _ ->
+                                async {
+                                    return
+                                        Ok
+                                            { Status = CommandRefusedBy (PeerRef (PeerId.create "ada" |> expect), Some "not there")
+                                              Tool = "set_shell_profile"
+                                              Summary = "set_shell_profile default -> /gone"
+                                              Handle = None }
+                                } }
+                let! answer = registry.Invoke (call "yession" "set_shell_profile" """{"cwd":"/gone"}""")
+                match answer with
+                | Ok answer -> Expect.isTrue (answer.Text.StartsWith "REFUSED by") "the model reads a decision, not a malfunction"
+                | Error e -> failwithf "expected an answer, got %s" e
+            }
 
         // The mechanism the tool-use record will rely on: secrecy is a property of the
         // FIELD, declared in the schema, so renaming an argument cannot leave the
@@ -199,11 +292,29 @@ let private sessionTests =
                     "the call happened; it is the command that did not"
             }
 
-        // Reading a terminal with no blocks (Plan 19).
-        testCaseAsync "a tail that left nothing out comes back as it came" <|
+        // Reading a terminal with no blocks (Plan 19), paged in Plan 25. Every answer says
+        // where it read, because a model told only the text cannot tell "this is everything"
+        // from "this is the last 2000 characters of a day" — and it reads it as the first.
+        testCaseAsync "a read that reached the live edge says it is up to date" <|
             async {
-                let! answer = readingTerminal { Text = "U-Boot 2024.01\n=> "; Elided = 0 }
-                Expect.equal answer (Ok (ToolAnswer.text "U-Boot 2024.01\n=> ")) "all of it, unannotated"
+                let! answer =
+                    readingTerminal { Text = "U-Boot 2024.01\n=> "; Elided = 0; From = 0; Through = 2; Length = 2; Matched = None }
+                Expect.equal
+                    answer
+                    (Ok (ToolAnswer.text "lines 0-2 of 2, up to date\nU-Boot 2024.01\n=> "))
+                    "the text, and the fact that there is no more of it"
+            }
+
+        // The cursor is the whole point of a page: a reader that cannot say where it stopped
+        // cannot read on, and a model that is not handed the number will not invent it.
+        testCaseAsync "a read with more behind it hands back the line to carry on from" <|
+            async {
+                let! answer =
+                    readingTerminal { Text = "boot\n"; Elided = 0; From = 0; Through = 500; Length = 1200; Matched = None }
+                Expect.equal
+                    answer
+                    (Ok (ToolAnswer.text "lines 0-500 of 1200 — read on with from: 500\nboot\n"))
+                    "where it got to, and how to continue"
             }
 
         // What matters is the SAME thing that matters for a block's output: a model that
@@ -211,16 +322,47 @@ let private sessionTests =
         // confidently.
         testCaseAsync "a tail that left something out says how much" <|
             async {
-                let! answer = readingTerminal { Text = "=> "; Elided = 4096 }
+                let! answer = readingTerminal { Text = "=> "; Elided = 4096; From = 700; Through = 1200; Length = 1200; Matched = None }
                 Expect.equal
                     answer
-                    (Ok (ToolAnswer.text "[4096 earlier characters omitted]\n=> "))
+                    (Ok (ToolAnswer.text "lines 700-1200 of 1200, up to date\n[4096 earlier characters omitted]\n=> "))
                     "in the words a block's output already uses"
+            }
+
+        // Two fields rather than a mode flag, and this is what it buys: a caller that means
+        // a pattern and sets the literal field gets a refusal instead of a literal match on a
+        // regex string — which would be wrong, silent, and look exactly like a device that
+        // never answered.
+        testCaseAsync "asking for a literal and a pattern at once is refused" <|
+            async {
+                let registry = AgentTools.registry AgentCapabilities.none
+                let! answer =
+                    registry.Invoke (
+                        call "yession" "read_terminal"
+                            ("""{"terminal":"t1","wait_for":"x","wait_for_pattern":"y"}"""))
+                match answer with
+                | Error reason -> Expect.stringContains reason "give one" "and says what to do about it"
+                | Ok other -> failwithf "expected a refusal, got %A" other
+            }
+
+        // Compiled at the boundary, so a pattern outside the subset is an answer to THIS call
+        // rather than something discovered part-way through a wait that then has to explain
+        // why it stopped.
+        testCaseAsync "a pattern outside the subset is refused at the call, and named" <|
+            async {
+                let registry = AgentTools.registry AgentCapabilities.none
+                let! answer =
+                    registry.Invoke (
+                        call "yession" "read_terminal"
+                            ("""{"terminal":"t1","wait_for_pattern":"(a)\\1"}"""))
+                match answer with
+                | Error reason -> Expect.stringContains reason "backreference" "the construct, by name"
+                | Ok other -> failwithf "expected a refusal, got %A" other
             }
 
         testCaseAsync "a terminal that has said nothing says so, rather than answering blank" <|
             async {
-                let! answer = readingTerminal { Text = ""; Elided = 0 }
+                let! answer = readingTerminal { Text = ""; Elided = 0; From = 0; Through = 0; Length = 0; Matched = None }
                 Expect.equal answer (Ok (ToolAnswer.text "terminal t1 has said nothing")) "silence is an answer"
             }
 
@@ -232,7 +374,7 @@ let private sessionTests =
                     AgentTools.registry
                         { AgentCapabilities.none with
                             ReadTerminal =
-                                fun _ ->
+                                fun _ _ _ ->
                                     async {
                                         return Error "this terminal runs commands as blocks — what one printed comes back from execute_command"
                                     } }

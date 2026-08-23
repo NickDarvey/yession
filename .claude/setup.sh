@@ -4,8 +4,9 @@
 # fast when already done. Laptops and CI never need this: they install devenv normally and
 # use the committed devenv.yaml (see AGENTS.md Bootstrap).
 #
-# Also the SessionStart hook (.claude/settings.json): with --hook it only refreshes
-# devenv.local.yaml — never installs, never builds — and exits quietly if Nix is absent.
+# Also the SessionStart hook (.claude/settings.json): with --hook it refreshes
+# devenv.local.yaml and settles devenv.lock — never installs, never builds — and exits
+# quietly if Nix is absent.
 set -euo pipefail
 
 hook_only=false
@@ -91,12 +92,77 @@ fi
 # devenv.local.yaml repoints the devenv input at devenv's OWN source substituted from
 # cache.nixos.org, because the sandbox proxy blocks the github:cachix/devenv fetch the
 # generated flake would otherwise make. Gitignored; laptop/CI use the committed devenv.yaml.
-if src="$(nix build --no-link --print-out-paths "${nixpkgs}#devenv.src" 2>/dev/null)"; then
+# A pin needs a GC ROOT, not just a path. This built with `--no-link`, which roots nothing:
+# the source sat on the collector's dead list from the moment its path was written into the
+# lock. One `nix-collect-garbage` — or nix collecting on its own when this container's fixed
+# disk allowance runs low — and every `devenv shell -- <task>` in the repo dies with
+# `error: path '/nix/store/…-source' is not valid`, about a file devenv was TOLD to use and
+# nothing was keeping. `--out-link` registers an indirect root under /nix/var/nix/gcroots/auto,
+# so what the lock points at lives exactly as long as the link does.
+mkdir -p "$repo/.devenv"
+pinned() { sed -n 's|.*url: path:\(/nix/store/[^?]*\).*|\1|p' "$repo/devenv.local.yaml" 2>/dev/null; }
+if src="$(nix build --out-link "$repo/.devenv/devenv-src" --print-out-paths "${nixpkgs}#devenv.src" 2>/dev/null)"; then
   printf 'inputs:\n  devenv:\n    url: path:%s?dir=src/modules\n' "$src" > "$repo/devenv.local.yaml"
-  echo "setup: wrote $repo/devenv.local.yaml (devenv input -> $src)"
+  echo "setup: wrote $repo/devenv.local.yaml (devenv input -> $src, rooted at .devenv/devenv-src)"
+elif prev="$(pinned)" && [ -n "$prev" ] && ! nix path-info "$prev" >/dev/null 2>&1; then
+  # Nothing resolved AND what a previous session wrote is gone. A dead pin is worse than no
+  # pin: devenv answers every command with nix's `not valid` about a path nobody can explain,
+  # where the committed input at least fails saying what it could not fetch.
+  rm -f "$repo/devenv.local.yaml"
+  echo "setup: could not resolve devenv.src, and the pin from a previous session ($prev) is gone; removed devenv.local.yaml"
 else
-  echo "setup: could not resolve devenv.src from cache (proxy not ready?); skipping devenv.local.yaml"
+  echo "setup: could not resolve devenv.src from cache (proxy not ready?); keeping the existing devenv.local.yaml"
 fi
+
+# devenv rewrites devenv.lock on every run, re-adding a `devenv` node that names THIS
+# container's /nix/store path (see .gitignore for why the committed lock carries nixpkgs only).
+# That left a tracked file permanently modified: noise in every `git status`, and one
+# `git commit -a` away from pinning the repo's devenv input to a path no other checkout has.
+#
+# A clean filter states what is actually true — that node is not part of the file's TRACKED
+# content — so git hashes the working copy without it and the file matches HEAD. Nothing to
+# see, and nothing to commit even by accident: with `required` below, the node cannot reach
+# the index at all. Local to this clone (`.git/info/attributes`, never the committed
+# `.gitattributes`), so a laptop or CI checkout is untouched by any of it. An upstream
+# nixpkgs bump still shows, still merges.
+mkdir -p "$repo/.git/info"
+grep -qs '^devenv\.lock filter=devenv-lock$' "$repo/.git/info/attributes" \
+  || echo 'devenv.lock filter=devenv-lock' >> "$repo/.git/info/attributes"
+git -C "$repo" config filter.devenv-lock.clean "python3 -c 'import json,sys; d=json.load(sys.stdin); d[\"nodes\"].pop(\"devenv\",None); d[\"nodes\"].get(\"root\",{}).get(\"inputs\",{}).pop(\"devenv\",None); json.dump(d,sys.stdout,indent=2); sys.stdout.write(chr(10))'"
+# A clean filter that FAILS is IGNORED by default: git prints `error: external filter ...
+# failed` into the middle of its output and stages the unfiltered content anyway — the store
+# path, in the index, from a run that looked like it worked. That is the same bug arriving by
+# a different route, and the route is real: this runs before Nix exists, so the filter's
+# `python3` is whatever the image has. `required` makes the failure fatal instead, so the
+# guard fails closed rather than open.
+#
+# It governs BOTH directions, and an UNDEFINED smudge counts as a failure — so the identity
+# one has to be spelled out. Without it, `required` turns every checkout of this file into
+# `fatal: devenv.lock: smudge filter devenv-lock failed` and the file is not written at all.
+# `cat` writes exactly what git already wrote when no smudge was defined.
+git -C "$repo" config filter.devenv-lock.smudge cat
+git -C "$repo" config filter.devenv-lock.required true
+
+# Git re-hashes through the filter but does not record the result, so the file keeps reporting
+# as modified until something stages it. Staging it is a no-op once filtered — and it is done
+# ONLY when there is no real change left after filtering, so a deliberate `devenv update` is
+# left in the working tree to be reviewed rather than silently added.
+#
+# `devenv info` first, because the settle has to happen to a lock that ALREADY carries the
+# node: settling a pristine one achieves nothing and the session's first real devenv command
+# dirties it all over again. It costs ~0.1s, it is the cheapest devenv verb that resolves
+# inputs (`version` does not), and once the node is there devenv leaves the file alone — so
+# this runs once per container and every later command finds the tree clean.
+#
+# The one thing it does not cover: a `git checkout` that rewrites devenv.lock puts back the
+# node-less blob, and the next devenv command re-adds the node, so the file reports modified
+# again until the next session start settles it. Committing it is still impossible — the filter
+# is what guarantees that, and it holds whatever the stat cache believes.
+settle_lock() {
+  ( cd "$repo" && command -v devenv >/dev/null 2>&1 && devenv info >/dev/null 2>&1 ) || true
+  git -C "$repo" diff --quiet -- devenv.lock 2>/dev/null && git -C "$repo" add -- devenv.lock 2>/dev/null || true
+}
+settle_lock
 
 $hook_only && exit 0
 
@@ -110,4 +176,5 @@ $hook_only && exit 0
 # Warm everything: dev shell, offline node_modules, dotnet tools, full build.
 cd "$repo"
 devenv shell -- build
+settle_lock
 echo "setup: done — use 'devenv shell -- <task>' (check / build / verify ...)"

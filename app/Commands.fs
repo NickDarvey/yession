@@ -28,6 +28,8 @@ type CommandServices =
       Repos : unit -> Repos.ReposService option
       /// The session's named WorkSandboxes.
       Sandboxes : unit -> WorkSandboxes.WorkSandboxes
+      /// The terminal manager, which owns the shell profile (Plan 25).
+      Terminals : unit -> SessionTerminals.SessionTerminals
       /// Say a query's answer changed. A command is the only thing that can change one, so
       /// a command is the only thing that has to say so — nothing polls.
       Invalidate : QueryName -> unit }
@@ -57,9 +59,11 @@ let private andPublish
 // live in this one file, so the name is agreed where it is used — the settings surface and
 // boot configuration that used to read a shared catalogue are gone (Plan 23).
 let private addRepoTool = "add_repo"
+let private removeRepoTool = "remove_repo"
 let private switchBranchTool = "switch_branch"
 let private startWorkSandboxTool = "start_work_sandbox"
 let private stopWorkSandboxTool = "stop_work_sandbox"
+let private setShellProfileTool = "set_shell_profile"
 
 /// How each gated command is actually carried out, by tool name (Plan 15, stage 3b).
 ///
@@ -91,13 +95,77 @@ let dispatch (services: CommandServices) : CommandDispatch =
                                     match! service.AddRepo (repoCaller invocation) repo with
                                     | Error e -> return Error e
                                     | Ok listing ->
+                                        // Said HERE, at the moment a checkout first exists,
+                                        // because that is when it is worth acting on. The
+                                        // same advice sits on `set_shell_profile`, where only
+                                        // an agent already reaching for that tool reads it —
+                                        // which is not the agent about to `cd` in front of
+                                        // every command for the rest of the session.
+                                        //
+                                        // Conditioned on there being no profile rather than
+                                        // on this being the first repo: the point is that
+                                        // terminals still start somewhere else, and it stops
+                                        // saying so once somebody has decided where.
+                                        let unset =
+                                            (services.Terminals ()).Profiles ()
+                                            |> ShellProfileProjection.workingDirectory SandboxName.defaultName
+                                            |> Option.isNone
                                         return
                                             Ok (
                                                 sprintf
-                                                    "added %s — the checkout is shared with everyone in this session and visible in the work environment"
-                                                    (RepoListing.describe listing))
+                                                    "added %s — the checkout is shared with everyone in this session and visible in the work environment%s"
+                                                    (RepoListing.describe listing)
+                                                    (if unset then
+                                                         ". Terminals do not start there: set_shell_profile with that path if this is where the work is."
+                                                     else
+                                                         ""))
                                 })
                 | Some _, other -> return Error (sprintf "add_repo takes one repo, got %d arguments" (List.length other))
+            }
+
+          removeRepoTool,
+          fun (invocation: GatedInvocation) ->
+            async {
+                match services.Repos (), decodeArgs invocation.Args with
+                | None, _ -> return Error "this session has no repos"
+                | Some service, [ repo; force ] ->
+                    match RepoRef.create repo with
+                    | Error e -> return Error (sprintf "not a repo name: %s" e)
+                    | Ok repo ->
+                        return!
+                            andPublish services Repos.queryName (
+                                async {
+                                    match! service.RemoveRepo (repoCaller invocation) repo (force = "true") with
+                                    | Error e -> return Error e
+                                    | Ok path ->
+                                        // Plan 25's upstream half, with a caller at last: a
+                                        // profile pointing inside a tree that has gone would
+                                        // send every future terminal somewhere that no longer
+                                        // exists. The repo service contributes the one fact
+                                        // only it has — the path, as a terminal saw it — and
+                                        // the terminal manager decides which profiles that
+                                        // invalidates. Nothing is computed here.
+                                        let! cleared =
+                                            (services.Terminals ())
+                                                .ClearProfilesUnder (Authority.author invocation.Authority) path
+                                        if not (List.isEmpty cleared) then
+                                            services.Invalidate ShellProfile.queryName
+                                        let profiles =
+                                            match cleared with
+                                            | [] -> ""
+                                            | names ->
+                                                sprintf
+                                                    " New terminals in %s start where the sandbox puts them again."
+                                                    (names |> List.map SandboxName.value |> String.concat ", ")
+                                        return
+                                            Ok (
+                                                sprintf
+                                                    "removed %s — the checkout is gone from this session, and from the work environment.%s"
+                                                    (RepoRef.value repo)
+                                                    profiles)
+                                })
+                | Some _, other ->
+                    return Error (sprintf "remove_repo takes a repo and a flag, got %d arguments" (List.length other))
             }
 
           switchBranchTool,
@@ -160,6 +228,30 @@ let dispatch (services: CommandServices) : CommandDispatch =
                             services.Invalidate WorkSandboxes.queryName
                             return Ok (sprintf "sandbox '%s' is stopped; anything running in it is gone" (SandboxName.value name))
                 | other -> return Error (sprintf "stop_work_sandbox takes one sandbox name, got %d arguments" (List.length other))
+            }
+
+          setShellProfileTool,
+          fun (invocation: GatedInvocation) ->
+            async {
+                match decodeArgs invocation.Args with
+                | [ name; cwd ] ->
+                    match SandboxName.create name with
+                    | Error e -> return Error (sprintf "not a sandbox name: %s" e)
+                    | Ok name ->
+                        // The empty string is the CLEAR. The argument list is strings, so the
+                        // absence has to be encoded as one — and it is encoded HERE and read
+                        // here, which is the whole reason both halves of a gated command live
+                        // in one file.
+                        let cwd = if cwd = "" then None else Some cwd
+                        return!
+                            andPublish services ShellProfile.queryName (
+                                (services.Terminals ()).SetProfile (Authority.author invocation.Authority) name cwd)
+                | other ->
+                    return
+                        Error (
+                            sprintf
+                                "set_shell_profile takes a sandbox name and a directory, got %d arguments"
+                                (List.length other))
             } ]
 
 /// The turn's repo verbs (Plan 14), bound to the acting party. The MUTATING ones are three
@@ -187,6 +279,16 @@ let private repoCapabilitiesFor
             AddRepo =
               fun repo ->
                 gated addRepoTool [ RepoRef.value repo ] (sprintf "add_repo %s" (RepoRef.value repo))
+            RemoveRepo =
+              fun repo force ->
+                // The cost is in the SUMMARY, because that is the sentence the classifier
+                // reads and a person watching the queue sees BEFORE it happens rather than
+                // after. A removal that would take uncommitted work with it must not look
+                // like one that would not.
+                let summary =
+                    if force then sprintf "remove_repo %s (deleting uncommitted changes)" (RepoRef.value repo)
+                    else sprintf "remove_repo %s" (RepoRef.value repo)
+                gated removeRepoTool [ RepoRef.value repo; (if force then "true" else "false") ] summary
             SwitchRepoBranch =
               fun repo branch create ->
                 let summary =
@@ -200,7 +302,8 @@ let private repoCapabilitiesFor
             RepoLog = service.RepoLog
             RepoDiff = service.RepoDiff }
 
-/// The turn's sandbox commands (Plan 15, stage 2), bound to the acting party.
+/// The turn's sandbox commands (Plan 15, stage 2) and the shell profile (Plan 25), bound to
+/// the acting party.
 let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabilities) : AgentCapabilities =
     let gated (tool: string) (args: string list) (summary: string) =
         capabilities.RunGated
@@ -222,7 +325,14 @@ let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCap
             gated
                 stopWorkSandboxTool
                 [ SandboxName.value name ]
-                (sprintf "stop_work_sandbox %s" (SandboxName.value name)) }
+                (sprintf "stop_work_sandbox %s" (SandboxName.value name))
+        SetShellProfile =
+          fun name cwd ->
+            let summary =
+                match cwd with
+                | Some cwd -> sprintf "set_shell_profile %s -> %s" (SandboxName.value name) cwd
+                | None -> sprintf "set_shell_profile %s -> wherever the sandbox puts them" (SandboxName.value name)
+            gated setShellProfileTool [ SandboxName.value name; defaultArg cwd "" ] summary }
 
 /// Every command verb bound to ONE turn's actor: the acting party on the events is the agent,
 /// the credential is the turn human's (Plan 08). The Host leaves these as denials because

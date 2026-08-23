@@ -3,6 +3,10 @@
 # github repos are not). On a laptop/CI the github `devenv` input below works natively; in a
 # github-restricted sandbox, a generated devenv.local.yaml repoints it at the devenv source
 # substituted from cache.nixos.org (see .claude/hooks / AGENTS.md).
+#
+# The URL below names a CHANNEL, which moves — what pins it is the committed devenv.lock,
+# which resolves it to an immutable releases.nixos.org tarball. `devenv update` moves that
+# pin deliberately; nothing else does.
 inputs:
   nixpkgs:
     url: tarball+https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz

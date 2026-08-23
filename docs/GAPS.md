@@ -119,6 +119,18 @@ Items are roughly ordered by how much they matter.
     `npm i -g yession` on a bare box does not have them, and the session fails when its
     sandbox is created rather than starting unconfined. That is the intended trade — the
     fix is to install them, or to choose `host` deliberately.
+  - **srt reports a probe it could not RUN as a tool that is not there.** Its dependency
+    check is not a stat: `whichSync` forks `which` — a shell script on a Debian-derived
+    host, so two execs — under a one-second timeout, and every way that fork can fail (no
+    `which` on this process's PATH, a box too busy to hand one out inside a second, EMFILE,
+    ENOMEM) comes back as `ripgrep (<path>) not found`. Only ripgrep's named path goes
+    through `which`; a named bwrap or socat is checked with `accessSync(X_OK)`, which is
+    why a bad minute refuses every srt sandbox in a run on that one line, about a file
+    sitting right there, executable. So a refusal is read against this process's own stat
+    before it is believed: a start that settled nothing is asked again (three times, 250ms
+    apart) and then forgotten rather than memoized into every later sandbox, and what it
+    reports contradicts srt's sentence instead of repeating it. Undo when srt stats an
+    absolute path — still `which` in 0.0.73 — or at least surfaces the spawn's errno.
   - **An unprivileged container needs `YESSION_SANDBOX_NESTED=weak`** (below), which is
     now on the default path rather than an opt-in one.
   - **An srt sandbox reads what its policy names and nothing else**
@@ -156,6 +168,26 @@ Items are roughly ordered by how much they matter.
     fallback is wrong, so the git sandbox proves `git --version` before any verb runs one
     and refuses with a sentence naming `YESSION_GIT_PATH` and `YESSION_SANDBOX_READ_PATHS`
     instead of passing the host binary's excuse through.
+    - **That probe then refused a git that worked, because it was the one git spawn built
+      without the hardened env.** `git --version` ran with an EMPTY env, which is an env no
+      verb ever runs with: git resolves its global config path before it does anything at
+      all, tolerates an `EACCES` there and treats every other errno as fatal, and Seatbelt
+      answers `EPERM`. So on a macOS host whose operator has a `~/.config/git/config` — a
+      home-manager install always does — the probe died `fatal: unable to access …
+      (Operation not permitted)`, exit 128, and every repo verb was refused for the
+      sandbox's whole lifetime in words blaming the binary and the read scope. Neither was
+      at fault, and taking the sentence's advice (`YESSION_SANDBOX_READ_PATHS=$HOME/.config
+      /git`) would have widened the scope to hand back part of the home Plan 24 exists to
+      deny. Every git spawned by the repo verbs is now built by one function that carries
+      the env, so a probe cannot again gate verbs it does not run as.
+    - **Linux cannot reproduce that class of fault, which is why it shipped.** srt denies a
+      read on Linux by mounting emptiness over the path, so a denied config reads as ENOENT
+      and git shrugs; Seatbelt denies it in place, and `EPERM` is fatal. Any suite that
+      plants an unreadable file and expects git to fail is therefore green on the platform
+      CI runs no matter which env the spawn carries. The regression test instead plants a
+      MALFORMED config somewhere the sandbox may read, which fails identically on both
+      platforms — it pins that no git spawned here reads the operator's global config, not
+      the errno that made the difference visible.
     - **`/proc` and `/sys` are outside the scope by construction.** srt's root-deny
       expansion skips both (it remounts `/proc` itself, and a tmpfs over `/sys` breaks
       tooling for a tree that is read-only anyway). Neither is a route back to the denied
@@ -467,6 +499,14 @@ Items are roughly ordered by how much they matter.
     production path no CI here exercises. Both of these go away the day srt can exempt a
     subtree rather than a spawn, or reads `allowGitConfig` per spawn — the clone takes the
     ordinary confined policy again and `FilesystemConfinement` loses its only caller.
+  - **A docker terminal does not open on the checkouts.** Under the host-family backends
+    the repos directory sits inside the workspace a terminal starts in
+    (`Sandboxes.SessionLayout`), so the agent's first `ls` shows what it cloned. The docker
+    backend cannot: its workspace is whatever the image's working directory is — this
+    session composes no `WorkingDirectory`, so nothing here knows the path — and the repos
+    dir arrives as a bind mount at `/repos` beside it. A verb still ANSWERS with the right
+    path (`reposVisibleAt`), so nothing is unreachable; it is one `cd` the other backends
+    no longer need.
   - **`.yession.yml` is still unconsumed**: the bootstrap files land in the checkout,
     and nothing reads them into the environment spec yet — that is the follow-up plan.
 - **The session's imperative API is split, and only half of it is built**
@@ -615,11 +655,19 @@ Items are roughly ordered by how much they matter.
   happened and the timeline says a terminal appeared, and nothing joins them. A
   `Terminal : TerminalId option` beside `Block` is the obvious symmetry and was deliberately
   not smuggled into the step that would have needed it.
-- **The jumpstarter console has an echo floor of one drain interval**
-  ([Plan 19](plans/19-provider-streams.md), step 5; `DRAIN_SECONDS` in
-  `examples/jumpstarter`). Its stream is a drain loop over a `pexpect` handle rather than
-  ownership of the fd, so a person typing sees their own echo up to ~200ms late. Inherent to
-  teeing a handle the SDK owns: the serial provider, which owns its fd, has no such floor.
+- **The jumpstarter console has an echo floor of one quiet period** (~50ms measured at 61-67ms
+  round trip; `QUIET_SECONDS` in `examples/jumpstarter`). Its stream is a drain loop over a
+  `pexpect` handle rather than ownership of the fd, so a person typing sees their own echo that
+  much late. The serial provider, which owns its fd, has no such floor.
+
+  This entry used to say the floor was one DRAIN interval (~200ms) and was inherent to teeing a
+  handle the SDK owns. Both halves were wrong, and the reason is worth keeping: the read under
+  the drain was `console.expect([pexpect.TIMEOUT])`, which always waits its timeout out and —
+  because pexpect consumes what it MATCHED and a timeout matches nothing — returned the whole
+  buffer every time without ever clearing it. So the floor was the timeout rather than the
+  device, and the stream re-sent the console's entire history five times a second. Now the
+  drain matches a real pattern, returns on the first byte, and waits only long enough not to
+  split a line. What is left is a coalescing window we chose, not a cost of teeing.
 - **An agent holds a lease where its own block has taken the screen, and nowhere else it
   could have run a block instead.** Closed in two steps, and what is left is a boundary
   rather than a shortfall. [Plan 19](plans/19-provider-streams.md) step 3 was the first: a

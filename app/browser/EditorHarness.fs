@@ -30,6 +30,9 @@ let private host : obj = jsNative
 [<Emit("document.getElementById('replay')")>]
 let private replayHost : Browser.Types.Element = jsNative
 
+[<Emit("document.getElementById('replay-gappy')")>]
+let private gappyReplayHost : Browser.Types.Element = jsNative
+
 [<Emit("(function(f){ window.__md = f; })($0)")>]
 let private exposeMd (f: unit -> string) : unit = jsNative
 
@@ -61,6 +64,9 @@ do
             (Some (fun () ->
                 sends <- sends + 1
                 exposeSends sends))
+            // The harness IS the composer, so it wears the composer's prompt: the browser
+            // tier can then read the placeholder where the editor really draws it.
+            Dom.Text.composerPlaceholder
     exposeMd (fun () -> Markdown.ofFragment fragment)
     exposePush (fun name ->
         match lastSelection with
@@ -77,19 +83,48 @@ do
     // is the one part of stage 3e no DOM-free test can reach: whether `asciinema-player`'s
     // named export actually resolves through the bundle and renders the recording.
     let cast =
-        TranscriptReplay.cast
+        TranscriptReplay.castWithMarkers
             { Width = 80; Height = 24; Timestamp = 0L }
             [ 0, { At = 0.0; Kind = TranscriptInput; Data = "ls -la\r\n" }
               1, { At = 0.1; Kind = TranscriptOutput; Data = "total 0\r\n" } ]
-    // Markers and a poster ride the same mount (Plan 14, stage 4): they are the player's own
-    // options, and whether they resolve through this bundle is the same question the import
-    // itself is. A `startAt` is deliberately absent here — it would skip past the very frame
-    // the replay assertion below waits for.
+            [ 0.0, "ls -la" ]
+    // The chapter rides IN the cast (Plan 25, stage 1) — `castWithMarkers` above — because
+    // that is how the client builds one, and whether chapters survive the bundle is the same
+    // question the import itself is. A `startAt` is deliberately absent here: it would skip
+    // past the very frame the replay assertion waits for.
     Replay.mount
         replayHost
         { Cast = cast
-          Markers = [ 0.0, "ls -la" ]
           StartAt = None
+          Poster = None
+          BehindLive = None }
+        None
+    |> ignore
+
+    // The same machinery over a recording with DEAD AIR in it, which is the shape the pane
+    // actually replays and the one the mount above cannot fail in: thirty seconds of nothing
+    // between the first command and the second, a chapter on the far side of the gap, and a
+    // start position naming it.
+    //
+    // Under the player's `markers` option all three disagree — the option list stays on the
+    // recording's raw clock while the events are idle-compressed as they load, so the chapter
+    // past the gap becomes the last event (and is dropped from the chapter list by its
+    // `time < duration` filter), the duration reads uncompressed, and `startAt` lands short.
+    // With the chapters written into the cast they are all one clock, and a reader reaches
+    // the second command in about as long as it takes to press play.
+    let gappy =
+        TranscriptReplay.castWithMarkers
+            { Width = 80; Height = 24; Timestamp = 0L }
+            [ 0, { At = 0.0; Kind = TranscriptInput; Data = "echo first\r\n" }
+              1, { At = 0.1; Kind = TranscriptOutput; Data = "first\r\n" }
+              2, { At = 30.0; Kind = TranscriptInput; Data = "echo second\r\n" }
+              3, { At = 30.1; Kind = TranscriptOutput; Data = "second\r\n" } ]
+            [ 0.0, "echo first"
+              30.0, "echo second" ]
+    Replay.mount
+        gappyReplayHost
+        { Cast = gappy
+          StartAt = Some 30.0
           Poster = None
           BehindLive = None }
         None
@@ -255,8 +290,8 @@ do
     // and proves less — it was the first thing this surface tried, and it converged happily.
     let mutable selectionA : (string * string) option = None
     let mutable selectionB : (string * string) option = None
-    Editor.mountEditor peerAHost fragmentA false (fun sel -> selectionA <- sel) None |> ignore
-    let mirror = Editor.mountEditor peerBHost fragmentB false (fun sel -> selectionB <- sel) None
+    Editor.mountEditor peerAHost fragmentA false (fun sel -> selectionA <- sel) None "" |> ignore
+    let mirror = Editor.mountEditor peerBHost fragmentB false (fun sel -> selectionB <- sel) None ""
 
     let mutable storming = false
     let mutable pushes = 0
@@ -425,11 +460,11 @@ let private shellModel : ClientModel =
     let wideBody =
         String.concat
             "\n"
-            [ "Cleared the broken checkout at /home/user/.yession/sessions/AAZFRYD11S65Q4P64KHATP8YYG/repos/NickDarvey/yession"
+            [ "Cleared the broken checkout at /home/user/.yession/sessions/AAZFRYD11S65Q4P64KHATP8YYG/workspace/repos/NickDarvey/yession"
               "and retried, see https://github.com/NickDarvey/yession/actions/runs/1234567890123/job/9876543210987."
               ""
               "```"
-              "git -C /home/user/.yession/sessions/AAZFRYD11S65Q4P64KHATP8YYG/repos clone --depth 1 --filter=blob:none https://github.com/NickDarvey/yession.git"
+              "git -C /home/user/.yession/sessions/AAZFRYD11S65Q4P64KHATP8YYG/workspace/repos clone --depth 1 --filter=blob:none https://github.com/NickDarvey/yession.git"
               "```" ]
     let offset (n: int64) : EventOffset = EventOffset.create n |> expect
     { ClientModel.init { PeerId = peerId; DisplayName = "swift-heron" } with
@@ -507,7 +542,21 @@ let private shellModel : ClientModel =
                           Background = true
                           FromSeq = 2
                           ToSeq = None
-                          Status = BlockRunning } ]
+                          Status = BlockRunning }
+                        // Enough history that the scrollback actually OVERFLOWS its box.
+                        // "Show in terminal" (Plan 25, stage 3) scrolls to a command, and a
+                        // history that fits on screen is one where every scroll is a no-op —
+                        // a surface on which that case could not fail.
+                        yield!
+                          [ for i in 1 .. 24 ->
+                              { BlockId = BlockId.create (sprintf "block-filler-%d" i) |> expect
+                                QueueId = None
+                                Authority = Authority.ofAuthor (PeerRef peerId)
+                                Command = sprintf "echo line %d" i
+                                Background = false
+                                FromSeq = 2
+                                ToSeq = Some 2
+                                Status = BlockFinished (CommandSucceeded 0) } ] ]
                     DroppedBytes = 0 }
                   { TerminalId = liveId
                     Title = "shell"
@@ -592,7 +641,8 @@ do
         { ViewActions.ssr with
             FocusPane = PaneShell.toPane
             FocusChat = PaneShell.toChatItem
-            FocusDvr = fun id -> PaneShell.toDvrControl (TerminalId.value id)
+            FocusWatch = PaneShell.toWatchToggle
+            RevealBlock = fun id blockId -> PaneShell.revealBlock (TerminalId.value id) (BlockId.value blockId)
             TypeIntoTerminal = recordTyped }
     // The app's own player sync, so a block tab in the harness really plays its recording —
     // which is the point of driving this in a browser rather than asserting a string. The
