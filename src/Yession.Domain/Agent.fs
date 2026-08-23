@@ -42,10 +42,13 @@ type AgentContextPack =
 
 type AgentResponseChunk = { Text : string }
 
-/// Token/cache usage the runner reports for one completed turn (Plan 04, Step 28).
-/// Telemetry only — never a durable session fact and never written to the event log.
-/// `None` on `AgentCompleted` when the runner reports no usage (scripted runners, or an
-/// SDK result with no usage block).
+/// Token/cache usage the runner reports for one turn (Plan 04, Step 28). Telemetry only —
+/// never a durable session fact and never written to the event log. `None` when the runner
+/// reports no usage (scripted runners, or an SDK result with no usage block).
+///
+/// Carried by BOTH endings, because a turn that stopped still spent what it spent — and the
+/// turn most worth costing is the long one that ran into something, not the short one that
+/// finished. A failure that reported nothing left that spend uncounted.
 type AgentUsage =
     { InputTokens         : int
       OutputTokens        : int
@@ -55,7 +58,7 @@ type AgentUsage =
 
 type AgentRunResult =
     | AgentCompleted of body: string * usage: AgentUsage option
-    | AgentFailed of reason: string
+    | AgentFailed of reason: string * usage: AgentUsage option
 
 type EnsureEnvironmentResult =
     | EnvironmentAvailable

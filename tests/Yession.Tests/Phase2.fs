@@ -508,7 +508,7 @@ let private lazyLifecycleTests =
                             | Ok _, Ok _ ->
                                 onChunk { Text = "environment is up" }
                                 return AgentCompleted ("environment is up", None)
-                            | other -> return AgentFailed (sprintf "%A" other)
+                            | other -> return AgentFailed (sprintf "%A" other, None)
                         }
                 let m = Manager.create (Some taskAgent) (Some (fun _ -> scriptedSandbox recorder echoSandboxScript)) (lazyEnvironmentPort + 1)
                 let! _ =
@@ -766,7 +766,7 @@ let private commandTests =
                             | Ok outcome when outcome.Status = TerminalCommandRan (CommandSucceeded 0) ->
                                 onChunk { Text = "ran it" }
                                 return AgentCompleted ("ran it", None)
-                            | other -> return AgentFailed (sprintf "%A" other)
+                            | other -> return AgentFailed (sprintf "%A" other, None)
                         }
                 let m = Manager.create (Some devAgent) (Some hostSandboxFor) commandPort
                 let! _ =
