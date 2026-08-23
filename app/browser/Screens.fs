@@ -5,9 +5,16 @@ module Yession.Browser.Screens
 // A terminal in live mode is running a program that moves the cursor, so what it DISPLAYS is
 // a projection of what it emitted — not the stream itself. The client therefore needs an
 // emulator, and it uses the SAME one the Session Process does (`@xterm/headless`, driven
-// through `Emulator.fs`'s contract): fed the same bytes in the same order, the two screens
-// cannot disagree, which is the property `TerminalSnapshot` already rests on and which a
-// second, browser-only renderer would quietly break.
+// through `Emulator.fs`'s contract): fed the same bytes in the same order AT THE SAME SIZE,
+// the two screens cannot disagree, which is the property `TerminalSnapshot` rests on and
+// which a second, browser-only renderer would quietly break.
+//
+// The size is half of that sentence and used to be missing from it. This opened every
+// emulator at 80x24 and never resized one, while the Process resized both its pty and its own
+// emulator on every viewport report — so a wide pane rewrapped every line at 80 columns and a
+// program drawing 40 rows spilled its frame into scrollback, under a comment promising the
+// two could not disagree. The snapshot now carries the geometry it was painted at, and a
+// resize record reshapes the emulator exactly as it reshaped the pty.
 //
 // The emulator is a live object, so it lives here rather than in the model. What reaches the
 // model is its SERIALIZATION — the same form a snapshot travels in — which the view renders
@@ -38,8 +45,9 @@ type private Live =
       mutable Rendered : string }
 
 type Screens =
-    { /// The Process's screen for a terminal, with the transcript position it represents.
-      Snapshot : TerminalId -> int -> string -> unit
+    { /// The Process's screen for a terminal: the transcript position it represents, and the
+      /// size it was painted at.
+      Snapshot : TerminalId -> TranscriptKeyframe -> unit
       /// Fold everything the model has that this client's screens have not seen, and
       /// dispatch any that changed. Safe to call after every render: a screen that did not
       /// move dispatches nothing.
@@ -78,16 +86,18 @@ let create (dispatch: ClientMsg -> unit) : Screens =
             })
 
     { Snapshot =
-        fun id seq screen ->
+        fun id keyframe ->
             let key = TerminalId.value id
             // A snapshot is the whole screen, so the emulator starts again from it rather
             // than having it appended: re-seeding an emulator that already holds a screen
             // would draw the old one under the new.
             forget key
-            let size = TerminalSize.default'
-            let emulator = Emulator.openEmulator size.Cols size.Rows
-            emulator.Write screen
-            let entry = { Emulator = emulator; Through = seq; Rendered = "" }
+            // Opened at the size the screen was PAINTED at, never at the default: a paint is
+            // a grid, and repainting it into a narrower one wraps every line that was long
+            // enough to matter.
+            let emulator = Emulator.openEmulator keyframe.Cols keyframe.Rows
+            emulator.Write keyframe.Screen
+            let entry = { Emulator = emulator; Through = keyframe.Seq; Rendered = "" }
             live.[key] <- entry
             publish id entry
       Sync =
@@ -120,14 +130,28 @@ let create (dispatch: ClientMsg -> unit) : Screens =
                 | false, _ -> ()
                 | true, entry ->
                     let feed = ClientModel.terminalFeed terminal.TerminalId model
+                    // Resize records are folded alongside the output, in ONE ordered pass:
+                    // what a program drew before a resize was drawn at the old geometry and
+                    // what it drew after at the new, so applying them out of order — or not
+                    // at all — reflows the wrong half of the screen.
                     let fresh =
                         feed.Records
                         |> Map.toList
                         |> List.filter (fun (seq, record) ->
                             seq >= entry.Through
-                            && (record.Kind = TranscriptOutput || record.Kind = TranscriptStderr))
+                            && (record.Kind = TranscriptOutput
+                                || record.Kind = TranscriptStderr
+                                || record.Kind = TranscriptResize))
                     if not (List.isEmpty fresh) then
-                        for _, record in fresh do entry.Emulator.Write record.Data
+                        for _, record in fresh do
+                            match record.Kind with
+                            | TranscriptResize ->
+                                // A record nobody here wrote, so a payload this cannot read is
+                                // one to skip rather than to fail on.
+                                match TerminalSize.parse record.Data with
+                                | Some size -> entry.Emulator.Resize size.Cols size.Rows
+                                | None -> ()
+                            | _ -> entry.Emulator.Write record.Data
                         entry.Through <- (fresh |> List.map fst |> List.max) + 1
                         publish terminal.TerminalId entry
             // A terminal that closed keeps neither a screen nor an emulator.

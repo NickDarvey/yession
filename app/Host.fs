@@ -290,12 +290,21 @@ let startFull
         // only into an emulator a snapshot created — so without this every record of a
         // terminal opened mid-session is dropped on arrival.
         //
-        // Seq 0 and an empty screen, because that is the whole truth at open: there is
-        // nothing yet to catch up on, and a client cannot invent the origin for itself.
+        // Seq 0, an empty screen, and the size every terminal opens at, because that is the
+        // whole truth at open: there is nothing yet to catch up on, nothing has resized it,
+        // and a client cannot invent the origin for itself.
         let broadcastTerminalOpened (terminal: TerminalId) =
             connections
             |> Map.iter (fun _ channel ->
-                Async.StartImmediate (channel.Send (Terminal (TerminalSnapshot (terminal, 0, "")))))
+                Async.StartImmediate (
+                    channel.Send (
+                        Terminal (
+                            TerminalSnapshot (
+                                terminal,
+                                { Seq = 0
+                                  Cols = TerminalSize.default'.Cols
+                                  Rows = TerminalSize.default'.Rows
+                                  Screen = "" })))))
 
         let terminals =
             SessionTerminals.create
@@ -751,8 +760,8 @@ let startFull
                             // in it.
                             for (terminal, length) in terminals.Lengths () do
                                 match! terminals.Snapshot terminal with
-                                | Some (seq, screen) ->
-                                    do! ch.Send (Terminal (TerminalSnapshot (terminal, seq, screen)))
+                                | Some keyframe ->
+                                    do! ch.Send (Terminal (TerminalSnapshot (terminal, keyframe)))
                                 | None -> ()
                                 do! ch.Send (Terminal (TerminalTranscriptAvailable (terminal, length)))
                             return

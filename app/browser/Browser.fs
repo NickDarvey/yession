@@ -1735,7 +1735,7 @@ let private start () =
                     // A terminal's screen seeds this client's emulator. The transcript stays
                     // the record; this is the view, and a peer that arrives mid-session gets
                     // one frame instead of every byte the terminal ever printed.
-                    OnTerminalSnapshot = fun id seq screen -> screens.Snapshot id seq screen
+                    OnTerminalSnapshot = fun id keyframe -> screens.Snapshot id keyframe
                     // The model is the read position (see `ConnectOptions.ReadPosition`):
                     // `latestModel` is kept current by `setState`, so a fold rolled back by
                     // a racing doc update is visibly behind and gets re-read.

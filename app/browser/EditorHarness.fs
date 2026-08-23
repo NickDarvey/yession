@@ -632,8 +632,8 @@ let private recordTyped (_terminal: TerminalId) (data: string) : unit = jsNative
 /// in a real browser: without it this bundle contains no xterm at all, and the browser tier
 /// silently proved nothing about the client's live screen — which is how a browser-only
 /// module-resolution failure got past it and into a release job.
-[<Emit("(function(f){ window.__snapshot = f })($0)")>]
-let private exposeSnapshot (f: string -> int -> string -> unit) : unit = jsNative
+[<Emit("(function(f){ window.__snapshot = (id, seq, screen, cols, rows) => f(id, seq, screen, cols ?? 80, rows ?? 24) })($0)")>]
+let private exposeSnapshot (f: string -> int -> string -> int -> int -> unit) : unit = jsNative
 
 /// Hand a terminal's lease to this peer WITHOUT a press, as the alt-screen flip does: a block
 /// takes the screen and the Session Process gives its author the keyboard. Exposed for the
@@ -686,9 +686,9 @@ do
                     { TerminalId = id; By = ActorRef.PeerRef model.Peer.PeerId; FromSeq = 0 }
             model <- { model with Terminals = TerminalProjection.applyEvent model.Terminals taken }
             render ()
-    exposeSnapshot (fun id seq screen ->
+    exposeSnapshot (fun id seq screen cols rows ->
         match TerminalId.create id with
-        | Ok terminal -> screens.Snapshot terminal seq screen
+        | Ok terminal -> screens.Snapshot terminal { Seq = seq; Cols = cols; Rows = rows; Screen = screen }
         | Error _ -> ())
     exposeTake (fun id ->
         match TerminalId.create id with

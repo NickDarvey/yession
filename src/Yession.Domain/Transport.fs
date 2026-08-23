@@ -113,7 +113,15 @@ type TerminalFrame =
     /// its seq (the screen is read after the position is taken), which is the safe
     /// direction — a client re-folds a record already drawn, and drawing it twice is
     /// idempotent, whereas a seq ahead of the screen would skip a record for ever.
-    | TerminalSnapshot of TerminalId * seq: int * screen: string
+    ///
+    /// A `TranscriptKeyframe` rather than a seq and a screen, because that IS the pair plus
+    /// the one thing it was missing: the SIZE the screen was drawn at. A serialized screen is
+    /// a paint at a geometry, and a client that repaints it at a different one rewraps every
+    /// line in it — which the ranged replay has always known (`Serialization.range` takes the
+    /// keyframe's `Cols`/`Rows` over the header's) and this frame did not, so a browser
+    /// composing a live screen sized it 80x24 and left it there for the terminal's whole life.
+    /// One type, produced by one serializer, carrying what a screen cannot be read without.
+    | TerminalSnapshot of TerminalId * TranscriptKeyframe
     /// Keystrokes from the lease holder, relayed straight to the pty (Plan 13, stage 2e).
     ///
     /// Lease-checked at the Session Process, which is the only place it CAN be checked: a

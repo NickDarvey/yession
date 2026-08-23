@@ -26,7 +26,7 @@ module Connection =
         (onState: 'State -> unit)
         (onResponse: RequestId -> SessionCommandResult -> unit)
         (onEventsPage: RequestId -> EventPage<SessionEvent> -> unit)
-        (onSnapshot: TerminalId -> int -> string -> unit)
+        (onSnapshot: TerminalId -> TranscriptKeyframe -> unit)
         (channel: FrameChannel<'State>)
         : Async<unit> =
         async {
@@ -67,11 +67,12 @@ module Connection =
                     | Some (Terminal (TerminalTranscriptAvailable (terminal, nextSeq))) ->
                         dispatch (TerminalAvailableMsg (terminal, nextSeq))
                         return! pump ()
-                    | Some (Terminal (TerminalSnapshot (terminal, seq, screen))) ->
-                        // The screen as the Process has it, and the transcript position it
-                        // represents. Composable with the live feed exactly as an event
-                        // offset is: seed from this, then fold records ABOVE that seq.
-                        onSnapshot terminal seq screen
+                    | Some (Terminal (TerminalSnapshot (terminal, keyframe))) ->
+                        // The screen as the Process has it, the transcript position it
+                        // represents, and the geometry it was painted at. Composable with
+                        // the live feed exactly as an event offset is: seed from this, then
+                        // fold records ABOVE that seq.
+                        onSnapshot terminal keyframe
                         return! pump ()
                     | Some _ ->
                         // Anything else (e.g. inbound command requests) is not part of

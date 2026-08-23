@@ -424,7 +424,7 @@ module App =
           /// 14, stage 6). The browser seeds its emulator; a client with none — a headless
           /// peer, a test — ignores it and loses nothing, because the transcript is the
           /// record and this is only the view.
-          OnTerminalSnapshot : TerminalId -> int -> string -> unit
+          OnTerminalSnapshot : TerminalId -> TranscriptKeyframe -> unit
           /// How far the MODEL has consumed the log. When given, this — not the read
           /// loop's own bookkeeping — is what "how far have we got" means.
           ///
@@ -451,7 +451,7 @@ module App =
               PageSize = 100
               FetchEvents = None
               FetchTranscripts = None
-              OnTerminalSnapshot = fun _ _ _ -> ()
+              OnTerminalSnapshot = fun _ _ -> ()
               ReadPosition = None
               TranscriptReadPosition = None }
 

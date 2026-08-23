@@ -751,7 +751,12 @@ module SessionTerminals =
           /// The seq is what makes the snapshot composable with the live feed: a client
           /// renders this, then folds records ABOVE that seq, exactly as it does with an
           /// event-offset catch-up.
-          Snapshot : TerminalId -> Async<(int * string) option>
+          ///
+          /// A `TranscriptKeyframe` because a serialized screen is a paint at a GEOMETRY, and
+          /// the pair without it cannot be repainted — the client rewraps every line. The
+          /// ranged replay has carried the same three fields from the same serializer since
+          /// keyframes existed; this is that type, not a second one shaped like it.
+          Snapshot : TerminalId -> Async<TranscriptKeyframe option>
           ReconcileAtBoot : unit -> Async<unit> }
 
     /// A session with no terminals: every operation refuses, nothing is ever open.
@@ -1876,7 +1881,7 @@ module SessionTerminals =
                         // A resize IS output-side history, not a keystroke: asciicast records
                         // it (`[t, "r", "COLSxROWS"]`) because a replay that does not know the
                         // screen changed shape redraws everything after it wrongly.
-                        emit id terminal TranscriptResize (sprintf "%dx%d" cols rows)
+                        emit id terminal TranscriptResize (TerminalSize.format { Cols = cols; Rows = rows })
                     | _ -> ()
                     appliedSize.[key] <- { Cols = cols; Rows = rows }
                     true
@@ -1896,7 +1901,7 @@ module SessionTerminals =
                 | true, terminal ->
                     terminal.Shell |> Option.iter (fun pty -> pty.Resize size.Cols size.Rows)
                     terminal.Emulator.Resize size.Cols size.Rows
-                    emit id terminal TranscriptResize (sprintf "%dx%d" size.Cols size.Rows)
+                    emit id terminal TranscriptResize (TerminalSize.format size)
                     appliedSize.[key] <- size
                 | _ -> ()
 
@@ -2178,8 +2183,12 @@ module SessionTerminals =
                     // is idempotent. The other order would report a seq for a record the
                     // screen has not drawn, and the client would skip it for ever.
                     let seq = terminal.Transcript.NextSeq ()
+                    let size =
+                        match appliedSize.TryGetValue (TerminalId.value id) with
+                        | true, applied -> applied
+                        | _ -> TerminalSize.default'
                     let! screen = terminal.Emulator.Serialize ()
-                    return Some (seq, screen)
+                    return Some { Seq = seq; Cols = size.Cols; Rows = size.Rows; Screen = screen }
                 }
           ReconcileAtBoot = reconcileAtBoot }
 
