@@ -76,11 +76,6 @@ let private setTimeout (ms: int) (callback: unit -> unit) : obj = jsNative
 [<Emit("clearTimeout($0)")>]
 let private clearTimeout (handle: obj) : unit = jsNative
 
-/// How a launch attempt ended.
-type LaunchResult =
-    | LaunchReady of port: int
-    | LaunchFailed of reason: string
-
 /// A running (or exited) child session process.
 type RunningChild =
     { Pid : int
@@ -92,6 +87,20 @@ type RunningChild =
       /// Has the child exited?
       HasExited : unit -> bool }
 
+/// What a launch produced: the handle, the port it serves on, and the BUILD it reported.
+///
+/// The build was already on the readiness line and already read — to refuse a major skew —
+/// and then dropped on the floor. Which meant the one process that knows what every live
+/// session is running answered no question about it, and a session that outlived a
+/// promotion kept executing an old image with nothing anywhere saying so.
+///
+/// `None` for a bundle older than the field, which must still launch: what the Manager does
+/// not know it says nothing about, rather than inventing a version-shaped placeholder.
+type LaunchedSession =
+    { Child : RunningChild
+      Port : int
+      Build : string option }
+
 /// Spawn `command args` with `env` merged over the parent environment, and resolve
 /// once the child prints its readiness line (or fails: early exit / timeout). The
 /// returned handle observes the child for the rest of its life.
@@ -100,7 +109,7 @@ let launch
     (args: string list)
     (env: (string * string) list)
     (timeoutMs: int)
-    : Async<Result<RunningChild * int, string>> =
+    : Async<Result<LaunchedSession, string>> =
     Async.FromContinuations (fun (cont, _, _) ->
         let child = spawnWithEnv spawnRaw command (Array.ofList args) (Array.ofList env)
 
@@ -127,7 +136,7 @@ let launch
               HasExited = fun () -> Option.isSome exited }
 
         let mutable settled = false
-        let settle (result: Result<RunningChild * int, string>) =
+        let settle (result: Result<LaunchedSession, string>) =
             if not settled then
                 settled <- true
                 cont result
@@ -153,13 +162,14 @@ let launch
                     // The version arrives on the readiness line, so this is the first
                     // moment the pairing can be checked — and the last moment before the
                     // Manager starts treating the child as a working session.
-                    match majorSkew (parseReadyVersion line) with
+                    let build = parseReadyVersion line
+                    match majorSkew build with
                     | Some reason ->
                         // Settle first: killing the child fires its exit handler, which
                         // would otherwise settle this launch with "exited before ready" and
                         // bury the actual reason.
                         settle (Error reason)
                         running.Kill ()
-                    | None -> settle (Ok (running, port))
+                    | None -> settle (Ok { Child = running; Port = port; Build = build })
                 | None ->
                     if line.Trim().Length > 0 then printfn "[session %d] %s" child.pid line))
