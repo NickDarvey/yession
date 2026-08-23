@@ -642,6 +642,12 @@ let private exposeSnapshot (f: string -> int -> string -> int -> int -> unit) : 
 [<Emit("(function(f){ window.__record = f })($0)")>]
 let private exposeRecord (f: string -> int -> string -> string -> unit) : unit = jsNative
 
+/// The size this client last told the Session Process its screen is. Read back by the E2E,
+/// because the question there is whether a box that changed without the model changing — a
+/// splitter dragged, a window resized — reached the pty at all.
+[<Emit("(function(c, r){ window.__resized = c + 'x' + r })($1, $2)")>]
+let private recordResized (_terminal: TerminalId) (cols: int) (rows: int) : unit = jsNative
+
 /// Hand a terminal's lease to this peer WITHOUT a press, as the alt-screen flip does: a block
 /// takes the screen and the Session Process gives its author the keyboard. Exposed for the
 /// same reason the snapshot is — it is the arrival of a fact from elsewhere, and a test that
@@ -675,7 +681,7 @@ do
     let replays = PaneReplays.create (fun msg -> dispatchRef msg)
     // …and the app's own screen composition, for the same reason: the emulator, the
     // serialization and the fold are the client's, and only a browser runs them.
-    let screens = Screens.create (fun msg -> dispatchRef msg)
+    let screens = Screens.create (fun msg -> dispatchRef msg) recordResized
     let mutable model = shellModel
     let rec dispatch (msg: ClientMsg) : unit =
         model <- ClientModel.update msg model

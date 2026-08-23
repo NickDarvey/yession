@@ -1171,29 +1171,12 @@ let private start () =
         let replays = PaneReplays.create (fun msg -> dispatchRef msg)
 
         /// The live screens (Plan 14, stage 6): one emulator per terminal this client has a
-        /// snapshot for, folded forward from the records the model already holds.
-        let screens = Screens.create (fun msg -> dispatchRef msg)
-
-        /// The size each terminal's viewport was last reported at, so a re-render does not
-        /// re-send a size nothing changed — a resize is a signal to the program on the other
-        /// end, and repeating it makes a full-screen program redraw for no reason.
-        let reportedSize = System.Collections.Generic.Dictionary<string, int * int> ()
-
-        /// Tell the Session Process how big the holder's screen is. Only the HOLDER: the pty
-        /// has one size and every peer is looking at the same screen, so a viewer with a
-        /// narrower pane must scroll rather than reshape everyone else's terminal.
-        let syncScreenSize (model: ClientModel) =
-            let mine = ActorRef.PeerRef model.Peer.PeerId
-            for terminal in TerminalProjection.openTerminals model.Terminals do
-                if terminal.Lease = Some mine then
-                    let key = TerminalId.value terminal.TerminalId
-                    match Screens.measure key with
-                    | None -> ()
-                    | Some (cols, rows) ->
-                        let last = match reportedSize.TryGetValue key with | true, v -> Some v | _ -> None
-                        if last <> Some (cols, rows) then
-                            reportedSize.[key] <- (cols, rows)
-                            connectionRef |> Option.iter (fun c -> c.ResizeTerminal terminal.TerminalId cols rows)
+        /// snapshot for, folded forward from the records the model already holds — and the
+        /// size of the one this peer is typing into, relayed to the pty.
+        let screens =
+            Screens.create
+                (fun msg -> dispatchRef msg)
+                (fun id cols rows -> connectionRef |> Option.iter (fun c -> c.ResizeTerminal id cols rows))
 
         // The publication rule, one subscription per open terminal. Started when a terminal
         // appears and stopped when it goes, so a closed terminal's rule cannot republish a
@@ -1611,11 +1594,10 @@ let private start () =
             syncTerminalInputs ()
             syncKeyframes model
             replays.Sync model
-            // The live screens, and the size the holder's viewport actually is. Both AFTER
-            // the render: one folds records into an emulator whose serialization the next
-            // render draws, the other measures a box that has to exist first.
+            // The live screens, and the size the holder's viewport actually is. AFTER the
+            // render: the fold feeds an emulator whose serialization the next render draws,
+            // and the measurement needs a box that exists.
             screens.Sync model
-            syncScreenSize model
             // The terminals column's open state is a class on the shell root, like the
             // sidebar's — presentation, so a re-render never fights it — but driven FROM the
             // model, because unlike the sidebar this column's visibility is something the app
