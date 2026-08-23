@@ -23,26 +23,26 @@ let private expect =
     | Ok v -> v
     | Error e -> failwith e
 
-let private sessionId = SessionId.create (Interop.envOr "YESSION_SESSION" "local-session") |> expect
-let private port = Interop.envOr "YESSION_PORT" "0" |> int
-// ABSOLUTE, whatever it was given. The default below is relative, and so is what the test
-// harness passes; every path this session stores, binds into a sandbox, or reports to a
+/// What the Manager minted for this launch, decoded ONCE. Blank means nobody launched us —
+/// `Launch.unlaunched`, a bare `yession-session` — and a malformed envelope fails the boot
+/// rather than booting under a fabricated identity.
+let private launch = Launch.parse (Interop.envOr Launch.Variable "") |> expect
+
+let private sessionId = launch.Session
+let private port = launch.Port
+// ABSOLUTE, whatever it was given. `Launch.unlaunched`'s is relative, and so is what the
+// test harness passes; every path this session stores, binds into a sandbox, or reports to a
 // person is derived from it. A relative one still WORKS for anything resolved once — which
 // is why it survived this long — and silently breaks whatever resolves it twice. `Repos`
 // guards its own boundary too (see `Repos.create`): that is the same rule at the place a
 // relative path becomes a wrong answer rather than the place it is born.
-let private dataDir =
-    Fs.absolute (Interop.envOr "YESSION_SESSION_DATA" (sprintf ".yession/sessions/%s" (SessionId.value sessionId)))
+let private dataDir = Fs.absolute launch.DataDir
 
 // The control channel to the Manager (Step 24): supervision reports, secrets custody,
 // AND this launch's OAuth client registration all authenticate with the same
 // per-launch secret. Absent (a bare `yession-session` run), the session runs
 // unsupervised and its HTTP surface is ungated.
-let private controlChannel =
-    match Interop.envOr "YESSION_CONTROL_URL" "", Interop.envOr "YESSION_CONTROL_SECRET" "" with
-    | "", _
-    | _, "" -> None
-    | url, secret -> Some (url, secret)
+let private controlChannel = launch.Control |> Option.map (fun c -> c.Url, c.Secret)
 
 // The session-owned WorkSandbox (the sandbox seam): the backend comes from
 // `YESSION_WORK_SANDBOX`, parsed fail-closed at boot — a typo refuses the start rather
@@ -215,7 +215,7 @@ let private sessionMount = PublicAccess.sessionMount sessionId publicAccess
 /// Manager's public origin, baked into the shell.
 ///
 /// Known synchronously, at boot, on EVERY deployment — including loopback, where
-/// `PublicAccess` alone has no answer. `YESSION_CONTROL_URL` is the Manager's own endpoint
+/// `PublicAccess` alone has no answer. The launch's control url is the Manager's own endpoint
 /// URL, and that endpoint is the same HTTP server as the management UI, so it is precisely
 /// the origin that serves `/sessions/{id}/open`. Same precedence as the Manager's OIDC
 /// issuer, and by construction the same value.
@@ -242,19 +242,15 @@ let private telemetry = Telemetry.fromEnv sessionId
 // stream so an out-of-band change can reach this session. Absent a control channel, the
 // session simply runs without it (nothing pushes notifications in-process).
 let private subscribeNotifications =
-    match Interop.envOr "YESSION_CONTROL_URL" "", Interop.envOr "YESSION_CONTROL_SECRET" "" with
-    | "", _
-    | _, "" -> None
-    | url, secret -> Some (fun handler -> ControlClient.subscribeNotifications url secret handler)
+    launch.Control
+    |> Option.map (fun c -> fun handler -> ControlClient.subscribeNotifications c.Url c.Secret handler)
 
 // This session's MCP server set over the same control channel (Plan 17): the resolved set
 // on subscribe, then a fresh whole set on every change. Absent a control channel there is
 // nobody to declare a server, so the session runs with none — which is an ordinary session.
 let private subscribeMcp =
-    match Interop.envOr "YESSION_CONTROL_URL" "", Interop.envOr "YESSION_CONTROL_SECRET" "" with
-    | "", _
-    | _, "" -> None
-    | url, secret -> Some (fun handler -> ControlClient.subscribeMcp url secret handler)
+    launch.Control
+    |> Option.map (fun c -> fun handler -> ControlClient.subscribeMcp c.Url c.Secret handler)
 
 /// A built-in diagnostic runner (`YESSION_AGENT=diagnostic`): exercises the session's
 /// command capability end to end — open a terminal, queue, drain, run, read the output back —
@@ -578,7 +574,7 @@ let private runAgent () : RunAgent option =
     | "credential-probe" ->
         if envCreds || connectedSomewhere () then Some (dispatching credentialProbe) else None
     | _ ->
-        if envCreds || connectedSomewhere () then Some (dispatching Agent.runWith) else None
+        if envCreds || connectedSomewhere () then Some (dispatching (Agent.runWith dataDir)) else None
 
 [<Fable.Core.Emit("(function (handler) { return (process.stdin.on('close', handler), process.stdin.on('end', handler), process.stdin.resume()) })($0)")>]
 let private onStdinClosed (handler: unit -> unit) : unit = Fable.Core.Util.jsNative
@@ -787,7 +783,7 @@ Async.StartImmediate (
         | _ -> ()
         // Sessions never outlive their Manager: spawned under the guard, the Manager's
         // death closes our stdin (the kernel does this even on SIGKILL) and we exit.
-        if Interop.envOr "YESSION_PARENT_GUARD" "" = "1" then
+        if launch.ParentGuard then
             // Flush buffered telemetry before exiting (the Manager's death closes stdin).
             onStdinClosed (fun () ->
                 Async.StartImmediate (

@@ -163,11 +163,6 @@ let private runQuery
 /// points the SDK at a system Claude Code install instead. Empty = SDK default.
 let private claudePath () = Interop.envOr "YESSION_CLAUDE_PATH" ""
 
-/// The CLI's per-session scratch HOME: it writes `~/.claude` session state, which now
-/// lives (and dies) with the session's data directory instead of the real HOME.
-let private agentHome () =
-    sprintf "%s/agent-home" (Interop.envOr "YESSION_SESSION_DATA" ".yession")
-
 /// Where the CLI process runs (`YESSION_AGENT_SANDBOX`): host or srt, never docker.
 /// SessionMain parses this at boot and fails the session on anything else, so by the
 /// time a turn runs the value is known good — this reads it back, it does not re-decide.
@@ -296,7 +291,8 @@ let registryFor (capabilities: AgentCapabilities) : ToolRegistry =
             own
     merged |> ToolUseLog.wrap capabilities.RecordToolUse
 
-/// The Claude Agent SDK–backed `RunAgent`, parameterized by the turn's credential:
+/// The Claude Agent SDK–backed `RunAgent`, over this session's data directory (the CLI's
+/// scratch HOME hangs off it) and parameterized by the turn's credential:
 /// `None` = the ambient credential variables pass through (the documented last resort
 /// — how CI's LiveAgent tier feeds the agent); `Some (envVar, value)` = the spawned
 /// CLI runs with exactly that credential, both ambient credential variables displaced.
@@ -308,10 +304,10 @@ let registryFor (capabilities: AgentCapabilities) : ToolRegistry =
 /// interrupt cancels the live query promptly (the returned failure is then discarded
 /// by the orchestrator); the spawner's own kill fires only on the SDK's forwarded
 /// signal, after the graceful stdin-EOF window.
-let runWith (credential: (string * string) option) : RunAgent =
+let runWith (dataDir: string) (credential: (string * string) option) : RunAgent =
     fun context capabilities signal onChunk ->
         async {
-            let home = agentHome ()
+            let home = Sandboxes.SessionLayout.agentHome dataDir
             Fs.ensureDir home
             let ambient = Sandboxes.ambientEnv ()
             let env = Sandboxes.AgentSandbox.envFor ambient home credential
@@ -344,5 +340,7 @@ let runWith (credential: (string * string) option) : RunAgent =
             return if outcome.ok then AgentCompleted (outcome.body, Some usage) else AgentFailed outcome.reason
         }
 
-/// The ambient-credential runner (existing call sites and the env fallback).
-let run : RunAgent = runWith None
+/// The ambient-credential runner over a given data directory (existing call sites and the
+/// env fallback). The data dir is where the CLI's scratch HOME goes, so a caller that has no
+/// launch of its own passes `Launch.unlaunched.DataDir` and says so by doing it.
+let run (dataDir: string) : RunAgent = runWith dataDir None

@@ -554,9 +554,59 @@ let private modelTests =
             }
     ]
 
+/// The spawn contract (Plan 27): one envelope, minted by the Manager, decoded once by the
+/// session. Each case pins one promise of that contract.
+let private launchTests =
+    testList "Launch envelope (Plan 27)" [
+        testCase "a launch round-trips through the variable" <| fun () ->
+            let launch =
+                { Session = SessionId.create "sess-1" |> expect
+                  DataDir = "/data/sess-1"
+                  Port = 0
+                  Control = Some { Url = "http://127.0.0.1:8321"; Secret = "s3cret" }
+                  ParentGuard = true }
+            Expect.equal (Launch.parse (Launch.encode launch)) (Ok launch) "what the Manager mints is what the session reads"
+
+        testCase "a launch with no Manager round-trips too" <| fun () ->
+            // The unsupervised shape has to survive the wire, not just the default: a
+            // session spawned without a control leg is an ordinary session.
+            let launch = { Launch.unlaunched with Session = SessionId.create "sess-2" |> expect }
+            Expect.equal (Launch.parse (Launch.encode launch)) (Ok launch) "an absent control leg decodes as None"
+
+        testCase "an absent variable is the unlaunched session, not an error" <| fun () ->
+            // `yession-session` run by hand still runs.
+            Expect.equal (Launch.parse "") (Ok Launch.unlaunched) "blank means nobody launched us"
+
+        testCase "an unlaunched session has no Manager to report to" <| fun () ->
+            Expect.equal Launch.unlaunched.Control None "there is nothing to authenticate against"
+
+        testCase "an unlaunched session does not die with a parent it never had" <| fun () ->
+            Expect.isFalse Launch.unlaunched.ParentGuard "nothing closes its stdin"
+
+        testCase "a malformed envelope fails the boot" <| fun () ->
+            // The defect this whole shape exists to stop: the old code fabricated a session
+            // id when the variable was missing a field, so a launch that forgot to say who
+            // it was booted anyway, as somebody else.
+            Expect.isError (Launch.parse "{\"dataDir\":\"/d\",\"port\":0}") "a launch with no session id is a contract disagreement"
+
+        testCase "an envelope naming an unusable session id fails the boot" <| fun () ->
+            // The id names a container and a volume verbatim, so the decoder holds
+            // `SessionId`'s rule rather than deferring it to a later, less legible failure.
+            Expect.isError
+                (Launch.parse "{\"session\":\"bad id\",\"dataDir\":\"/d\",\"port\":0}")
+                "a non-Docker-safe id is refused where it arrives"
+
+        testCase "the launch variable is not something a repo may author" <| fun () ->
+            // It carries the control secret. `Sandboxes.hostBaseline` is an allowlist, so a
+            // sandboxed command never sees it (Phase2); this pins the other half — the name
+            // is under the reserved prefix `yession.yaml` refuses.
+            Expect.isTrue (Launch.Variable.StartsWith "YESSION_") "it lives under the reserved prefix"
+    ]
+
 let tests =
     testList "Domain" [
         identityTests
+        launchTests
         modelTests
         authorityTests
         envelopeSerializationTests

@@ -100,6 +100,11 @@ module SessionLayout =
     let reposDir (dataDir: string) : string =
         sprintf "%s/repos" (workspaceFor dataDir SandboxName.defaultName)
 
+    /// The agent CLI's per-session scratch HOME. The CLI writes `~/.claude` state, which
+    /// lives — and dies — with the session's data directory rather than the real HOME.
+    /// Here with the other paths derived from a data dir, so the layout has one owner.
+    let agentHome (dataDir: string) : string = sprintf "%s/agent-home" dataDir
+
     /// Where a session that predates the layout above left its checkouts: beside the
     /// workspace instead of inside it.
     let legacyReposDir (dataDir: string) : string = sprintf "%s/repos" dataDir

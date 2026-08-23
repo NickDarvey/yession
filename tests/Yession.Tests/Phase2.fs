@@ -178,13 +178,13 @@ let private sandboxPolicyTests =
                       "HOME", "/home/u"
                       "ANTHROPIC_API_KEY", "super-secret"
                       "CLAUDE_CODE_OAUTH_TOKEN", "also-secret"
-                      "YESSION_CONTROL_SECRET", "launch-secret" ]
+                      "YESSION_LAUNCH", "{\"session\":\"s\",\"dataDir\":\"/d\",\"port\":0,\"parentGuard\":true,\"control\":{\"url\":\"http://m\",\"secret\":\"launch-secret\"}}" ]
             let baseline = Sandboxes.hostBaseline ambient
             Expect.equal (Map.tryFind "PATH" baseline) (Some "/usr/bin") "PATH survives"
             Expect.equal (Map.tryFind "HOME" baseline) (Some "/home/u") "HOME survives"
             Expect.equal (Map.tryFind "ANTHROPIC_API_KEY" baseline) None "credentials do not"
             Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" baseline) None "no credential survives"
-            Expect.equal (Map.tryFind "YESSION_CONTROL_SECRET" baseline) None "the launch secret does not"
+            Expect.equal (Map.tryFind "YESSION_LAUNCH" baseline) None "the launch envelope, which carries the control secret, does not"
 
         testCase "the agent CLI's env: one credential, scratch HOME, never the raw process env" <| fun () ->
             let ambient =
@@ -194,14 +194,14 @@ let private sandboxPolicyTests =
                       "HTTPS_PROXY", "http://proxy:3128"
                       "ANTHROPIC_API_KEY", "ambient-key"
                       "CLAUDE_CODE_OAUTH_TOKEN", "ambient-token"
-                      "YESSION_CONTROL_SECRET", "launch-secret" ]
+                      "YESSION_LAUNCH", "{\"session\":\"s\",\"dataDir\":\"/d\",\"port\":0,\"parentGuard\":true,\"control\":{\"url\":\"http://m\",\"secret\":\"launch-secret\"}}" ]
             // A resolved per-turn credential displaces BOTH ambient credential vars.
             let resolved = Sandboxes.AgentSandbox.envFor ambient "/data/agent-home" (Some ("CLAUDE_CODE_OAUTH_TOKEN", "turn-token"))
             Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" resolved) (Some "turn-token") "the turn's credential is set"
             Expect.equal (Map.tryFind "ANTHROPIC_API_KEY" resolved) None "the ambient key never rides along"
             Expect.equal (Map.tryFind "HOME" resolved) (Some "/data/agent-home") "the CLI gets the scratch HOME"
             Expect.equal (Map.tryFind "HTTPS_PROXY" resolved) (Some "http://proxy:3128") "proxy config passes through"
-            Expect.equal (Map.tryFind "YESSION_CONTROL_SECRET" resolved) None "the launch secret never reaches the CLI"
+            Expect.equal (Map.tryFind "YESSION_LAUNCH" resolved) None "the launch envelope never reaches the CLI"
             // The documented ambient last resort passes exactly the two credential vars.
             let ambientRun = Sandboxes.AgentSandbox.envFor ambient "/data/agent-home" None
             Expect.equal (Map.tryFind "ANTHROPIC_API_KEY" ambientRun) (Some "ambient-key") "the ambient key passes when nothing displaces it"

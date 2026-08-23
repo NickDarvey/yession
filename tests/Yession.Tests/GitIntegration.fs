@@ -384,7 +384,7 @@ let private srtTests =
         }
 
         // Every case here uses an absolute mkdtemp; a SESSION's data directory need not be
-        // one — the unset-`YESSION_SESSION_DATA` default is relative, and so is what the
+        // one — `Launch.unlaunched`'s default is relative, and so is what the
         // live suite passes. That difference was invisible and total: the clone landed and
         // then every verb, `add_repo`'s own listing included, reported `cannot change to
         // ...: No such file or directory` about the checkout it had just made, because

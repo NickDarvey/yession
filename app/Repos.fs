@@ -267,7 +267,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
         /// such file or directory`. The clone is the one verb that survives it, because it
         /// passes a target relative to that same cwd on purpose — so the checkout lands and
         /// then every verb, `add_repo`'s own listing included, reports a failure about it.
-        /// A session whose data directory is relative (the unset-`YESSION_SESSION_DATA`
+        /// A session whose data directory is relative (`Launch.unlaunched`'s
         /// default is) had exactly that: a repo on disk that no verb would admit to.
         ///
         /// Resolved HERE rather than only at the composition root because this is where a

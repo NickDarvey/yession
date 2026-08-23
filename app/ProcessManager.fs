@@ -933,13 +933,13 @@ let createWithUi
                 // authenticates OAuth client registration, supervision reports, and the
                 // secrets/connections custody calls. The session scope is established
                 // HERE, by the Manager.
-                let controlEnv =
+                let control =
                     match controlUrl () with
                     | Some url ->
                         let secret = Interop.randomSecret ()
                         secretSessions <- Map.add secret record.SessionId secretSessions
-                        [ "YESSION_CONTROL_URL", url; "YESSION_CONTROL_SECRET", secret ], Some secret
-                    | None -> [], None
+                        Some { Url = url; Secret = secret }
+                    | None -> None
                 // Telemetry: the child is a direct OTel emitter. The Manager does NOT collect;
                 // it passes its own OTEL_* environment through (Spawn merges over `process.env`,
                 // so OTEL_LOGS_EXPORTER / OTEL_EXPORTER_OTLP_* flow to the child unchanged) and
@@ -955,19 +955,22 @@ let createWithUi
                         if inherited.Trim().Length = 0 then sessionAttrs else inherited + "," + sessionAttrs
                     [ "OTEL_SERVICE_NAME", "yession-session"
                       "OTEL_RESOURCE_ATTRIBUTES", resourceAttrs ]
+                // ONE variable, minted here and decoded once on the other side. It carries
+                // this launch's identity, its data directory, its port and — when there is a
+                // Manager to report to — its control secret. `Spawn` merges over
+                // `process.env`, so setting the whole envelope explicitly is also what stops
+                // an operator's stray value reaching a child: there is nothing left to stray.
                 let env =
-                    [ "YESSION_SESSION", SessionId.value record.SessionId
-                      "YESSION_SESSION_DATA", sprintf "%s/%s" options.DataDir record.DataDir
-                      // OS-assigned, always. Set explicitly rather than omitted: `Spawn`
-                      // merges over `process.env`, so an operator's stray YESSION_PORT would
-                      // otherwise reach the child and pin every session to one port.
-                      "YESSION_PORT", "0"
-                      // The child watches its stdin and exits when this Manager dies.
-                      "YESSION_PARENT_GUARD", "1" ]
-                    @ fst controlEnv
+                    [ Launch.Variable,
+                      Launch.encode
+                          { Session = record.SessionId
+                            DataDir = sprintf "%s/%s" options.DataDir record.DataDir
+                            Port = 0
+                            Control = control
+                            ParentGuard = true } ]
                     @ telemetryIdentityEnv
                 let revokeSecret () =
-                    (match snd controlEnv with
+                    (match control |> Option.map (fun c -> c.Secret) with
                      | Some secret ->
                          // Audit the binding teardown only when a binding existed (an
                          // ordinary stop of a never-logged-in session is not an event).
