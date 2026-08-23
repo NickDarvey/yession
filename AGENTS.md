@@ -22,11 +22,15 @@ Boundaries: code/commits/PRs written normal.
 
 Read `.agents/skills/contributing-changes/SKILL.md` when completing a plan to integrate
 changes. Short version: ship each independently-shippable plan step as its own PR rather
-than banking them — master moves while a branch sits, and the rebase tax is superlinear;
-compare implementation to plan; if consistent (no interesting deviations, blockers, or
-uncompletable work), open PR with auto-merge, subscribe to PR events, then watch the master
-pipeline after merge — auto-fix failures and repeat the process until master is green.
-Deviations stop the loop and get reported instead.
+than banking them — the queue absorbs a moving master, but not conflict reconciliation, and
+that tax is superlinear; compare implementation to plan; if consistent (no interesting
+deviations, blockers, or uncompletable work), open PR with auto-merge, subscribe to PR
+events, then watch the master pipeline after merge — auto-fix failures and repeat the
+process until master is green. Deviations stop the loop and get reported instead.
+
+`master` merges through a **merge queue**: auto-merge enqueues rather than merges, a green
+check never goes stale because master moved, and a check conclusion is not proof of either
+outcome — read the PR's merge state. The skill's Merge semantics section is the detail.
 
 ## Bootstrap
 
