@@ -146,7 +146,7 @@ jobs:
           extraPullNames: devenv
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       # Deliberately `nix build` and not devenv: this is the `nix profile install
-      # github:NickDarvey/yession` path a user actually takes, and it must stay pure.
+      # github:trinketworks/yession` path a user actually takes, and it must stay pure.
       - name: Build the installable package
         run: nix build .#yession --print-build-logs
       # The other darwin blind spot, and the same shape as the one above: `nix build`

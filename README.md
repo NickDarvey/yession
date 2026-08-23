@@ -98,9 +98,9 @@ tarball locally with `devenv build outputs.npm`.
 **Steps**
 
 ```sh
-nix profile install github:NickDarvey/yession          # add yession-manager + yession-session
-nix run             github:NickDarvey/yession           # run the Manager without installing
-nix build           github:NickDarvey/yession#yession   # just build the two wrapped bins
+nix profile install github:trinketworks/yession          # add yession-manager + yession-session
+nix run             github:trinketworks/yession           # run the Manager without installing
+nix build           github:trinketworks/yession#yession   # just build the two wrapped bins
 ```
 
 The Nix package is reproducible and self-contained: the native WebRTC addon is built from source,
