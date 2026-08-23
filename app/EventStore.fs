@@ -88,6 +88,13 @@ let openLog (path: string) (sessionId: SessionId) (clock: unit -> System.DateTim
                   Event = event }
             // Durability before visibility: one write() of the whole line (atomic under
             // O_APPEND) followed by fsync, before the envelope becomes readable.
+            //
+            // Synchronous is also a CONCURRENCY contract, not only a durability one: the
+            // queue drain (`Scheduler.fs`) snapshots the doc, appends one `MessageSent` per
+            // entry, and removes the doc keys in a single block that must not yield. It
+            // holds because this append completes without awaiting. An async or batched
+            // writer here would open a window between the append and the removal, and the
+            // drain would need an explicit mutex before it could tolerate one.
             writeAndSync fd (Codec.toString Codec.sessionEventEnvelope envelope + "\n")
             events.Add envelope
             return { Offset = offset }

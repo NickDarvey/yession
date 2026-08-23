@@ -64,7 +64,7 @@ module SessionId =
         (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 
     /// A session id is always a valid Docker object name: the container and its named
-    /// workspace volume are named by the id verbatim (docs/plans/03). `mint` produces one;
+    /// workspace volume are named by the id verbatim (Plan 03). `mint` produces one;
     /// `create` parses one off the wire/env and rejects anything Docker could not name.
     let create (raw: string) : Result<SessionId, string> =
         normalize "SessionId" raw
@@ -157,7 +157,7 @@ module CommandId =
         normalize "CommandId" raw |> Result.map CommandId
     let value (CommandId s) = s
 
-/// One terminal on the session's WorkSandbox (docs/plans/12). Constrained to the same
+/// One terminal on the session's WorkSandbox (Plan 12). Constrained to the same
 /// filename-safe alphabet as `SessionId` for the same reason: a terminal's transcript is a
 /// sidecar file named after it, and an id that cannot be a filename would be discovered at
 /// the first append rather than at parse.
@@ -201,8 +201,8 @@ module ToolUseId =
     let value (ToolUseId s) = s
 
 /// A Manager-verified user identity — the OIDC `sub` claim the Manager itself issued
-/// (docs/plans/04-session-authorization.md). Under the localhost strategy this is the
-/// single "local" user; a BYO strategy (docs/plans/07) mints real subjects.
+/// (Plan 04). Under the localhost strategy this is the
+/// single "local" user; a BYO strategy (Plan 07) mints real subjects.
 type UserId = private UserId of string
 
 module UserId =

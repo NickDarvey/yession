@@ -32,6 +32,17 @@ type private JsToolAnswer =
     abstract text : string
 
 [<Emit("""(async function (prompts, agentEnv, claudePath, descriptors, invoke, allowedTools, onChunk, registerAbort, claudeSpawner) {
+  // Declared OUTSIDE the try because a turn does not always end by returning: the SDK
+  // reports a non-success ending by THROWING, and what the turn streamed and spent before
+  // that has to survive the throw. See the catch.
+  let body = ''
+  let streamed = ''
+  let failed = null
+  let inputTokens = 0
+  let outputTokens = 0
+  let cacheReadTokens = 0
+  let cacheCreationTokens = 0
+  let model = ''
   try {
     const sdk = await import('@anthropic-ai/claude-agent-sdk')
     const { z } = await import('zod')
@@ -78,6 +89,14 @@ type private JsToolAnswer =
       if (!byNamespace.has(d.ns)) byNamespace.set(d.ns, [])
       byNamespace.get(d.ns).push(built)
     }
+    // Every entry here is one of OUR in-process SDK servers, built from the registry. A
+    // declared external server never goes in this map, tempting as its one line is: a server
+    // the model reaches directly is a second door, and its calls skip the approval gate, the
+    // tool-use record and attribution — the whole of what `ToolUseLog` and `ToolStreams` wrap
+    // the merged registry to guarantee. It also decides who holds a provider's claim: reached
+    // through the proxy the claim belongs to the SESSION, so the terminal's write lease can
+    // arbitrate between the agent and a human; reached directly it belongs to the agent's own
+    // MCP session, and nobody can take the device off it.
     const mcpServers = {}
     for (const entry of byNamespace) {
       mcpServers[entry[0]] = sdk.createSdkMcpServer({ name: entry[0], version: '1.0.0', tools: entry[1] })
@@ -111,14 +130,6 @@ type private JsToolAnswer =
         spawnClaudeCodeProcess: claudeSpawner
       }
     })
-    let body = ''
-    let streamed = ''
-    let failed = null
-    let inputTokens = 0
-    let outputTokens = 0
-    let cacheReadTokens = 0
-    let cacheCreationTokens = 0
-    let model = ''
     for await (const m of q) {
       if (m.type === 'stream_event') {
         const e = m.event
@@ -141,7 +152,13 @@ type private JsToolAnswer =
     const usage = { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, model }
     return failed ? { ok: false, body: '', reason: failed, ...usage } : { ok: true, body, reason: '', ...usage }
   } catch (err) {
-    return { ok: false, body: '', reason: String((err && err.message) || err), inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, model: '' }
+    // Where a real ending arrives. The `result` branch above reads the ending the SDK
+    // YIELDS; the endings that happen — a step ceiling, a refused credential — are thrown
+    // instead, so they land here, and answering with zeros threw away the usage of the
+    // longest turns in the session. The streamed text is already durable (every chunk was
+    // appended as a delta while it arrived), so what is recovered here is the spend and the
+    // reason; `Agent.sdkFailureReason` unwraps the latter.
+    return { ok: false, body: '', reason: String((err && err.message) || err), inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, model }
   }
 })($0, $1, $2, $3, $4, $5, $6, $7, $8)""")>]
 let private runQuery
@@ -158,6 +175,23 @@ let private runQuery
     (claudeSpawner: obj)
     : JS.Promise<RunOutcome> =
     jsNative
+
+/// What the SDK threw, said as the reason a turn stopped.
+///
+/// A non-success ending is not the `result` message the runner reads for one — the SDK
+/// throws, wrapping the CLI's own sentence in one of its own: `Claude Code returned an
+/// error result: Reached maximum number of turns (32)`. Every ending on record in a real
+/// session arrived that way, which is how the runner's own wording for a step ceiling
+/// never once reached a screen, and how a person reading a stopped turn was told what
+/// layer had spoken rather than what had happened.
+///
+/// Unwrapping here rather than in the emitted JS because this is the answer a person
+/// reads, and a rule about what a reader is told belongs where a cheap test can reach it.
+/// Anything not wearing the wrapper is already the reason and passes through.
+let sdkFailureReason (raw: string) : string =
+    let prefix = "Claude Code returned an error result:"
+    let said = raw.Trim ()
+    if said.StartsWith prefix then said.Substring(prefix.Length).Trim () else said
 
 /// Some sandboxes disallow the SDK's own vendored executable; `YESSION_CLAUDE_PATH`
 /// points the SDK at a system Claude Code install instead. Empty = SDK default.
@@ -337,7 +371,9 @@ let runWith (dataDir: string) (credential: (string * string) option) : RunAgent 
                   CacheReadTokens = outcome.cacheReadTokens
                   CacheCreationTokens = outcome.cacheCreationTokens
                   Model = if System.String.IsNullOrEmpty outcome.model then None else Some outcome.model }
-            return if outcome.ok then AgentCompleted (outcome.body, Some usage) else AgentFailed outcome.reason
+            return
+                if outcome.ok then AgentCompleted (outcome.body, Some usage)
+                else AgentFailed (sdkFailureReason outcome.reason, Some usage)
         }
 
 /// The ambient-credential runner over a given data directory (existing call sites and the

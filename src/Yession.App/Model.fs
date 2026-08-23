@@ -5,7 +5,7 @@ open Yession.Domain
 /// The Browser Client Elmish model and update loop shell. It holds a single typed
 /// snapshot of what the client knows: the local peer, connection state, synced
 /// collaborative state, the conversation projection, the event-consumer read position,
-/// and the agent view state. See docs/design.md §2.1, §2.3 and docs/plans/00-init/04-*.
+/// and the agent view state. See docs/design.md §2.1, §2.3.
 
 type ConnectionState =
     /// Not connected and not trying. Carries WHY whenever the client knows — a rejected
@@ -19,10 +19,11 @@ type ConnectionState =
 type PeerState = { PeerId : PeerId; DisplayName : string }
 
 /// The durable event feed's health — the leg that carries HISTORY, which in the browser is
-/// HTTP (immutable chunks) rather than the data channel. Deliberately separate from
-/// `ConnectionState`: either leg can be down while the other works, and neither takes the
-/// client with it. Collaborative state is CRDT state in a local doc, so a dead feed costs
-/// history, not the ability to read, write, or send (docs/design.md §1, local-first).
+/// HTTP by cursor — immutable ranges kept in the client's own store — rather than the data
+/// channel. Deliberately separate from `ConnectionState`: either leg can be down while the
+/// other works, and neither takes the client with it. Collaborative state is CRDT state in a
+/// local doc, so a dead feed costs history, not the ability to read, write, or send
+/// (docs/design.md §1, local-first).
 type FeedHealth =
     /// The last read succeeded — history is current.
     | FeedLive
@@ -1565,6 +1566,15 @@ module ClientModel =
             // terminal that CLOSES under a rewound reader keeps playing rather than dropping
             // them back into its blocks, because the pin was the only part of their state
             // that died with the live edge (`rewoundTo` resolves it against `IsOpen`).
+            //
+            // What a pin gives up is following the tail while behind it: the recording under the
+            // reader is fixed until they catch up. The alternative was a custom player source
+            // driving history, tail and seek itself — the stock player's file source is static
+            // and its live sources do not seek backwards — and it was not needed, because the
+            // client already holds every record and mounting the ordinary whole-terminal cast
+            // over `[0, pin)` replays through the same player a finished terminal uses. If
+            // following-while-behind is ever wanted, that custom source is where it goes; it is
+            // not something this reducer can grow.
             { model with Pane = Some (OnTab (WatchingBehind (terminal, length))); TerminalsOpen = true }
         | TogglePinMsg tab ->
             let key = PaneTab.key tab

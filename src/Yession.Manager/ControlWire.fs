@@ -395,14 +395,19 @@ module ControlWire =
                 { ConnectionResolveResponse.Kind = get.Required.Field "kind" connectionKind.Decode
                   ConnectionResolveResponse.Value = get.Required.Field "value" Decode.string }) }
 
-    /// One Running session in the registry stream (docs/plans/09): what an operator's
+    /// One Running session in the registry stream: what an operator's
     /// serving binding needs to expose it — the OS-assigned port — plus identity for
     /// display and the pid for supervision-side correlation.
     type SessionRegistryEntry =
         { Id : SessionId
           Name : string
           Port : int
-          Pid : int }
+          Pid : int
+          /// The build this launch reported on its readiness line. Optional on the wire as
+          /// well as in the Manager: a consumer that meets a session from a bundle older
+          /// than the field reads `None` and says nothing, rather than a placeholder it
+          /// would then have to explain.
+          Build : string option }
 
     /// A `/sessions/stream` SSE frame: the FULL current set of Running sessions.
     /// Snapshot semantics, never deltas — a consumer applies each frame wholesale, so
@@ -413,16 +418,20 @@ module ControlWire =
         { Encode =
             fun (e: SessionRegistryEntry) ->
                 Encode.object
-                    [ "id", Codec.sessionId.Encode e.Id
-                      "name", Encode.string e.Name
-                      "port", Encode.int e.Port
-                      "pid", Encode.int e.Pid ]
+                    [ yield "id", Codec.sessionId.Encode e.Id
+                      yield "name", Encode.string e.Name
+                      yield "port", Encode.int e.Port
+                      yield "pid", Encode.int e.Pid
+                      match e.Build with
+                      | Some build -> yield "build", Encode.string build
+                      | None -> () ]
           Decode =
             Decode.object (fun get ->
                 { SessionRegistryEntry.Id = get.Required.Field "id" Codec.sessionId.Decode
                   SessionRegistryEntry.Name = get.Required.Field "name" Decode.string
                   SessionRegistryEntry.Port = get.Required.Field "port" Decode.int
-                  SessionRegistryEntry.Pid = get.Required.Field "pid" Decode.int }) }
+                  SessionRegistryEntry.Pid = get.Required.Field "pid" Decode.int
+                  SessionRegistryEntry.Build = get.Optional.Field "build" Decode.string }) }
 
     let sessionRegistryFrame : Codec<SessionRegistryFrame> =
         { Encode =

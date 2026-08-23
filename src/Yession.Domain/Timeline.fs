@@ -62,6 +62,15 @@ module TerminalStretch =
     let duration (stretch: TerminalStretch) : TimeSpan = stretch.EndedAt - stretch.StartedAt
 
     /// A stable handle for one stretch, for a tab to be keyed by and a test to assert.
+    ///
+    /// Derived rather than minted, which is fine while it is only a tab key and a test's
+    /// handle: both are recomputed from the same projection every time. It stops being fine
+    /// the moment a stretch is addressable from outside — a link handed to somebody else turns
+    /// "a stretch anchors at the offset it concluded at" into a wire contract nobody wrote
+    /// down, and any reconsideration of the anchoring rule silently breaks every link already
+    /// sent. The fix is to mint a `StretchId` on `TerminalLeaseReleased` and its
+    /// idle/stolen/holder-gone siblings, the way `BlockId` and `ToolUseId` are minted; do that
+    /// before deep links, not after.
     let key (stretch: TerminalStretch) : string =
         sprintf "%s@%d" (TerminalId.value stretch.TerminalId) (EventOffset.value stretch.Offset)
 

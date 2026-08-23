@@ -52,7 +52,7 @@ open Yession.Host.Interop
 /// What a control secret resolves to: WHICH launch is calling, and the users and peers
 /// the Manager verified into the launch at ID-token issuance (empty until a login
 /// completes). Manager-verified, never self-asserted — this is the ABAC composite
-/// identity (Plan 06; peers per docs/plans/07).
+/// identity (Plan 06; peers per Plan 07).
 type ControlCaller =
     { SessionId : SessionId
       Users : Set<UserId>

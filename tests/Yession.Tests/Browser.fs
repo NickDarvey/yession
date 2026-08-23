@@ -119,7 +119,7 @@ let private startHost () : unit =
     let psi = ProcessStartInfo "node"
     psi.ArgumentList.Add "app/out/Main.js"
     // Single-machine loopback trust (the shipped default `none` denies everything and
-    // the login bounce would 401 before any page ever connects — docs/plans/07).
+    // the login bounce would 401 before any page ever connects).
     psi.ArgumentList.Add "--auth"
     psi.ArgumentList.Add "localhost"
     psi.UseShellExecute <- false
@@ -341,7 +341,7 @@ let tests =
                             Args = [| "--disable-features=WebRtcHideLocalIpsWithMdns" |])))
                 browser <- b
                 // One isolated context per peer: the peer id is stable per browser
-                // PROFILE now (localStorage, docs/plans/07), so two pages in one context
+                // PROFILE now (localStorage), so two pages in one context
                 // would be one peer — a single human in two tabs — not the two distinct
                 // collaborators this flow verifies.
                 let! contextA = await (browser.NewContextAsync ())
@@ -1127,6 +1127,37 @@ let editorTests =
                                }""")
                 Expect.isFalse sideways "the conversation column does not scroll sideways"
             }
+        // The title is written per keystroke, so Enter has nothing to save — and that is
+        // exactly why it has to DO something: a phone holds its keyboard open for as long as
+        // the field holds focus, and a return key that answers nothing reads as an edit the
+        // app declined to take. The promise is that Enter finishes with the field, and that
+        // finishing keeps what was typed.
+        //
+        // Both halves, because either alone is satisfied by a bug: a field that let go and
+        // reverted would pass the focus check, and one that kept the text with the keyboard
+        // still over it would pass the value check. Only a browser can see either — focus and
+        // a key event are not things a rendered string has.
+        editorCaseIn 390 844 "Enter in the session title lets go of the field and keeps what was typed" (EDITOR_PORT + 16) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-session-title]")
+                do! awaitU (page.FocusAsync "#shell [data-session-title]")
+                do! awaitU (page.Keyboard.TypeAsync " on a phone")
+                // Ground truth: the field really is where the typing went, and it really is
+                // the focused element for Enter to release.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.hasAttribute('data-session-title') === true""")
+
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.hasAttribute('data-session-title') !== true""")
+                let! title =
+                    await (page.EvaluateAsync<string>
+                            "() => document.querySelector('#shell [data-session-title]').value")
+                Expect.stringContains title "on a phone" "the committed title is the one that was typed"
+            }
         // The split between the two columns is the reader's to set. What is pinned is the
         // PROMISE, not the geometry: that the divider can be moved without a pointer at all.
         // A splitter that only answers a drag is a control a keyboard user cannot reach, and
@@ -1277,6 +1308,56 @@ let editorTests =
                 do! awaitU (page.Keyboard.PressAsync "Tab")
                 let! after = await (page.EvaluateAsync<string> "() => document.activeElement?.getAttribute('data-terminal-screen')")
                 Expect.equal after before "Tab types a tab; it does not leave the terminal"
+            }
+        // Taking the keyboard is the whole of what live mode is, and the keyboard has to
+        // follow it. Only a browser can answer this: both routes into live mode remove the
+        // element that had focus in the render they arrive on — `take` removes itself, and the
+        // lease landing replaces the command line with the lease bar — so what is under test
+        // is where focus ends up after a DOM swap, which is not a fact any rendered string
+        // holds.
+        editorCase "taking a terminal puts the keyboard in it" (EDITOR_PORT + 16) <| fun page ->
+            async {
+                // `term-harness` is the pane's opening tab, and it holds no lease: a terminal
+                // in block mode, which is where somebody who wants to type is standing. Not
+                // clicked — activating the tab you are already on is the PIN gesture.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-take='term-harness']")
+
+                // The press that hands this peer the lease — and removes itself doing it.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-take='term-harness']")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.getAttribute('data-terminal-screen') === 'term-harness'""")
+
+                // …and it is really the keyboard, not merely a focus ring: what is typed now
+                // reaches the pty rather than the composer that used to be there.
+                do! awaitU (page.Keyboard.PressAsync "ArrowUp")
+                let! typed = await (page.EvaluateAsync<string> "() => window.__typed || ''")
+                Expect.equal typed "\u001b[A" "a key pressed after the take reaches the terminal"
+            }
+        // The other route in, and the reason the focus move lives in the render loop rather
+        // than on the press: a block that takes the screen hands its author the keyboard with
+        // nobody pressing anything. Focus that SURVIVED that render is not stranded and must
+        // not be taken — a terminal going full-screen three tabs away is not a reason to yank
+        // somebody's caret out of the message they are writing.
+        editorCase "a terminal going live does not take the keyboard from what someone is writing" (EDITOR_PORT + 17) <| fun page ->
+            async {
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-take='term-harness']")
+
+                // Somebody's keyboard is somewhere else in the pane — on the splitter, which
+                // is rendered whatever the terminal is doing and survives this render.
+                do! awaitU (page.FocusAsync "#shell [data-term-resize]")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.hasAttribute('data-term-resize') === true""")
+
+                // The lease arrives on its own, as the alt-screen flip delivers it.
+                do! awaitU (page.EvaluateAsync "() => window.__take('term-harness')")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-harness']")
+                let! kept =
+                    await (page.EvaluateAsync<string> "() => document.activeElement?.outerHTML?.slice(0, 60) ?? 'NOTHING'")
+                Expect.stringContains kept "data-term-resize" "a lease landing leaves focus that survived the render where it was"
             }
         // The DVR (Plan 14, stage 7). What only a browser can answer: that rewinding a LIVE
         // terminal really mounts a player over what it has recorded so far — the same player
@@ -1481,7 +1562,7 @@ let editorTests =
             }
     ]
 
-// --- A path-mounted session in a real browser (docs/plans/10) ---------------------------
+// --- A path-mounted session in a real browser --------------------------------------------
 
 let private MOUNT_PROXY_PORT = 8186
 let private MOUNT_MANAGER_PORT = 8188
@@ -1987,7 +2068,7 @@ let mountedTests =
 //
 // The deployment nothing else here has: ONE public origin, with the Manager at its root and
 // every session under `/s/<id>`, fronted by a door that learns where those sessions really
-// are from the Manager's registry stream (docs/plans/09, docs/plans/10). That door is BEHIND
+// are from the Manager's registry stream. That door is BEHIND
 // — a session exists and is running for a moment before a mapping for it appears — and what
 // it answers in that window is `404 not found`.
 //
@@ -2077,7 +2158,7 @@ let private startFrontDoor (publicPort: int) (managerPort: int) (lag: int) : Htt
                                 ctx.Response.OutputStream.Write (bytes, 0, bytes.Length)
                             | _ ->
                                 // The path goes through UNCHANGED: a session strips its own
-                                // `/s/<id>` mount (docs/plans/10), and the Manager is what
+                                // `/s/<id>` mount, and the Manager is what
                                 // this origin's root is.
                                 let port =
                                     match session with

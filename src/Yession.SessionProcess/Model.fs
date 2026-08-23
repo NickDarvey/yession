@@ -5,7 +5,7 @@ open Yession.Domain
 /// The Session Process Elmish model and its sub-states. The model holds a single typed
 /// snapshot of the session: synced collaborative state, event-log read position, peers,
 /// the conversation projection, and the agent runtime state. See docs/design.md §1
-/// "Reactive", §2.2 and docs/plans/00-init/02-*.
+/// "Reactive", §2.2.
 
 /// The model's view of the event log: how far the projection has consumed.
 type EventLogState = { LatestOffset : EventOffset option }

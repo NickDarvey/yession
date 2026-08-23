@@ -3,7 +3,7 @@ namespace Yession.SessionProcess
 open System
 open Yession.Domain
 
-/// One terminal's durable transcript, as a capability (docs/plans/12). The Session
+/// One terminal's durable transcript, as a capability (Plan 12). The Session
 /// Process appends to it BEFORE broadcasting a record, so a dropped frame costs latency
 /// and never the record — the same "durability before visibility" rule the event log and
 /// the doc sidecar are written under.
@@ -601,6 +601,13 @@ module SessionTerminals =
     ///
     /// Newline survives and becomes `\r`, because a heredoc IS a multi-line command and the
     /// shell reads its body from the lines that follow.
+    ///
+    /// Two repairs are not here, and their absence is a known edge rather than an oversight. A
+    /// multi-line command is not wrapped in bracketed paste, so a shell that enabled it sees
+    /// several submissions rather than one; and nothing force-clears bracketed paste or the
+    /// alternate screen when a block completes. A command that dies inside a remote TUI
+    /// therefore leaves the shell in a mode it never set and cannot clear — a terminal wedged in
+    /// the alt screen is one nobody can type into again, and today only closing it recovers.
     let internal writeFor (command: string) : string =
         let kept =
             command
@@ -665,7 +672,8 @@ module SessionTerminals =
           /// Keystrokes are never written to the transcript. The shell echoes what is typed at
           /// it, so ordinary typing is already captured as output; what recording these would
           /// add is exactly what the terminal deliberately did not display — a password at an
-          /// `ssh` prompt. See "Durable capture" in the plan.
+          /// `ssh` prompt. `TerminalFrame.TerminalInput` (Yession.Domain/Transport.fs) carries
+          /// the full rationale, including why the narrower echo-aware rule is unimplementable.
           Input : TerminalId -> ActorRef -> string -> bool
           /// Type into an UNINSTRUMENTED terminal, taking the lease first (Plan 19). The
           /// agent's hand in a source that has no blocks — and the reason a provider's own
@@ -712,10 +720,18 @@ module SessionTerminals =
           /// append without validating is an actor who can point every future terminal at a
           /// directory that is not there, and an actor able to validate without appending has
           /// only asked a question. `None` clears it.
+          ///
+          /// The directory arrives, and is stored, in the vocabulary the rest of the session
+          /// speaks (`SandboxPath`): as a terminal in that sandbox reaches it. What the
+          /// sandbox resolves it to is the sandbox's own business and stays there.
           SetProfile : ActorRef -> SandboxName -> string option -> Async<Result<string, string>>
           /// Clear every profile whose directory is inside this tree, because the tree is
           /// about to stop existing (Plan 26; Plan 25's upstream half). Answers with the
           /// sandboxes it cleared, so the caller can say so.
+          ///
+          /// The tree is a path as a terminal reaches it, which is what `SetProfile` stores
+          /// and what a repo verb answers with — the two have to be one vocabulary or this
+          /// compares a relative path against an absolute one and clears nothing.
           ///
           /// Here rather than at the caller for the reason `SetProfile` is: whoever is
           /// deleting a tree knows only that it is going, and a caller left to work out
@@ -743,7 +759,12 @@ module SessionTerminals =
           /// The seq is what makes the snapshot composable with the live feed: a client
           /// renders this, then folds records ABOVE that seq, exactly as it does with an
           /// event-offset catch-up.
-          Snapshot : TerminalId -> Async<(int * string) option>
+          ///
+          /// A `TranscriptKeyframe` because a serialized screen is a paint at a GEOMETRY, and
+          /// the pair without it cannot be repainted — the client rewraps every line. The
+          /// ranged replay has carried the same three fields from the same serializer since
+          /// keyframes existed; this is that type, not a second one shaped like it.
+          Snapshot : TerminalId -> Async<TranscriptKeyframe option>
           ReconcileAtBoot : unit -> Async<unit> }
 
     /// A session with no terminals: every operation refuses, nothing is ever open.
@@ -874,6 +895,12 @@ module SessionTerminals =
         /// What each open terminal's source declared it can do (Plan 16, part D). Consulted
         /// where a capability is actually USED — before running a block, before resizing —
         /// rather than being re-derived from whether a rearmer happens to exist.
+        ///
+        /// Never removed when a terminal closes. A source's declaration is a fact about the
+        /// RECORDING, not about the live device: the questions that read this — can it be
+        /// instrumented, does it have blocks, what does its tail mean — are asked of closed
+        /// terminals too. Forgetting it made a closed serial port answer "this runs commands as
+        /// blocks" about a live-only recording sitting right there.
         let sources = Collections.Generic.Dictionary<string, SourceCapabilities> ()
         /// Whether this terminal's source claimed it can carry the OSC 133 bootstrap. An
         /// unknown terminal answers `true`: everything that existed before sources did was a
@@ -1862,7 +1889,7 @@ module SessionTerminals =
                         // A resize IS output-side history, not a keystroke: asciicast records
                         // it (`[t, "r", "COLSxROWS"]`) because a replay that does not know the
                         // screen changed shape redraws everything after it wrongly.
-                        emit id terminal TranscriptResize (sprintf "%dx%d" cols rows)
+                        emit id terminal TranscriptResize (TerminalSize.format { Cols = cols; Rows = rows })
                     | _ -> ()
                     appliedSize.[key] <- { Cols = cols; Rows = rows }
                     true
@@ -1882,7 +1909,7 @@ module SessionTerminals =
                 | true, terminal ->
                     terminal.Shell |> Option.iter (fun pty -> pty.Resize size.Cols size.Rows)
                     terminal.Emulator.Resize size.Cols size.Rows
-                    emit id terminal TranscriptResize (sprintf "%dx%d" size.Cols size.Rows)
+                    emit id terminal TranscriptResize (TerminalSize.format size)
                     appliedSize.[key] <- size
                 | _ -> ()
 
@@ -1981,15 +2008,23 @@ module SessionTerminals =
                 // Checked AND RESOLVED in one spawn, by the sandbox, because the sandbox
                 // is the only thing that knows both. `cd` lands a relative path against
                 // the sandbox's own working directory — the same root a terminal opens in,
-                // which is what makes `repos/octo/hello` mean anything — and `pwd` says
-                // where that turned out to be. What gets stored is always the absolute
-                // answer, so the projection, the spawn and Plan 26's tree matching never
-                // see a path whose meaning depends on where anyone stood.
+                // which is what makes `repos/octo/hello` mean anything — and the two `pwd`s
+                // say what that root is and where the path turned out to be. Both, in one
+                // spawn: the answer is only a path this session can hold once it is stated
+                // relative to the root, and a second spawn to ask for the root is a second
+                // sandbox state to disagree with the first.
                 //
                 // This is why a relative path is no longer refused. The old objection was
                 // that "relative to what" is the very thing being set — true of a SHELL's
                 // idea of relative, and not true of the sandbox's, which is fixed and
                 // known before any of this runs.
+                //
+                // What gets STORED is `SandboxPath.reachedFrom` of the two: the directory as
+                // a terminal here reaches it, which is the same vocabulary the repo verbs
+                // answer in and the only one `ClearProfilesUnder` can compare against. The
+                // absolute form stays the sandbox's business — it is the operator's home
+                // directory, and every reader of the projection (the timeline note, the
+                // query, the tool's own answer) would otherwise carry it.
                 let! checked' =
                     match ensured, cwd with
                     | EnvironmentUnavailable reason, _ -> async { return Error reason }
@@ -2000,7 +2035,7 @@ module SessionTerminals =
                             let! spawned =
                                 (environmentFor sandbox).Spawn
                                     { Executable = shell.Executable
-                                      Arguments = shell.Arguments @ [ "cd \"$1\" && pwd"; "sh"; path ]
+                                      Arguments = shell.Arguments @ [ "pwd && cd \"$1\" && pwd"; "sh"; path ]
                                       Env = Map.empty
                                       WorkingDirectory = None }
                                     (fun (stream, chunk) ->
@@ -2012,18 +2047,24 @@ module SessionTerminals =
                             | Ok handle ->
                                 match! handle.Exited with
                                 | SandboxExited 0 ->
-                                    match answered.Trim () with
-                                    | "" ->
-                                        // `cd` succeeded and `pwd` said nothing, which no
-                                        // shell does. Refused rather than stored: a profile
-                                        // of "" is a terminal that opens nowhere.
+                                    let said =
+                                        answered.Split '\n'
+                                        |> Array.map (fun line -> line.Trim ())
+                                        |> Array.filter (fun line -> line <> "")
+                                        |> List.ofArray
+                                    match said with
+                                    | [ root; resolved ] -> return Ok (Some (SandboxPath.reachedFrom (Some root) resolved))
+                                    | _ ->
+                                        // `cd` succeeded and the two `pwd`s did not answer,
+                                        // which no shell does. Refused rather than stored: a
+                                        // profile assembled out of whatever else came back is
+                                        // a terminal that opens nowhere.
                                         return
                                             Error (
                                                 sprintf
                                                     "the %s sandbox could not say where %s is, so nothing was set."
                                                     name
                                                     path)
-                                    | resolved -> return Ok (Some resolved)
                                 | SandboxExited _ ->
                                     return
                                         Error (
@@ -2043,7 +2084,8 @@ module SessionTerminals =
                         SessionEvent.ShellProfileSet
                             { MessageId = mintMessageId ()
                               Sandbox = sandbox
-                              // The RESOLVED path, never what the caller typed.
+                              // The path the sandbox resolved, said the way a terminal here
+                              // reaches it — never what the caller typed.
                               WorkingDirectory = resolved
                               Actor = actor }
                     do! appendAs actor event
@@ -2068,8 +2110,12 @@ module SessionTerminals =
                         let! _ = closeTerminal id "the shell profile changed"
                         ()
                     | _ -> ()
+                    // What was STORED, not what the caller typed: the answer, the timeline
+                    // note and the query say one thing, and it is the thing anybody here can
+                    // act on. An agent told it set the profile to a path in a vocabulary
+                    // nothing else uses is an agent that will hand that path back.
                     let where =
-                        match cwd with
+                        match resolved with
                         | Some path -> sprintf "new terminals in %s start in %s." name path
                         | None -> sprintf "new terminals in %s start where the sandbox puts them." name
                     let mine =
@@ -2164,8 +2210,12 @@ module SessionTerminals =
                     // is idempotent. The other order would report a seq for a record the
                     // screen has not drawn, and the client would skip it for ever.
                     let seq = terminal.Transcript.NextSeq ()
+                    let size =
+                        match appliedSize.TryGetValue (TerminalId.value id) with
+                        | true, applied -> applied
+                        | _ -> TerminalSize.default'
                     let! screen = terminal.Emulator.Serialize ()
-                    return Some (seq, screen)
+                    return Some { Seq = seq; Cols = size.Cols; Rows = size.Rows; Screen = screen }
                 }
           ReconcileAtBoot = reconcileAtBoot }
 
@@ -2281,6 +2331,12 @@ module TerminalScheduler =
 /// UNENFORCEABLE, because the agent had a second door with no gate on it. A gate only becomes
 /// real when there is one door, which is this — and the classifier (Plan 23) inherits exactly
 /// that property: it reads every command because every command comes through here.
+///
+/// A block is owned by the session, not by the turn that asked for it. Aborting a turn abandons
+/// this wait and nothing else: the block runs on, its output lands in the transcript, and the
+/// next turn's digest reports it. The retired `execute_command` ran a process the turn owned, so
+/// an interrupt killed it — an audit trail with holes where somebody pressed stop is not an
+/// audit trail.
 module TerminalCommands =
 
     /// How long a RUNNING command is waited for: the same bound the retired `execute_command`

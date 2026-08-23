@@ -196,7 +196,7 @@ let private makeSandboxes
         | Ok sandboxes -> sandboxes
         | Error e -> failwithf "work sandboxes: %s" e
 
-// Where this session is reachable from outside (docs/plans/09), from the same two
+// Where this session is reachable from outside, from the same two
 // variables the Manager parsed, inherited by plain env. Fails the boot on a combination
 // that cannot work, rather than registering a redirect URI no browser can reach.
 let private publicAccess =
@@ -265,14 +265,14 @@ let private diagnosticAgent : RunAgent =
             // collapses to this is the point of the merge, and driving the real one across
             // process boundaries is what makes this a smoke test rather than a mock.
             match! capabilities.ExecuteCommand (CommandRequest.ofCommand "node -e \"console.log('diagnostic-ok')\"") with
-            | Error reason -> return AgentFailed (sprintf "diagnostic command failed: %s" reason)
+            | Error reason -> return AgentFailed (sprintf "diagnostic command failed: %s" reason, None)
             | Ok outcome ->
                 match outcome.Status with
                 | TerminalCommandRan (CommandSucceeded 0) ->
                     let output = outcome.OutputTail.Trim ()
                     onChunk { Text = output }
                     return AgentCompleted (sprintf "diagnostic: %s" output, None)
-                | other -> return AgentFailed (sprintf "diagnostic command failed: %A" other)
+                | other -> return AgentFailed (sprintf "diagnostic command failed: %A" other, None)
         }
 
 /// A built-in probe (`YESSION_AGENT=usage-probe`, Plan 04): completes a turn with fixed,
@@ -524,12 +524,12 @@ let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent
                 { capabilities with
                     Queries = queryRegistry.Definitions
                     ReadQuery = queryRegistry.Read }
-            // A dispatch-level failure streams its reason as the message body first:
-            // the turn's item is already open (AgentMessageStarted precedes the
-            // runner), so this is what makes the reason VISIBLE in the timeline.
-            let fail (reason: string) =
-                onChunk { Text = reason }
-                AgentFailed reason
+            // A dispatch-level failure says nothing of its own: the reason is carried by
+            // `AgentFailed`, and the conversation projection gives it an item where the turn
+            // stopped. This used to stream the reason as a delta first, back when a turn that
+            // said nothing failed into a silent red item — which by then meant every such
+            // failure was printed twice, once as the body and once joined to it.
+            let fail (reason: string) = AgentFailed (reason, None)
             match! resolveCredential context.TurnActor with
             | Ok credential -> return! inner credential context capabilities signal onChunk
             | Error reason -> return fail reason
@@ -596,7 +596,7 @@ Async.StartImmediate (
                       // what anyone here can act on, and `set_shell_profile` resolves it
                       // against the same root. The absolute path stays the sandbox's.
                       VisibleAt =
-                        Sandboxes.reposReachedFrom
+                        SandboxPath.reachedFrom
                             (workspaceFor SandboxName.defaultName)
                             (Sandboxes.reposVisibleAt workBackend reposDir)
                       ExtraReadPaths = []
@@ -765,7 +765,7 @@ Async.StartImmediate (
         // cannot authorize users, so failure is fatal, never a half-open session.
         match controlChannel, auth with
         | Some (url, secret), Some auth ->
-            // The address is the configured public one (docs/plans/09), inherited from
+            // The address is the configured public one, inherited from
             // the Manager's env: behind a proxy the browser must land on a reachable
             // callback. Loopback when unset (the RFC 8252 default).
             let redirectUri =

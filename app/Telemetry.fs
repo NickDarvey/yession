@@ -3,6 +3,13 @@ module Yession.Host.Telemetry
 // The OpenTelemetry emitter, shared by both the Manager and each Session Process — every
 // process is a *direct* OTel emitter (there is no Manager-side collector). One OTel *log
 // record* per completed agent turn carries token/cache counts — never message content.
+//
+// The signal is logs, not the GenAI `gen_ai.client.token.usage` metric, and that is a deliberate
+// first cut: a metric needs a reader and an aggregation pipeline at BOTH ends, while one
+// self-contained record per turn is legible to any OTLP logs backend with nothing configured.
+// Metrics and traces generalise onto the same env selection and the same bindings when something
+// actually needs them.
+//
 // Fire-and-forget: a dropped export must never fail or stall a turn, so `Emit`/`Log` swallow
 // everything and the batch processor exports asynchronously off the turn path.
 //

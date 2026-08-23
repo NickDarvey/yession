@@ -10,7 +10,7 @@ open Yession.Domain
 ///
 /// The property that matters: `relative` never emits a leading slash, and it is the only
 /// way to render a route as a URL. A session does not necessarily own the root of its
-/// origin — an operator's proxy may mount it under a path (docs/plans/09) — so a
+/// origin — an operator's proxy may mount it under a path (Plan 09) — so a
 /// root-anchored URL is not something a caller should be able to write by accident. The
 /// browser resolves these against the shell's `<base href>`.
 
@@ -83,7 +83,7 @@ type SessionRoute =
     /// from the beginning — the same `EventOffset option` the client's feed already takes.
     /// It carries no events and is never cached; it answers with a redirect to the
     /// `Events` range that does, or `204` when the caller is already current. This is the
-    /// ONLY thing a client has to know how to build (docs/plans/20).
+    /// ONLY thing a client has to know how to build (Plan 20).
     | EventsAfter of after: EventOffset option
     /// The events at offsets `[first, last]`, which is the same answer for ever: the log
     /// is append-only and these bounds do not move. Named `Events` after the path, not
@@ -319,7 +319,7 @@ module AssetBuild =
 /// The event log and the transcripts are deliberately NOT here. Their answers are kept by
 /// the client itself, in a store it can enumerate and ask to persist, so every response on
 /// those surfaces is `no-store` — a header inviting a second copy into the HTTP cache would
-/// be the redundant spare, not a belt (docs/plans/20, docs/plans/22).
+/// be the redundant spare, not a belt (Plan 20, Plan 22).
 module CachePolicy =
 
     /// A fingerprinted asset: the address changes whenever the bytes do, so a cache entry can

@@ -49,7 +49,7 @@ type AuthorizationCode =
       /// The authenticated identity the code will redeem for: subject plus the verified
       /// claims when the strategy attributed a real user.
       Identity : GrantedIdentity
-      /// The browser peer that rode the authorize bounce (docs/plans/07), when the
+      /// The browser peer that rode the authorize bounce, when the
       /// client sent one — what the Manager witnesses into the launch at issuance.
       Peer : PeerId option
       IssuedAtUnix : int64 }
@@ -94,7 +94,7 @@ type AuthorizeRequest =
     { Client : RegisteredClient
       State : string
       Challenge : string
-      /// The browser's peer id, when the login carried one (docs/plans/07).
+      /// The browser's peer id, when the login carried one.
       Peer : PeerId option }
 
 type AuthorizeError =

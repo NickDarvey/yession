@@ -554,7 +554,11 @@ let private whenSynced (persistence: obj) : JS.Promise<unit> = jsNative
 
 // The store is keyed by SESSION: the serving Session Process embeds its session id in the
 // bootstrap page (a synchronous, pre-connection identity), so two sessions served from one
-// address never share a store, and a session keeps its store wherever it is served from.
+// address never share a store. The KEY is stable wherever the session is served from; the
+// STORE is not. IndexedDB is partitioned by origin and a port is part of one, so a deployment
+// addressing sessions as `127.0.0.1:{port}` returns to an empty database after every relaunch
+// — which is what `PublicAccess.sessionAddressIsStable` marks on the shell, and why the
+// client's local-first copy is qualified there rather than promised.
 [<Emit("""(() => {
   const meta = document.querySelector('meta[name="yession-session"]')
   const session = meta && meta.getAttribute('content')
@@ -650,6 +654,10 @@ let private registerWorker (url: string) : unit = jsNative
 /// Ask for the store to be kept. A request, not a guarantee — granted for an engaged site on
 /// Chrome, essentially only for an installed app on Safari — and best-effort by design: the
 /// answer changes nothing this client does, it only changes how long what it kept survives.
+///
+/// Safari additionally caps script-writable storage at seven days without user interaction, and
+/// that reaches the Cache API — so a granted request is not the end of it, and the session
+/// nobody has opened in a week is the one this store is most likely to have lost.
 [<Emit("(navigator.storage && navigator.storage.persist) ? navigator.storage.persist().catch(() => false) : Promise.resolve(false)")>]
 let private requestPersistence () : JS.Promise<bool> = jsNative
 
@@ -790,7 +798,7 @@ let private jsRandom () : float = jsNative
 let private mintId (prefix: string) =
     sprintf "%s-%d" prefix (int (jsRandom () * 1000000000.0))
 
-// The peer id is STABLE per browser profile (docs/plans/07): minted once, kept in
+// The peer id is STABLE per browser profile (Plan 07): minted once, kept in
 // localStorage under a browser-wide key (not per session — it names the browser, the
 // same human across sessions), so colours, draft slots, and peer-scoped secrets survive
 // reloads. Storage denied (private mode) falls back to the per-load mint.
@@ -1673,13 +1681,14 @@ let private start () =
         // through `/login` (code + PKCE via the Manager) and land back on this shell,
         // where the probe succeeds. A NETWORK failure (offline, session down) is a
         // `Disconnected` with its reason, not silence: the local-first shell — IndexedDB doc
-        // plus cached event chunks — stays fully usable, and the model says why it is alone.
+        // plus the event ranges in this client's own store — stays fully usable, and the model
+        // says why it is alone.
         let! probe = fetchMe (SessionRoute.relative Me) |> Async.AwaitPromise
         if not probe.reachable then
             dispatchRef (ConnectFailedMsg (App.ChannelFault.describe (App.ChannelUnreachable probe.detail)))
         elif not probe.authorized then
             // The peer id rides the login bounce so the Manager can witness which peer
-            // signed in for this session (docs/plans/07 — peer-scoped secrets).
+            // signed in for this session (Plan 07 — peer-scoped secrets).
             navigateTo (SessionRoute.relative Login + "?peer_id=" + urlEncode (PeerId.value peerId))
         else
             // Authenticated: the Claude panel's status is knowable now, and the read
@@ -1690,10 +1699,14 @@ let private start () =
                 { PeerId = peerId
                   DisplayName = displayName
                   Token = probe.token }
-            // Events come over HTTP in immutable chunks, so the browser's own cache serves
-            // history; only the growing tail chunk hits the Session Process. Availability hints
-            // still arrive over the data channel. The same-origin auth cookie rides each
-            // fetch, so no token in the URL (history/cache stay clean).
+            // Events come over HTTP by CURSOR: a client asks from the position it has folded
+            // through and is answered with a range whose bounds never move, so history is
+            // served out of this client's own Cache API store and only what is past its
+            // position reaches the Session Process. The HTTP cache holds none of it — every
+            // response on that surface is `no-store`, because a second copy there would be a
+            // spare nobody reads. Availability hints still arrive over the data channel. The
+            // same-origin auth cookie rides each fetch, so no token in the URL (history stays
+            // clean).
             //
             // Both resilience policies are composed HERE, at the transport, and nowhere else:
             // `App.connect` is handed a feed that has already spent its retries, so the read
@@ -1722,7 +1735,7 @@ let private start () =
                     // A terminal's screen seeds this client's emulator. The transcript stays
                     // the record; this is the view, and a peer that arrives mid-session gets
                     // one frame instead of every byte the terminal ever printed.
-                    OnTerminalSnapshot = fun id seq screen -> screens.Snapshot id seq screen
+                    OnTerminalSnapshot = fun id keyframe -> screens.Snapshot id keyframe
                     // The model is the read position (see `ConnectOptions.ReadPosition`):
                     // `latestModel` is kept current by `setState`, so a fold rolled back by
                     // a racing doc update is visibly behind and gets re-read.

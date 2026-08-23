@@ -150,31 +150,6 @@ let reposVisibleAt (backend: SandboxBackend) (hostReposDir: string) : string =
     | SrtBackend -> hostReposDir
     | DockerBackend -> "/repos"
 
-/// The checkout path a repo verb ANSWERS with: relative to where a terminal starts, when the
-/// repos directory is under it.
-///
-/// `repos/octo/hello` is the whole path anybody in the session can act on, and it stays the
-/// same length however long the operator's data directory is. The absolute form is the same
-/// fact wearing the operator's home directory —
-/// `/Users/someone/.yession/sessions/40V9FY6MT534HDMBX6W5HS8PGR/workspace/repos/…` — which
-/// every answer then carries and nobody here can do anything with.
-///
-/// It is passable straight to `set_shell_profile`, which resolves it against the sandbox's
-/// own working directory: the same root a terminal opens in, which is what makes a relative
-/// path mean anything. That is the abstraction — the absolute path is the SANDBOX's business
-/// and never has to leave it.
-///
-/// Falls back to the absolute path when the repos directory is NOT under the terminal's
-/// working directory: the docker backend, whose workspace is the image's and whose repos
-/// arrive on a bind mount at `/repos`, and any named sandbox reaching the shared directory
-/// from its own workspace. A relative path that is only true somewhere else is worse than a
-/// long one.
-let reposReachedFrom (workingDirectory: string option) (visibleAt: string) : string =
-    match workingDirectory with
-    | Some cwd when visibleAt.StartsWith (cwd.TrimEnd '/' + "/") ->
-        visibleAt.Substring ((cwd.TrimEnd '/').Length + 1)
-    | _ -> visibleAt
-
 let policyFor
     (backend: SandboxBackend)
     (ambient: Map<string, string>)
@@ -418,8 +393,7 @@ module HostSandbox =
                     async {
                         let env = mergeEnv policy.Env exec.Env
                         let cwd =
-                            exec.WorkingDirectory
-                            |> Option.orElse policy.WorkingDirectory
+                            SandboxPath.resolvedFrom policy.WorkingDirectory exec.WorkingDirectory
                             |> Option.defaultValue ""
                         return Ok (children.Spawn (exec.Executable, exec.Arguments, cwd, env) onChunk)
                     }
@@ -434,8 +408,7 @@ module HostSandbox =
                                     async {
                                         let env = mergeEnv policy.Env exec.Env
                                         let cwd =
-                                            exec.WorkingDirectory
-                                            |> Option.orElse policy.WorkingDirectory
+                                            SandboxPath.resolvedFrom policy.WorkingDirectory exec.WorkingDirectory
                                             |> Option.defaultValue ""
                                         return Pty.spawn exec.Executable exec.Arguments cwd env cols rows onOutput
                                     })
@@ -599,7 +572,15 @@ module DockerSandbox =
                                           "AttachStdout", box true
                                           "AttachStderr", box true
                                           "Env", box (exec.Env |> Map.toList |> List.map (fun (k, v) -> sprintf "%s=%s" k v) |> List.toArray) ]
-                                        @ (match exec.WorkingDirectory with Some w -> [ "WorkingDir", box w ] | None -> [])
+                                        // Resolved against the container's own working
+                                        // directory, which is what it was CREATED with — so
+                                        // an exec naming nothing lands exactly where it
+                                        // always did, and one naming a relative directory
+                                        // means the same thing here as it does everywhere
+                                        // else in the session.
+                                        @ (match SandboxPath.resolvedFrom (Some workspaceTarget) exec.WorkingDirectory with
+                                           | Some w -> [ "WorkingDir", box w ]
+                                           | None -> [])
                                         |> createObj
                                     let! started = container.exec execOpts |> Interop.awaitPromise
                                     // Hijack the connection so stdin rides the same socket the
@@ -654,7 +635,9 @@ module DockerSandbox =
                                           "AttachStderr", box true
                                           "Tty", box true
                                           "Env", box (exec.Env |> Map.toList |> List.map (fun (k, v) -> sprintf "%s=%s" k v) |> List.toArray) ]
-                                        @ (match exec.WorkingDirectory with Some w -> [ "WorkingDir", box w ] | None -> [])
+                                        @ (match SandboxPath.resolvedFrom (Some workspaceTarget) exec.WorkingDirectory with
+                                           | Some w -> [ "WorkingDir", box w ]
+                                           | None -> [])
                                         |> createObj
                                     let! started = container.exec execOpts |> Interop.awaitPromise
                                     let! stream = started.start (createObj [ "hijack", box true; "stdin", box true ]) |> Interop.awaitPromise
@@ -676,6 +659,15 @@ module DockerSandbox =
                                     stream.on ("error", fun e -> ended.Settle (SandboxRunFailed (string e))) |> ignore
                                     return
                                         Ok
+                                            // Written whole. Docker's double-PTY proxy is
+                                            // known to drop data on large writes, which Warp
+                                            // answers by chunking container exec writes at
+                                            // 4KB with delays. It does not bite here yet
+                                            // because instrumentation goes in at launch
+                                            // rather than by typing, so the only large write
+                                            // is a very long command line — but a caller that
+                                            // starts streaming bytes through this should
+                                            // chunk rather than assume the write survives.
                                             { Write = fun text -> stream.write (box text) |> ignore
                                               Resize = fun c r -> execResize started r c
                                               // As with the piped exec: the Engine API cannot
@@ -929,6 +921,12 @@ module SrtSandbox =
     /// Writes are unchanged: allow-only, exactly the policy's paths, plus the temp
     /// directory srt points the sandbox at and the standard streams a process expects to
     /// be able to write.
+    ///
+    /// Measured, not assumed: wrap+spawn of a trivial command is indistinguishable with the
+    /// root deny on and off (~20ms wrap either way), and the same egress probes behave
+    /// identically — srt's proxy plumbing does not live anywhere the deny hides. So there is
+    /// no performance argument for trading this back for a curated list of denied roots,
+    /// which would fail open at the first root nobody thought to name.
     let configFor (tools: SrtTools) (policy: SandboxPolicy) : SrtConfig =
         let distinct (paths: string list) = paths |> List.distinct
         { DenyRead = [ "/" ]
@@ -1178,8 +1176,7 @@ module SrtSandbox =
                             try
                                 let env = mergeEnv policy.Env exec.Env
                                 let cwd =
-                                    exec.WorkingDirectory
-                                    |> Option.orElse policy.WorkingDirectory
+                                    SandboxPath.resolvedFrom policy.WorkingDirectory exec.WorkingDirectory
                                     |> Option.defaultValue ""
                                 // This sandbox's own filesystem policy rides every spawn:
                                 // the manager was initialized by whichever sandbox came
@@ -1209,8 +1206,7 @@ module SrtSandbox =
                                             try
                                                 let env = mergeEnv policy.Env exec.Env
                                                 let cwd =
-                                                    exec.WorkingDirectory
-                                                    |> Option.orElse policy.WorkingDirectory
+                                                    SandboxPath.resolvedFrom policy.WorkingDirectory exec.WorkingDirectory
                                                     |> Option.defaultValue ""
                                                 let! wrapped =
                                                     Interop.awaitPromise

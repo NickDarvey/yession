@@ -1,6 +1,6 @@
 module Yession.Tests.Terminals
 
-// Terminals on the WorkSandbox (docs/plans/12). Everything here runs in the CHEAP tier:
+// Terminals on the WorkSandbox (Plan 12). Everything here runs in the CHEAP tier:
 // the sandbox is a scripted `SessionEnvironment` record, so a block's whole lifecycle —
 // spawn, streamed output, exit code, transcript, events — is exercised deterministically
 // with no process, port, or native addon in the loop. What a real sandbox adds is covered
@@ -395,6 +395,25 @@ let private emulatorTests =
             Expect.isFalse (TerminalSize.isValid { Cols = 0; Rows = 24 }) "no columns is not a size"
             Expect.isFalse (TerminalSize.isValid { Cols = 80; Rows = -1 }) "nor are negative rows"
             Expect.isTrue (TerminalSize.isValid TerminalSize.default') "the default is always valid"
+
+        testCase "a size round-trips through the record a transcript writes it as" <| fun () ->
+            // The two halves of this run in different processes — the Session Process writes
+            // the record when it resizes a pty, a browser reads it to reshape the emulator
+            // composing that terminal's screen — so the format is only ever right if one of
+            // them cannot drift from the other.
+            let size = { Cols = 132; Rows = 43 }
+            Expect.equal (TerminalSize.format size) "132x43" "the asciicast `r` payload"
+            Expect.equal (TerminalSize.parse (TerminalSize.format size)) (Some size) "and it reads back"
+
+        testCase "a resize payload that is not a size is skipped, never guessed at" <| fun () ->
+            // A transcript is replayed by clients that did not write it, so an unreadable
+            // record is one to step over — the alternative is a screen reshaped to a number
+            // nobody wrote.
+            Expect.equal (TerminalSize.parse "") None "nothing is not a size"
+            Expect.equal (TerminalSize.parse "80") None "one dimension is not a size"
+            Expect.equal (TerminalSize.parse "80x24x2") None "nor are three"
+            Expect.equal (TerminalSize.parse "eighty x twenty-four") None "nor words"
+            Expect.equal (TerminalSize.parse "0x24") None "nor a dimension nothing can render"
 
         testCaseAsync "the no-op emulator answers everything without keeping a screen" <|
             async {
@@ -1401,14 +1420,31 @@ let private codecTests =
             let frames =
                 [ Terminal (TerminalRecord (terminalA, 7, { At = 1.0; Kind = TranscriptOutput; Data = "hi" }))
                   Terminal (TerminalTranscriptAvailable (terminalA, 42))
-                  // The screen a joining peer renders, and the seq it composes with.
-                  Terminal (TerminalSnapshot (terminalA, 42, "screen"))
+                  // The screen a joining peer renders: the seq it composes with, and the
+                  // geometry it was painted at.
+                  Terminal (TerminalSnapshot (terminalA, { Seq = 42; Cols = 120; Rows = 40; Screen = "screen" }))
                   // Live mode's two peer-authored frames (stage 2e).
                   Terminal (TerminalInput (terminalA, "\u001b[A"))
                   Terminal (TerminalResize (terminalA, 120, 40)) ]
             for frame in frames do
                 let encoded = Codec.toString codec frame
                 Expect.equal (Codec.fromString codec encoded) (Ok frame) ("round-trips: " + encoded)
+
+        testCase "a snapshot with no geometry is the size every terminal opens at" <| fun () ->
+            // The size was added to a frame that already existed, and a client's bundle is
+            // served over a cache it may not have refreshed. A snapshot written without it
+            // came from a Process that had resized nothing, so 80x24 is not a fallback guess
+            // here — it is what that screen was painted at.
+            let codec = Codec.sessionFrame Codec.string
+            let older =
+                """{"tag":"terminal","payload":{"kind":"snapshot","terminalId":"term-a",""" +
+                """"seq":42,"screen":"screen"}}"""
+            match Codec.fromString codec older with
+            | Ok (Terminal (TerminalSnapshot (_, keyframe))) ->
+                Expect.equal keyframe.Seq 42 "the fields it did carry are read"
+                Expect.equal keyframe.Screen "screen" "including the screen"
+                Expect.equal (keyframe.Cols, keyframe.Rows) (80, 24) "and the one it did not is the opening size"
+            | other -> failwithf "a snapshot written before the geometry must still read back, got %A" other
 
         testCase "the terminal commands and focus fields round-trip" <| fun () ->
             let codec = Codec.sessionFrame Codec.string
@@ -2173,7 +2209,8 @@ let private sourceTests =
                 let! snapshot = terminals.Snapshot id
                 let length = terminals.Lengths () |> List.tryFind (fst >> (=) id) |> Option.map snd
                 match snapshot, length with
-                | Some (seq, _), Some hinted -> Expect.equal seq hinted "one currency, or the client splices at the wrong line"
+                | Some keyframe, Some hinted ->
+                    Expect.equal keyframe.Seq hinted "one currency, or the client splices at the wrong line"
                 | other -> failwithf "expected a snapshot and a length, got %A" other
             }
 
@@ -2858,19 +2895,25 @@ let private latch () : (unit -> unit) * Async<unit> =
     Async.FromContinuations (fun (cont, _, _) -> if fired then cont () else resume <- cont)
 
 /// The argv `SetProfile` validates a directory with, as this fixture reads it back. The verb
-/// asks the sandbox to `cd` there and say where it landed, so this is also where a RELATIVE
-/// path acquires its meaning.
+/// asks the sandbox where it stands, to `cd` there, and where it landed — so this is also
+/// where a RELATIVE path acquires its meaning.
 let private validatedPath (exec: SandboxExec) : string option =
     match exec.Arguments with
-    | [ "-c"; body; "sh"; path ] when body.StartsWith "cd " -> Some path
+    | [ "-c"; body; "sh"; path ] when body.Contains "cd \"$1\"" -> Some path
     | _ -> None
 
 /// This fixture's sandbox opens in `/ws`, so that is what a relative path resolves against —
 /// standing in for the workspace a real terminal starts in.
 let private fixtureWorkspace = "/ws"
 
+/// What a spawn into this fixture really runs in: the backend's own job
+/// (`SandboxPath.resolvedFrom`), done here because this fixture stands in for a backend.
 let private resolvedIn (path: string) : string =
-    if path.StartsWith "/" then path else sprintf "%s/%s" fixtureWorkspace path
+    SandboxPath.resolvedFrom (Some fixtureWorkspace) (Some path) |> Option.defaultValue path
+
+/// The two lines `SetProfile`'s probe reads: where the sandbox stands, then where the `cd`
+/// landed. A real shell prints one per `pwd`.
+let private probeAnswer (resolved: string) : string = sprintf "%s\n%s\n" fixtureWorkspace resolved
 
 /// A sandbox that CAN host an instrumented shell, and that knows which directories it has.
 /// `present` is read on every call rather than captured, so a test can make a directory go
@@ -2889,9 +2932,10 @@ let private profileEnvironment (present: unit -> Set<string>) =
                         | Some path ->
                             let resolved = resolvedIn path
                             if exists resolved then
-                                // What `pwd` prints once `cd` has landed: the absolute answer,
-                                // which is the only thing the verb stores.
-                                onChunk (Stdout, resolved + "\n")
+                                // What the two `pwd`s print: where the sandbox stands, and
+                                // where the `cd` landed. The verb keeps the second said
+                                // relative to the first.
+                                onChunk (Stdout, probeAnswer resolved)
                                 0
                             else 1
                         | None -> 0
@@ -2906,7 +2950,9 @@ let private profileEnvironment (present: unit -> Set<string>) =
             fun exec _ _ onOutput ->
                 async {
                     ptySpawned.Add exec
-                    match exec.WorkingDirectory with
+                    // Resolved before it is looked for, exactly as a backend does it: what a
+                    // terminal is handed is a path in the session's vocabulary.
+                    match exec.WorkingDirectory |> Option.map resolvedIn with
                     | Some path when not (exists path) -> return Error (sprintf "chdir %s: no such directory" path)
                     | _ ->
                         return
@@ -2938,7 +2984,7 @@ let private blockingEnvironment () =
                     let exited =
                         match validatedPath exec with
                         | Some path ->
-                            onChunk (Stdout, resolvedIn path + "\n")
+                            onChunk (Stdout, probeAnswer (resolvedIn path))
                             async { return SandboxExited 0 }
                         | None ->
                             async {
@@ -2953,11 +2999,16 @@ let private blockingEnvironment () =
     environment, spawned, release
 
 let private shellProfileTests =
-    let checkout = "/ws/repos/octo/hello"
+    /// The checkout the way everything in this session says it: as a terminal reaches it,
+    /// which is what `add_repo` answers with and what the profile holds.
+    let checkout = "repos/octo/hello"
+    /// The same directory as this fixture's sandbox resolves it. The absolute form belongs
+    /// to the sandbox — no projection, note or answer under test may be wearing it.
+    let checkoutAt = resolvedIn checkout
     /// A manager over a sandbox that has the checkout and can host a shell.
     let fixture () =
         let log = newLog ()
-        let mutable present = Set.singleton checkout
+        let mutable present = Set.singleton checkoutAt
         let environment, ptySpawned = profileEnvironment (fun () -> present)
         let openTranscript, linesOf, _, _, readTranscript = recordingTranscripts ()
         let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
@@ -2998,7 +3049,7 @@ let private shellProfileTests =
                 // The profile probe asks the sandbox to `cd` there and say where it landed;
                 // everything else this fixture runs says nothing.
                 let environment, spawned =
-                    scriptedEnvironment (fun arg -> (if arg = checkout then [ Stdout, checkout + "\n" ] else []), 0)
+                    scriptedEnvironment (fun arg -> (if arg = checkout then [ Stdout, probeAnswer checkoutAt ] else []), 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
                 let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
@@ -3039,21 +3090,41 @@ let private shellProfileTests =
 
         // A path from `add_repo` is relative to where a terminal starts, and that is exactly
         // the root the sandbox resolves against — so what the repo tools answer with can be
-        // passed straight here. What gets STORED is always the absolute answer, so nothing
-        // downstream ever holds a path whose meaning depends on where somebody stood.
-        testCaseAsync "a relative path is resolved by the sandbox, and stored absolute" <|
+        // passed straight here, and comes back out of the projection unchanged.
+        testCaseAsync "a path from the repo verbs goes in as given, and is stored as it came" <|
             async {
                 let terminals, _, _, _, _ = fixture ()
-                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some "repos/octo/hello")
+                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
                 Expect.isOk set "the path the repo tools answer with is a path this takes"
-                // Asserted on what is STORED, not on where a shell then opened: a relative
-                // string kept in the projection would still open the right shell in this
-                // fixture, and would be a path whose meaning moves the moment anything else
-                // reads it — Plan 26's tree matching, or a restart replaying the log.
                 Expect.equal
                     (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
                     (Some checkout)
-                    "what the sandbox resolved, not what the caller typed"
+                    "one vocabulary, in and out"
+            }
+
+        // The operator's home directory is not a fact about this session, and every reader of
+        // the projection — the timeline note, the query, the tool's own answer — would carry
+        // it. So what the sandbox resolves is said back the way a terminal here reaches it.
+        testCaseAsync "an absolute path is stored the way a terminal reaches it" <|
+            async {
+                let terminals, _, _, _, _ = fixture ()
+                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkoutAt)
+                Expect.isOk set "an absolute directory the sandbox has is still a directory it has"
+                Expect.equal
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    (Some checkout)
+                    "the sandbox's own root never leaves the sandbox"
+            }
+
+        testCaseAsync "and the answer says that same path back" <|
+            async {
+                // An agent told it set the profile to a path in a vocabulary nothing else uses
+                // is an agent that will hand that path back to the next tool.
+                let terminals, _, _, _, _ = fixture ()
+                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkoutAt)
+                let said = set |> expect
+                Expect.isTrue (said.Contains (sprintf "start in %s." checkout)) "the answer names the reachable path"
+                Expect.isFalse (said.Contains checkoutAt) "and not the one only the sandbox can use"
             }
 
         testCaseAsync "a relative path that is nowhere in the sandbox is still refused" <|
@@ -3086,7 +3157,7 @@ let private shellProfileTests =
                 // The restart promise: the profile is folded from the durable log, exactly as
                 // the terminals left open are.
                 let log = newLog ()
-                let environment, ptySpawned = profileEnvironment (fun () -> Set.singleton checkout)
+                let environment, ptySpawned = profileEnvironment (fun () -> Set.singleton checkoutAt)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let replayed =
                     [ SessionEvent.ShellProfileSet
@@ -3190,11 +3261,25 @@ let private shellProfileTests =
                 // exists.
                 let terminals, _, _, _, _ = fixture ()
                 let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
-                let! _ = terminals.ClearProfilesUnder ActorRef.Agent "/ws/repos/octo"
+                let! _ = terminals.ClearProfilesUnder ActorRef.Agent "repos/octo"
                 Expect.equal
                     (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
                     None
                     "the profile goes with the tree"
+            }
+
+        testCaseAsync "a profile set with an absolute path goes with the tree too" <|
+            async {
+                // The cross-seam half, and the one that was broken: `remove_repo` names the
+                // tree as a TERMINAL reaches it, because that is the only path it has that
+                // anything else in the session can act on. A profile stored in any other
+                // vocabulary is a profile that comparison cannot see — it matched nothing,
+                // cleared nothing, and left every future terminal opening into a checkout
+                // that had been deleted.
+                let terminals, _, _, _, _ = fixture ()
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkoutAt)
+                let! cleared = terminals.ClearProfilesUnder ActorRef.Agent checkout
+                Expect.equal (cleared |> List.map SandboxName.value) [ "default" ] "the tree the repo verb named finds it"
             }
 
         testCaseAsync "it answers with the sandboxes it cleared" <|
@@ -3211,7 +3296,7 @@ let private shellProfileTests =
             async {
                 let terminals, _, _, _, _ = fixture ()
                 let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
-                let! cleared = terminals.ClearProfilesUnder ActorRef.Agent "/ws/repos/octo/hell"
+                let! cleared = terminals.ClearProfilesUnder ActorRef.Agent "repos/octo/hell"
                 Expect.isEmpty cleared "a prefix is not a parent"
                 Expect.equal
                     (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)

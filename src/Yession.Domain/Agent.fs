@@ -42,10 +42,13 @@ type AgentContextPack =
 
 type AgentResponseChunk = { Text : string }
 
-/// Token/cache usage the runner reports for one completed turn (Plan 04, Step 28).
-/// Telemetry only — never a durable session fact and never written to the event log.
-/// `None` on `AgentCompleted` when the runner reports no usage (scripted runners, or an
-/// SDK result with no usage block).
+/// Token/cache usage the runner reports for one turn (Plan 04, Step 28). Telemetry only —
+/// never a durable session fact and never written to the event log. `None` when the runner
+/// reports no usage (scripted runners, or an SDK result with no usage block).
+///
+/// Carried by BOTH endings, because a turn that stopped still spent what it spent — and the
+/// turn most worth costing is the long one that ran into something, not the short one that
+/// finished. A failure that reported nothing left that spend uncounted.
 type AgentUsage =
     { InputTokens         : int
       OutputTokens        : int
@@ -55,7 +58,7 @@ type AgentUsage =
 
 type AgentRunResult =
     | AgentCompleted of body: string * usage: AgentUsage option
-    | AgentFailed of reason: string
+    | AgentFailed of reason: string * usage: AgentUsage option
 
 type EnsureEnvironmentResult =
     | EnvironmentAvailable
@@ -583,6 +586,11 @@ type RunAgent = AgentContextPack -> AgentCapabilities -> AgentAbortSignal -> (Ag
 /// from a page read before the turn appends its own `AgentTurnStarted`, so
 /// `TerminalDigest.window` already reports every block that started or completed since the
 /// previous turn. The wake decides WHEN a turn runs; the digest is what it then reads.
+///
+/// There is deliberately no way to cancel a pending wake. The debt is DERIVED from the log
+/// rather than stored, which is what buys the restart-safety above — so nothing client-local
+/// could suppress it, and a cancellation would have to be a durable fact of its own. A person
+/// can always interrupt the turn a wake starts.
 module AgentWake =
 
     /// Due iff some BACKGROUND block completed at or after the last `AgentTurnStarted`.

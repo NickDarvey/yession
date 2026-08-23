@@ -708,7 +708,7 @@ module AgentTools =
               [ ToolField.optional
                     "cwd"
                     "string"
-                    "an absolute path inside the sandbox, e.g. \"/repos/hello-world\"; omit it to clear the profile"
+                    "a directory the sandbox has, said the way add_repo and the repos query say it, e.g. \"repos/octocat/hello-world\"; omit it to clear the profile"
                 ToolField.optional "sandbox" "string" "the work sandbox this is about; omit for the default one" ]
               (fun args ->
                   async {

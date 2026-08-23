@@ -5,6 +5,11 @@ module Yession.Tests.Acceptance
 // Domain/SessionProcess — every E2E-N is named in its test title); this file pins the
 // remaining acceptance items: the UI checklist, rendered from one representative model,
 // and the random peer display name.
+//
+// The `(E2E-N)` suffixes are the phase acceptance gates' scenario numbers, and they are
+// numbered PER PHASE — Phase 1's E2E-1 is the two-client draft, Phase 2's is the
+// conversational one-shot. The gate documents that held both lists are gone; the titles are
+// the index now, so a scenario's number means nothing without the phase beside it.
 
 open System
 open Fable.Pyxpecto

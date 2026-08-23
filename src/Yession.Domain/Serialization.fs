@@ -1331,12 +1331,18 @@ module Codec =
                         [ "kind", Encode.string "available"
                           "terminalId", terminalId.Encode id
                           "nextSeq", Encode.int nextSeq ]
-                | TerminalSnapshot (id, seq, screen) ->
+                // Flat rather than a nested keyframe object, so the two fields this frame
+                // has always carried keep their names and their places: a client served an
+                // older bundle out of its service-worker cache still reads the screen it
+                // knows how to read, and simply does not learn the size.
+                | TerminalSnapshot (id, keyframe) ->
                     Encode.object
                         [ "kind", Encode.string "snapshot"
                           "terminalId", terminalId.Encode id
-                          "seq", Encode.int seq
-                          "screen", Encode.string screen ]
+                          "seq", Encode.int keyframe.Seq
+                          "cols", Encode.int keyframe.Cols
+                          "rows", Encode.int keyframe.Rows
+                          "screen", Encode.string keyframe.Screen ]
                 | TerminalInput (id, data) ->
                     Encode.object
                         [ "kind", Encode.string "input"
@@ -1362,12 +1368,22 @@ module Codec =
                         (fun id nextSeq -> TerminalTranscriptAvailable (id, nextSeq))
                         (Decode.field "terminalId" terminalId.Decode)
                         (Decode.field "nextSeq" Decode.int)
+                // The size is OPTIONAL, and defaults to the size every terminal opens at.
+                // A frame written before it was carried is a frame from a Session Process
+                // that had not resized anything — so 80x24 is not a guess there, it is what
+                // that screen was painted at.
                 | "snapshot" ->
-                    Decode.map3
-                        (fun id seq screen -> TerminalSnapshot (id, seq, screen))
-                        (Decode.field "terminalId" terminalId.Decode)
-                        (Decode.field "seq" Decode.int)
-                        (Decode.field "screen" Decode.string)
+                    Decode.object (fun get ->
+                        TerminalSnapshot (
+                            get.Required.Field "terminalId" terminalId.Decode,
+                            { Seq = get.Required.Field "seq" Decode.int
+                              Cols =
+                                get.Optional.Field "cols" Decode.int
+                                |> Option.defaultValue TerminalSize.default'.Cols
+                              Rows =
+                                get.Optional.Field "rows" Decode.int
+                                |> Option.defaultValue TerminalSize.default'.Rows
+                              Screen = get.Required.Field "screen" Decode.string }))
                 | "input" ->
                     Decode.map2
                         (fun id data -> TerminalInput (id, data))
@@ -1811,6 +1827,13 @@ module TranscriptReplay =
     /// `"m"` is not a `TranscriptKind`, and it should not become one: no transcript on disk
     /// contains a marker. Chapters are a fact about the BLOCKS a terminal ran, folded from
     /// the event log at the moment a recording is assembled for a reader.
+    ///
+    /// Two residuals the player keeps, and neither is a reason to go back to the option. A
+    /// marker at exactly the cast's LAST event time is still dropped from the chapter list —
+    /// the UI filters on `time < duration`, strictly, and a marker that is the final event has
+    /// become the duration. That is a block that printed nothing, and the `"m"` event is in the
+    /// recording either way. And the control bar shows the raw poster time until the reader
+    /// first interacts, so a poster nudged past the final record reads a hair long before play.
     let castWithMarkers
         (header: TranscriptHeader)
         (records: (int * TranscriptRecord) list)

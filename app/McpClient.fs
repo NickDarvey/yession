@@ -119,6 +119,16 @@ module McpConnections =
 /// Ten seconds is chosen against a HUMAN plugging something in: long enough that a handful
 /// of sessions do not hammer a provider, short enough that "I plugged it in, ask again"
 /// is not advice anyone has to give.
+///
+/// And the GET stream stays unopened, not merely unbuilt. `list_changed` lands within one
+/// interval anyway, resources and prompts are unused, a long call's progress notifications
+/// ride the POST's own SSE response, and server→client requests are unsupported — so a
+/// stream alongside this poll would be two mechanisms noticing one fact. Nor can it replace
+/// the poll, which is also reachability, reconnect and the provider that appears thirty
+/// seconds late, and which a conforming server may refuse outright. Skipping the poll for a
+/// streamed connection is the only route back to one mechanism and is worse: it assumes
+/// every provider counts an open stream as liveness, which is exactly the assumption
+/// `examples/jumpstarter` had to be fixed for.
 let PollIntervalMs = 10000
 
 /// Build the connection manager.
@@ -352,7 +362,12 @@ let create () : McpConnections =
                         connection)
             // A removed server's connection is simply dropped, and its tools leave the
             // registry at the next turn. There is nothing to close: Streamable HTTP holds no
-            // socket between requests, and we open no GET stream.
+            // socket between requests, and we open no GET stream — and nothing closes a
+            // terminal. The control leg and a data leg a provider offered have separate
+            // lifetimes, joined one way by the attach ticket: withdrawing a server means no
+            // NEW stream can be acquired from it, never that bytes already flowing stop. A
+            // terminal outlives the declaration that produced it, and closing one does not
+            // disturb this connection.
             for connection in arrived do
                 let! _ = connect connection
                 ()

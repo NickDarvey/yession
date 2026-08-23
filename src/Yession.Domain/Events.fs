@@ -58,9 +58,11 @@ type SessionEvent =
     | EnvironmentStartFailed of EnvironmentStartFailed
     | EnvironmentStopRequested of EnvironmentStopRequested
     | EnvironmentStopped of EnvironmentStopped
-    // Command lifecycle (Step 13): commands run in the session environment through the
-    // scoped capability; output streams into the log so the command log is event-derived
-    // and read-only everywhere.
+    // Command lifecycle, retired. Nothing appends these any more: agent commands became
+    // terminal blocks, whose output belongs in the transcript sidecar rather than in the
+    // log a second time (`Environment.fs`, `Transcript.fs`). The cases stay because a
+    // persisted log written before that change still contains them — deleting them would
+    // make an existing session unreadable, not tidy the union.
     | CommandRequested of CommandRequested
     | CommandStarted of CommandStarted
     | CommandOutputReceived of CommandOutputReceived
@@ -168,6 +170,15 @@ and AgentTurnStarted =
 /// every turn's does — `TerminalBlockDigest` for terminal work, the tool roster for a roster
 /// change — so a wake carries the REASON and nothing else. A reason that carried results
 /// would be a second channel into the agent's context, free to disagree with the first.
+///
+/// A roster change is deliberately NOT one of these. Every reason here answers "whose work
+/// finished" and takes its actor from the party who queued it — which is what makes a woken
+/// turn a turn with credentials. A tool list changing queues nothing and belongs to nobody;
+/// the session records it as `ActorRef.System`, and `System` is not a credential the agent can
+/// call tools on. Borrowing the last turn's actor instead would make it the first wake whose
+/// actor did not queue the work — the agent calling a newly-appeared tool on somebody's
+/// credentials for something they never asked for. And the next turn rebuilds its roster
+/// regardless, so the wake would buy promptness, not correctness.
 and WakeReason =
     /// A command the agent asked to run in the background finished while it was not running.
     | CommandFinished

@@ -2,7 +2,7 @@ namespace Yession.Domain
 
 /// Collaborative session state shapes shared by the Session Process and the Browser
 /// Client. These are the model shapes only; the Yjs/Ylmish encoding that keeps them in
-/// sync lives in Sync.fs. See docs/design.md §2.2 and docs/plans/01-turn-scheduling.md.
+/// sync lives in Sync.fs. See docs/design.md §2.2 and Plan 01.
 
 /// A client's work-in-progress draft: the WIP tail, not yet queued. Keyed by its
 /// `Author` in `SyncedSessionState.Drafts`, so each client owns at most one — the cap is
@@ -93,7 +93,12 @@ type SharedBrief = { Body : string }
 
 /// Collaborative state synced via Ylmish.
 type SyncedSessionState =
-    { Drafts      : Map<PeerId, DraftState>
+    { /// Keyed by author, and that key is the invariant: one draft per client is
+      /// unrepresentable-otherwise, and two peers drafting across a partition cannot collide
+      /// because their keys differ. An ownerless "session draft", if one is ever wanted, is a
+      /// second optional slot beside `SharedBrief` — never a widened key here, which would
+      /// trade the structural cap for a runtime check and a reconciliation nobody has written.
+      Drafts      : Map<PeerId, DraftState>
       Queue       : Map<QueueId, QueuedMessage>
       /// The session's human-given title: collaborative text, so concurrent edits
       /// interleave and merge exactly like a draft body. Empty until first named.

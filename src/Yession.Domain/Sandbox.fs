@@ -91,7 +91,70 @@ type SandboxExec =
     { Executable : string
       Arguments : string list
       Env : Map<string, string>
+      /// Where the process runs, in the vocabulary everything outside the sandbox speaks
+      /// (`SandboxPath`): relative to where the sandbox puts a process, or absolute. The
+      /// BACKEND resolves it — see `SandboxPath.resolvedFrom` — because the sandbox is the
+      /// only thing that knows its own root. `None` = wherever the policy puts it.
       WorkingDirectory : string option }
+
+/// The path vocabulary everything OUTSIDE a sandbox speaks: a directory as a terminal in
+/// that sandbox reaches it — relative to where a shell there starts when it is under
+/// there, absolute when it is not.
+///
+/// `repos/octo/hello` is the whole path anybody in the session can act on, and it stays
+/// that length however long the operator's data directory is. The absolute form is the
+/// same fact wearing somebody's home directory —
+/// `/Users/someone/.yession/sessions/40V9FY6MT534HDMBX6W5HS8PGR/workspace/repos/…` — which
+/// every answer then carries and nobody who reads it can do anything with.
+///
+/// BOTH directions live here, in one module, because they are one fact seen twice: what
+/// `reachedFrom` hands out, `resolvedFrom` has to take back. Converted in two places they
+/// converted differently, and did — the repo verbs answered `repos/octo/hello` while the
+/// shell profile stored what the sandbox's `pwd` said, so the note about where terminals
+/// start wore the operator's home directory, and deleting that very checkout matched no
+/// profile and cleared none.
+module SandboxPath =
+
+    /// A path names a directory whether or not it carries a trailing slash, and which it
+    /// is says nothing about what it means.
+    let private trimmed (path: string) = path.TrimEnd '/'
+
+    /// An absolute path as a terminal REACHES it: relative to `root` when it is under
+    /// there, unchanged when it is not — a docker sandbox's `/repos` bind, a named
+    /// sandbox reaching the shared repos directory from its own workspace, anywhere else
+    /// on the filesystem. A relative path that is only true somewhere else is worse than
+    /// a long one.
+    ///
+    /// On a directory BOUNDARY, never a bare prefix: `/data/s/work` does not contain
+    /// `/data/s/workspace/repos`, and answering `space/repos` for it would be a path to
+    /// nowhere.
+    ///
+    /// The root ITSELF is `.` — the one relative path that is always true, and the only
+    /// other answer would be the absolute one this exists to keep out of sight.
+    let reachedFrom (root: string option) (path: string) : string =
+        match root with
+        | Some root when trimmed path = trimmed root -> "."
+        | Some root when path.StartsWith (trimmed root + "/") -> path.Substring ((trimmed root).Length + 1)
+        | _ -> path
+
+    /// The absolute directory a spawn actually runs in: `path` resolved against the
+    /// sandbox's own `root`. THE one place a relative path in this vocabulary acquires its
+    /// meaning, and it acquires it from the sandbox — the only thing that knows what its
+    /// root is.
+    ///
+    /// An absolute path is already an answer. `None` is a caller with no opinion, which is
+    /// the root itself.
+    let resolvedFrom (root: string option) (path: string option) : string option =
+        match path, root with
+        | None, _ -> root
+        | Some path, _ when path.StartsWith "/" -> Some path
+        // `reachedFrom`'s answer for the root itself, taken back — the two arms are one
+        // mapping, and a round trip that returned `/ws/.` would be that mapping losing.
+        | Some ".", Some root -> Some root
+        | Some path, Some root -> Some (sprintf "%s/%s" (trimmed root) path)
+        // A relative path and no root: the backend's own idea of where it stands is the
+        // only thing left, which is what an unconfined spawn has always used.
+        | Some path, None -> Some path
 
 /// How a sandboxed process ended.
 type SandboxRun =

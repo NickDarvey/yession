@@ -495,6 +495,12 @@ module Dom =
         /// The row's archive verb, and the archived row's way back. Both carry the session id.
         let archive = "data-archive"
         let unarchive = "data-unarchive"
+        /// Which build a live process is running: `build` on a session row's plumbing line,
+        /// `managerBuild` on the page's own header. Two hooks rather than one, because they
+        /// answer the same question about different processes and a reader comparing them
+        /// needs to tell which is which.
+        let build = "data-session-build"
+        let managerBuild = "data-manager-build"
         /// A filter or sort control. Carries a STABLE name (`show-archived`, `sort`) rather
         /// than the query it links to, so a swap can put focus back on the control that was
         /// pressed even though its href just changed.

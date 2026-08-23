@@ -1,7 +1,7 @@
 namespace Yession.Domain
 
 /// The per-terminal transcript: the durable, append-only record of everything a terminal
-/// produced and everything typed into it (docs/plans/12).
+/// produced and everything typed into it (Plan 12).
 ///
 /// It is deliberately NOT the event log. The event log records durable *facts* every
 /// client folds — a terminal that prints a gigabyte contributes four events there. The
@@ -192,7 +192,7 @@ module TranscriptRetention =
         elif incoming.Length <= room then { Keep = incoming; Dropped = 0 }
         else { Keep = incoming.Substring (0, room); Dropped = incoming.Length - room }
 
-/// How much of a terminal's append-only transcript one HTTP answer carries (docs/plans/22)
+/// How much of a terminal's append-only transcript one HTTP answer carries (Plan 22)
 /// — `EventChunk` for the terminal feed, and the same construction for the same reason.
 ///
 /// A transcript is read by CURSOR: a client sends the line it has folded through and the

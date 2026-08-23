@@ -410,7 +410,7 @@ let private processTests =
                 let port = launched |> expect
                 let pid =
                     match (pm.TryFind record.SessionId).Value.Status with
-                    | ProcessManager.Running (p, pid) ->
+                    | ProcessManager.Running (p, pid, _) ->
                         Expect.equal p port "the view reports the readiness port"
                         pid
                     | other -> failwithf "expected Running, got %A" other
@@ -450,7 +450,7 @@ let private processTests =
                 // child, and the session relaunches cleanly.
                 let crashPid =
                     match (pm.TryFind record.SessionId).Value.Status with
-                    | ProcessManager.Running (_, pid) -> pid
+                    | ProcessManager.Running (_, pid, _) -> pid
                     | other -> failwithf "expected Running before the crash, got %A" other
                 Expect.notEqual crashPid pid "resume spawned a fresh process"
                 let exited = pm.WaitForExit record.SessionId
@@ -591,13 +591,51 @@ let private uiRenderTests =
             let stopped = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.NotRunning }
             Expect.isTrue (stopped.Contains (Dom.attr Dom.Manager.launch "ui-render")) "stopped rows can launch (button carries the session id)"
             Expect.isTrue (stopped.Contains "UI &lt;Render&gt;") "display names are escaped"
-            let running = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.Running (8199, 42) }
+            let running = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.Running (8199, 42, Some "1.2.3-beta.4") }
             Expect.isTrue (running.Contains (Dom.attr Dom.Manager.stop "ui-render")) "running rows can stop"
             Expect.isTrue (running.Contains "href=\"http://127.0.0.1:8199/\"") "the open link is a plain URL to the child's port (no token — access is the OIDC bounce)"
             Expect.isTrue (running.Contains (Dom.attr Dom.Manager.session "ui-render")) "the row is a poll unit keyed by session id"
             let crashed = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.Exited (Some 1) }
             Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusExited)) "a crash is visible"
             Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.launch "ui-render")) "a crashed session can relaunch"
+
+        // Which build a live session is running had no answer anywhere. The Manager reads it
+        // off the readiness line to refuse a major skew and then dropped it, so the one
+        // process that knows what every session is executing published nothing — and a
+        // session that outlives a promotion keeps running the old image silently. The rule is
+        // the answer is ON the row, because a session runs the image it was spawned from and
+        // only a row-by-row reading shows which ones have moved.
+        testCase "a running row says which build it is running" <| fun () ->
+            let running =
+                ManagerUi.sessionRow
+                    PublicAccess.Loopback
+                    { Record = uiRecord; Status = ProcessManager.Running (8199, 42, Some "0.0.0-gf1ce52b") }
+            Expect.isTrue (running.Contains Dom.Manager.build) "the row carries the hook that marks it"
+            Expect.isTrue (running.Contains "0.0.0-gf1ce52b") "wearing the build the launch reported"
+
+        // The other half, and the one that keeps the first honest: an older bundle reports no
+        // version, and a placeholder there would read as an answer. AGENTS.md's version rule
+        // is the same one — never invent a version-shaped value for a build that cannot state
+        // one.
+        testCase "a launch that reported no build has none invented for it" <| fun () ->
+            let running =
+                ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.Running (8199, 42, None) }
+            Expect.isTrue (running.Contains "port 8199 · pid 42") "what is known is still said"
+            Expect.isFalse (running.Contains "pid 42 · ") "and nothing stands in for what is not"
+
+        // The Manager is the process that CANNOT roll forward on its own — it keeps the image
+        // it exec'd until a restart, so it is routinely the oldest build on the page, and the
+        // page that shows every session's build and not its own answers the question wrong.
+        testCase "the page says the Manager's own build" <| fun () ->
+            let html =
+                ManagerUi.page
+                    "app.css"
+                    PublicAccess.Loopback
+                    SessionQuery.defaults
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+                    []
+            Expect.isTrue (html.Contains Dom.Manager.managerBuild) "the header carries its own hook, distinct from a row's"
+            Expect.isTrue (html.Contains Yession.Host.Version.current) "and its own version, from the same place --version reads"
 
         testCase "the page is self-contained: an inline script drives it, no external sources" <| fun () ->
             let html =
@@ -643,7 +681,7 @@ let private uiRenderTests =
                 ManagerUi.sessionRow
                     PublicAccess.Loopback
                     { Record = { uiRecord with ArchivedAt = Some archivedAt }
-                      Status = ProcessManager.Running (8199, 42) }
+                      Status = ProcessManager.Running (8199, 42, Some "1.2.3-beta.4") }
             // The address is the discriminating assertion: the case above pins that a RUNNING
             // row carries exactly this href, so its absence here cannot pass vacuously.
             Expect.isFalse (both.Contains "http://127.0.0.1:8199/") "no address to reach it at"
@@ -1053,7 +1091,7 @@ let private uiFlowTests =
                 Expect.isTrue (row.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning)) "the row shows running"
                 let sessionPort =
                     match (pm.TryFind (SessionId.create "ui-1" |> expect)).Value.Status with
-                    | ProcessManager.Running (port, _) -> port
+                    | ProcessManager.Running (port, _, _) -> port
                     | other -> failwithf "expected Running, got %A" other
                 Expect.isTrue (row.Contains (sprintf "href=\"http://127.0.0.1:%d/\"" sessionPort)) "the open link is live (plain URL, no token)"
                 let! shell = Interop.getText (sprintf "http://127.0.0.1:%d/" sessionPort) |> Async.AwaitPromise
@@ -1089,7 +1127,7 @@ let private uiFlowTests =
                 // renders on the frame never shows a crash as a plain stop.
                 let crashPid =
                     match (pm.TryFind (SessionId.create "ui-1" |> expect)).Value.Status with
-                    | ProcessManager.Running (_, pid) -> pid
+                    | ProcessManager.Running (_, pid, _) -> pid
                     | other -> failwithf "expected Running before the crash, got %A" other
                 let beforeCrash = tables.Count
                 let exited = pm.WaitForExit (SessionId.create "ui-1" |> expect)
@@ -1128,7 +1166,7 @@ let private uiFlowTests =
                 let! opened = Interop.getText (baseUrl + "/sessions/open-1/open") |> Async.AwaitPromise
                 let launchedPort =
                     match (pm.TryFind sessionId).Value.Status with
-                    | ProcessManager.Running (port, _) -> port
+                    | ProcessManager.Running (port, _, _) -> port
                     | other -> failwithf "expected /open to have launched it, got %A" other
                 Expect.isTrue
                     (opened.Contains (sprintf "http://127.0.0.1:%d/" launchedPort))
@@ -1138,7 +1176,7 @@ let private uiFlowTests =
                 // which is what makes the URL safe to keep clicking.
                 let! again = Interop.getText (baseUrl + "/sessions/open-1/open") |> Async.AwaitPromise
                 match (pm.TryFind sessionId).Value.Status with
-                | ProcessManager.Running (port, _) ->
+                | ProcessManager.Running (port, _, _) ->
                     Expect.equal port launchedPort "the running session was not restarted"
                     Expect.isTrue (again.Contains (sprintf "http://127.0.0.1:%d/" port)) "same address"
                 | other -> failwithf "expected it to still be running, got %A" other
@@ -1173,7 +1211,7 @@ let private reapingTests =
                 let events = ResizeArray<string * (string * obj) list> ()
                 // A free port rather than a fixed one, like the fronted registry test below:
                 // the Manager must actually ANSWER on the origin it declares, because a
-                // launched session fetches OIDC discovery against it (docs/plans/10).
+                // launched session fetches OIDC discovery against it (Plan 10).
                 // Declaring one it does not answer on fails the launch, not the assertion.
                 let! managerPort = freePort ()
                 let origin = sprintf "http://127.0.0.1:%d" managerPort
@@ -1765,7 +1803,7 @@ let private mcpStreamTests =
     ]
 
 // -----------------------------------------------------------------------------
-// Session registry stream (docs/plans/09) — the Running set as full-snapshot
+// Session registry stream (Plan 09) — the Running set as full-snapshot
 // frames, published to whoever serves sessions (an operator's serving binding).
 // Codec, hub, and public-origin assembly are cheap tier; the SSE stream over a
 // real Manager + real children is verify tier.
@@ -1775,7 +1813,8 @@ let private registryEntry (id: string) (name: string) (port: int) (pid: int) : C
     { Id = SessionId.create id |> expect
       Name = name
       Port = port
-      Pid = pid }
+      Pid = pid
+      Build = Some "1.2.3-beta.4" }
 
 let private registryTests =
     testList "Session registry: codec, projection & public origin (Plan 09)" [
@@ -1793,7 +1832,7 @@ let private registryTests =
         // retained-hub mechanics it rides on are pinned once, with the MCP list.
         testCase "the registry frame is the Running sessions only, with the port and pid to reach them" <| fun () ->
             let views : ProcessManager.SessionView list =
-                [ { Record = record "alpha" "Alpha work"; Status = ProcessManager.Running (54321, 4242) }
+                [ { Record = record "alpha" "Alpha work"; Status = ProcessManager.Running (54321, 4242, Some "1.2.3-beta.4") }
                   { Record = record "beta" "Beta work"; Status = ProcessManager.NotRunning }
                   { Record = record "gamma" "Gamma work"; Status = ProcessManager.Exited (Some 1) } ]
             Expect.equal
@@ -1805,13 +1844,39 @@ let private registryTests =
                 { Sessions = [] }
                 "no sessions is the empty frame, which is the boot state a subscriber starts from"
 
+        // The registry is what a serving binding and the deployment's own tracker read, so the
+        // build belongs on the wire and not only on the page: "which build is this session
+        // running" is a question asked by scripts as much as by people.
+        testCase "the registry announces each running session's build" <| fun () ->
+            let views : ProcessManager.SessionView list =
+                [ { Record = record "alpha" "Alpha work"; Status = ProcessManager.Running (54321, 4242, Some "0.0.0-gf1ce52b") }
+                  { Record = record "beta" "Beta work"; Status = ProcessManager.Running (54322, 4243, None) } ]
+            Expect.equal
+                (ProcessManager.registryFrameOf views |> fun f -> f.Sessions |> List.map (fun e -> e.Build))
+                [ Some "0.0.0-gf1ce52b"; None ]
+                "what each launch reported, and nothing where it reported nothing"
+
+        // Back-compat both ways: a frame written before the field decodes rather than failing,
+        // and an absent build is absent on the wire rather than encoded as null.
+        testCase "a frame without the build field decodes, and an absent build is not written" <| fun () ->
+            let older =
+                """{"sessions":[{"id":"alpha","name":"Alpha work","port":54321,"pid":4242}]}"""
+                |> ControlWire.fromString ControlWire.sessionRegistryFrame
+                |> expect
+            Expect.equal (older.Sessions |> List.map (fun e -> e.Build)) [ None ] "an older peer is readable"
+            let written =
+                ControlWire.toString
+                    ControlWire.sessionRegistryFrame
+                    { Sessions = [ { registryEntry "alpha" "Alpha work" 54321 4242 with Build = None } ] }
+            Expect.isFalse (written.Contains "build") "nothing known, nothing said"
+
         testCase "a running row's open link carries the configured public address" <| fun () ->
             let access = PublicAccess.create "https://home.example.ts.net" "http://home.example.ts.net:{port}" |> expect
-            let running = ManagerUi.sessionRow access { Record = uiRecord; Status = ProcessManager.Running (8199, 42) }
+            let running = ManagerUi.sessionRow access { Record = uiRecord; Status = ProcessManager.Running (8199, 42, Some "1.2.3-beta.4") }
             Expect.isTrue (running.Contains "href=\"http://home.example.ts.net:8199/\"") "the open link is followable from a remote browser"
     ]
 
-// --- Public access: the deployment's two addresses as one value (docs/plans/09) ------------
+// --- Public access: the deployment's two addresses as one value (Plan 09) ----------------
 
 let private publicAccessTests =
     let sessionId = SessionId.create "ui-render" |> expect

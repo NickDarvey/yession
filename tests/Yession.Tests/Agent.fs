@@ -111,7 +111,7 @@ let private turnTests =
         testCaseAsync "a failed run produces AgentTurnFailed" <|
             async {
                 let log = newLog ()
-                let failing : RunAgent = fun _ _ _ _ -> async { return AgentFailed "boom" }
+                let failing : RunAgent = fun _ _ _ _ -> async { return AgentFailed ("boom", None) }
                 do! AgentTurn.run log failing AgentAbortSignal.none (fun _ _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId sessionId [ triggerItem ] [] None (AgentTurn.FromMessage trigger)
                 let! events = eventsOf log
                 Expect.equal
@@ -213,6 +213,40 @@ let private turnTests =
                 (projection.Items |> List.map (fun i -> i.Body, i.Status))
                 [ "agent run ended: error_during_execution", ConversationItemStatus.Failed ]
                 "the reason is the item's account of itself"
+
+        // Placement, which the body alone cannot pin. An agent message is created when the
+        // turn STARTS — before the model has spoken and before a single tool call — so a
+        // tool-only turn holds an empty item above every command it goes on to run. Joining
+        // the reason to that placeholder filed the account of a failure at the top of the
+        // work it ended: in one real session, a hundred and forty rows above it, directly
+        // under the message that had asked for it.
+        testCase "the reason a silent turn stopped is anchored where it stopped" <| fun () ->
+            let projection, _ =
+                ConversationProjection.applyEvents
+                    None
+                    [ envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId })
+                      envelope 9L (AgentTurnFailed { AgentTurnId = turnId; Reason = "Reached maximum number of turns (32)" }) ]
+                    ConversationProjection.empty
+            Expect.equal
+                (projection.Items |> List.map (fun i -> EventOffset.value i.Offset))
+                [ 9L ]
+                "the failure sits at the offset it happened at, not at the turn's first event"
+
+        // The other half of the same rule: a turn that DID speak keeps the place it spoke
+        // in. Its words were said there, and moving them to where the turn later died would
+        // reorder the conversation around a fact about the ending.
+        testCase "a turn that spoke keeps the place it spoke in" <| fun () ->
+            let projection, _ =
+                ConversationProjection.applyEvents
+                    None
+                    [ envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId })
+                      envelope 2L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "on it" })
+                      envelope 9L (AgentTurnFailed { AgentTurnId = turnId; Reason = "overloaded" }) ]
+                    ConversationProjection.empty
+            Expect.equal
+                (projection.Items |> List.map (fun i -> EventOffset.value i.Offset, i.Body))
+                [ 1L, "on it\n\noverloaded" ]
+                "the item stays where it was said, wearing the reason it stopped"
 
         testCase "a turn that fails before its message started still shows in the conversation" <| fun () ->
             let projection, _ =
@@ -871,9 +905,36 @@ let private modelChoiceTests =
             }
     ]
 
+// -----------------------------------------------------------------------------
+// What the SDK threw, and what a person is told it means. The adapter itself needs a
+// live model; this is the one decision in it that does not, and it is the decision a
+// reader of a stopped turn actually reads.
+// -----------------------------------------------------------------------------
+
+let private failureReasonTests =
+    testList "The reason a turn stopped" [
+        // Verbatim from a real session's event log. The SDK does not YIELD a non-success
+        // ending, it throws one, wrapping the CLI's sentence in its own — so the runner's
+        // own wording for a step ceiling never once reached a screen, and what a person read
+        // named the layer that spoke rather than the thing that happened.
+        testCase "the SDK's wrapper comes off, leaving what the CLI said" <| fun () ->
+            Expect.equal
+                (Yession.Host.Agent.sdkFailureReason
+                    "Claude Code returned an error result: Reached maximum number of turns (32)")
+                "Reached maximum number of turns (32)"
+                "the cause, not the layer that reported it"
+
+        testCase "a reason not wearing the wrapper passes through" <| fun () ->
+            Expect.equal
+                (Yession.Host.Agent.sdkFailureReason "agent run ended: error_during_execution")
+                "agent run ended: error_during_execution"
+                "unwrapping is for the wrapper, and nothing else"
+    ]
+
 let tests =
     testList "Agent" [
         turnTests
+        failureReasonTests
         wakeTests
         modelChoiceTests
         vocabularyTests

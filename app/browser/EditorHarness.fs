@@ -632,17 +632,32 @@ let private recordTyped (_terminal: TerminalId) (data: string) : unit = jsNative
 /// in a real browser: without it this bundle contains no xterm at all, and the browser tier
 /// silently proved nothing about the client's live screen — which is how a browser-only
 /// module-resolution failure got past it and into a release job.
-[<Emit("(function(f){ window.__snapshot = f })($0)")>]
-let private exposeSnapshot (f: string -> int -> string -> unit) : unit = jsNative
+[<Emit("(function(f){ window.__snapshot = (id, seq, screen, cols, rows) => f(id, seq, screen, cols ?? 80, rows ?? 24) })($0)")>]
+let private exposeSnapshot (f: string -> int -> string -> int -> int -> unit) : unit = jsNative
+
+/// Hand a terminal's lease to this peer WITHOUT a press, as the alt-screen flip does: a block
+/// takes the screen and the Session Process gives its author the keyboard. Exposed for the
+/// same reason the snapshot is — it is the arrival of a fact from elsewhere, and a test that
+/// could only reach live mode by pressing `take` could never exercise the route that has no
+/// press to make.
+[<Emit("(function(f){ window.__take = f })($0)")>]
+let private exposeTake (f: string -> unit) : unit = jsNative
 
 do
     dressShell Style.app
+    // Taking the keyboard is answered by the Session Process, which appends the lease event
+    // and sends it back — so here the harness appends it to the projection itself, through
+    // the same fold the real page uses. Without this the one act that puts a screen in front
+    // of a keyboard is `ignore` in the harness, and the browser tier cannot reach live mode
+    // except for the terminal that was born holding a lease.
+    let mutable takeRef : TerminalId -> unit = ignore
     let actions =
         { ViewActions.ssr with
             FocusPane = PaneShell.toPane
             FocusChat = PaneShell.toChatItem
             FocusWatch = PaneShell.toWatchToggle
             RevealBlock = fun id blockId -> PaneShell.revealBlock (TerminalId.value id) (BlockId.value blockId)
+            TakeTerminal = fun id -> takeRef id
             TypeIntoTerminal = recordTyped }
     // The app's own player sync, so a block tab in the harness really plays its recording —
     // which is the point of driving this in a browser rather than asserting a string. The
@@ -664,9 +679,20 @@ do
         screens.Sync model
         PaneShell.setOpen model.TerminalsOpen
     dispatchRef <- dispatch
-    exposeSnapshot (fun id seq screen ->
+    takeRef <-
+        fun id ->
+            let taken =
+                SessionEvent.TerminalLeaseTaken
+                    { TerminalId = id; By = ActorRef.PeerRef model.Peer.PeerId; FromSeq = 0 }
+            model <- { model with Terminals = TerminalProjection.applyEvent model.Terminals taken }
+            render ()
+    exposeSnapshot (fun id seq screen cols rows ->
         match TerminalId.create id with
-        | Ok terminal -> screens.Snapshot terminal seq screen
+        | Ok terminal -> screens.Snapshot terminal { Seq = seq; Cols = cols; Rows = rows; Screen = screen }
+        | Error _ -> ())
+    exposeTake (fun id ->
+        match TerminalId.create id with
+        | Ok terminal -> takeRef terminal
         | Error _ -> ())
     render ()
     // The shell harness drives the real view, so it gets the real shell plumbing too — a

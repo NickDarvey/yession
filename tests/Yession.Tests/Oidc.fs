@@ -417,7 +417,7 @@ let private opTests =
                 let subject : string = verified.payload?sub
                 Expect.equal subject "local" "the ID token's subject is the local user"
                 let attribution : string = verified.payload?yession_attribution
-                Expect.equal attribution "unattributed" "localhost access is unattributed (docs/plans/07)"
+                Expect.equal attribution "unattributed" "localhost access is unattributed"
 
                 // Replay: the same code again -> invalid_grant.
                 let! replay = postFormRaw decoded.TokenEndpoint (tokenForm code client.ClientSecret verifier) |> Async.AwaitPromise

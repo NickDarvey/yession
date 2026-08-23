@@ -2,8 +2,9 @@ module Yession.Tests.Properties
 
 // Step 18 — the Phase 3 concurrency contract as Hedgehog properties.
 //
-// Invariants 1–7 from docs/plans/01-turn-scheduling.md, each as one `property {}`
-// block over generated N-peer schedules. The system under test is the REAL machinery:
+// The seven turn-scheduling invariants, each as one `property {}` block over generated
+// N-peer schedules — every test name spells its invariant out in full, so the names are
+// the index. The system under test is the REAL machinery:
 // real client programs (withYlmish) on their own Yjs docs, and the real
 // `Scheduler.create` drain over an in-memory event log — no WebRTC, no HTTP. Delivery
 // is an explicit op, so peers can stay arbitrarily stale; the agent is a
@@ -138,7 +139,7 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
                         cont result
                 onChunk { Text = "thinking" }
                 pendingRelease <- Some (fun () -> resume (AgentCompleted ("turn done", None)))
-                signal.OnAbort (fun () -> resume (AgentFailed "aborted")))
+                signal.OnAbort (fun () -> resume (AgentFailed ("aborted", None))))
 
     let mintTurnId =
         let mutable n = 0
@@ -330,7 +331,7 @@ let private consumedIdsOf (r: CaseResult) : string list =
     r.Events |> List.choose QueueDrain.consumedOf
 
 // --- Draft plan invariant 4: clean send ------------------------------------------------
-// docs/plans/03-one-draft-per-client.md, invariant 4:
+// The one-draft-per-client invariant 4:
 //   a send removes exactly the sender's slot and appends exactly one queue entry with the
 //   snapshotted body; later edits to the (re-materialised) slot never mutate the queue
 //   entry. One real client program over its Yjs doc — `SendDraftMsg` is the only moving
@@ -392,9 +393,10 @@ let private draftInvariant4 =
             Expect.equal (Map.count decoded.Queue) (List.length snapshots)
                 "exactly one queue entry per send"
             // Every send's snapshot survives verbatim through all later slot edits, and each
-            // entry is attributed to the slot owner (owner-sends). The queue body is read from
-            // the doc (the drain's read); the re-materialised draft fragment is a distinct Y
-            // type, so a later slot edit cannot alias into the sent entry.
+            // entry is attributed to the author, whoever sent it — any co-editor may send, so
+            // this is not a defence of owner-sends. The queue body is read from the doc (the
+            // drain's read); the re-materialised draft fragment is a distinct Y type, so a
+            // later slot edit cannot alias into the sent entry.
             for (qid, snapshotBody) in snapshots do
                 match decoded.Queue |> Map.tryFind (QueueId.create qid |> expect) with
                 | Some entry ->
