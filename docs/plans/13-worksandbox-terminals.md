@@ -7,7 +7,7 @@
 > under [What this plan leaves open](#what-this-plan-leaves-open); see
 > [Delivery](#delivery) for the split it shipped as.
 > Builds directly on the sandbox seam from
-> [PR #73](https://github.com/NickDarvey/yession/pull/73) (`CreateSandbox`,
+> [PR #73](https://github.com/trinketworks/yession/pull/73) (`CreateSandbox`,
 > session-owned WorkSandbox, `SandboxProcessHandle` with piped stdin).
 >
 > Deviations taken while implementing PR 1 are recorded in

@@ -43,7 +43,9 @@ input is repointed at devenv's own source substituted from `cache.nixos.org`; on
 the committed `devenv.yaml` with the normal github input is used), puts the `devenv` CLI on
 PATH, and warm-builds. The SessionStart hook (`.claude/settings.json`) re-runs it with
 `--hook`, which refreshes `devenv.local.yaml` and settles `devenv.lock` (the local override
-makes devenv rewrite that committed file on every run; `.gitignore` says how it is handled).
+makes devenv rewrite that committed file on every run; `.gitignore` says how, and
+`tests/Yession.Tests/LockSource.fs` is what fails the pull request if a store path ever reaches
+the committed copy).
 
 Then use the task scripts (`devenv shell -- <task>`, or bare inside the shell): `check` /
 `build` / `verify`. `restore`

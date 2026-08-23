@@ -2,7 +2,7 @@
   # Installable packages and a dev shell for Yession.
   #
   # `packages.*` are built directly from nix/packages.nix — NO devenv involved — so
-  # `nix build .#yession` / `nix profile install github:NickDarvey/yession` / `nix run` are
+  # `nix build .#yession` / `nix profile install github:trinketworks/yession` / `nix run` are
   # pure and resolve with only the nixpkgs input (no `github:cachix/devenv`, no DEVENV_ROOT).
   # `devShells.default` is the devenv environment (for `nix develop`); it, and only it, uses the
   # `devenv` input. devenv.nix imports the same nix/packages.nix, so the two never diverge.

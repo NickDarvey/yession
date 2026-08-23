@@ -1,7 +1,7 @@
 # The installable Nix artifacts, defined independently of devenv so BOTH devenv.nix (as its
 # `outputs`) and flake.nix (as `packages.*`) can consume them from one place. Keeping them out
 # of devenv's module system is what makes `nix build .#yession` pure — no `devenv` input, no
-# DEVENV_ROOT, no GitHub — so `nix profile install github:NickDarvey/yession` works for
+# DEVENV_ROOT, no GitHub — so `nix profile install github:trinketworks/yession` works for
 # consumers. (The flake still uses devenv for `devShells`/`nix develop`, not for packages.)
 #
 # All compile/bundle/assemble logic lives in tasks.fsx; these derivations only fetch deps
