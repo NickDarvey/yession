@@ -1278,6 +1278,56 @@ let editorTests =
                 let! after = await (page.EvaluateAsync<string> "() => document.activeElement?.getAttribute('data-terminal-screen')")
                 Expect.equal after before "Tab types a tab; it does not leave the terminal"
             }
+        // Taking the keyboard is the whole of what live mode is, and the keyboard has to
+        // follow it. Only a browser can answer this: both routes into live mode remove the
+        // element that had focus in the render they arrive on — `take` removes itself, and the
+        // lease landing replaces the command line with the lease bar — so what is under test
+        // is where focus ends up after a DOM swap, which is not a fact any rendered string
+        // holds.
+        editorCase "taking a terminal puts the keyboard in it" (EDITOR_PORT + 16) <| fun page ->
+            async {
+                // `term-harness` is the pane's opening tab, and it holds no lease: a terminal
+                // in block mode, which is where somebody who wants to type is standing. Not
+                // clicked — activating the tab you are already on is the PIN gesture.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-take='term-harness']")
+
+                // The press that hands this peer the lease — and removes itself doing it.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-take='term-harness']")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.getAttribute('data-terminal-screen') === 'term-harness'""")
+
+                // …and it is really the keyboard, not merely a focus ring: what is typed now
+                // reaches the pty rather than the composer that used to be there.
+                do! awaitU (page.Keyboard.PressAsync "ArrowUp")
+                let! typed = await (page.EvaluateAsync<string> "() => window.__typed || ''")
+                Expect.equal typed "\u001b[A" "a key pressed after the take reaches the terminal"
+            }
+        // The other route in, and the reason the focus move lives in the render loop rather
+        // than on the press: a block that takes the screen hands its author the keyboard with
+        // nobody pressing anything. Focus that SURVIVED that render is not stranded and must
+        // not be taken — a terminal going full-screen three tabs away is not a reason to yank
+        // somebody's caret out of the message they are writing.
+        editorCase "a terminal going live does not take the keyboard from what someone is writing" (EDITOR_PORT + 17) <| fun page ->
+            async {
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-take='term-harness']")
+
+                // Somebody's keyboard is somewhere else in the pane — on the splitter, which
+                // is rendered whatever the terminal is doing and survives this render.
+                do! awaitU (page.FocusAsync "#shell [data-term-resize]")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.hasAttribute('data-term-resize') === true""")
+
+                // The lease arrives on its own, as the alt-screen flip delivers it.
+                do! awaitU (page.EvaluateAsync "() => window.__take('term-harness')")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-harness']")
+                let! kept =
+                    await (page.EvaluateAsync<string> "() => document.activeElement?.outerHTML?.slice(0, 60) ?? 'NOTHING'")
+                Expect.stringContains kept "data-term-resize" "a lease landing leaves focus that survived the render where it was"
+            }
         // The DVR (Plan 14, stage 7). What only a browser can answer: that rewinding a LIVE
         // terminal really mounts a player over what it has recorded so far — the same player
         // and the same cast a finished terminal's replay uses, which is what "rewound like

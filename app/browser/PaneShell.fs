@@ -64,6 +64,34 @@ let toChatItem (tabKey: string) : unit = jsNative
 })""")>]
 let toWatchToggle () : unit = jsNative
 
+/// Hand focus to the live screen when this peer has just become the one typing into it.
+///
+/// Taking the keyboard is the whole of what live mode IS, and until this the keyboard did not
+/// follow it. Both routes in remove the focused element in the same render they arrive on:
+/// pressing `take` removes the `take` button, and the lease landing replaces the command line
+/// with the lease bar — so whichever of the two had focus is gone and focus falls to `body`.
+/// The person then types into nothing, which is indistinguishable from a terminal that does
+/// not work.
+///
+/// The `stranded` guard is `toWatchToggle`'s, and it is what makes this safe to run from the
+/// render loop rather than from a press: a lease can land on a terminal while its holder is
+/// reading somewhere else entirely (the alt-screen flip follows the block's AUTHOR, and the
+/// agent's blocks flip too), and yanking a caret out of the message composer because a
+/// terminal three tabs away went full-screen would be worse than the stranding this fixes.
+///
+/// `tabindex="0"` in the selector rather than the terminal's id: the screen renders in three
+/// variants and only the holder's takes keystrokes, so the focusable one is the only one this
+/// could ever mean. The pane shows one tab at a time, which is what makes that unambiguous —
+/// the same reason `toWatchToggle` names no terminal either.
+[<Emit("""requestAnimationFrame(() => {
+  const active = document.activeElement
+  const stranded = !active || active === document.body
+  if (!stranded) return
+  const next = document.querySelector('[data-terminal-screen][tabindex="0"]')
+  if (next) next.focus()
+})""")>]
+let toTerminalScreen () : unit = jsNative
+
 /// Scroll a terminal's history to one of its commands, and say which one (Plan 25, stage 3).
 ///
 /// The other half of "show in terminal": the model moves the reader's POSITION to that block,
