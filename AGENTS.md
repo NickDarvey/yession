@@ -36,8 +36,8 @@ repeat the process until master is green. Deviations stop the loop and get repor
 user before starting it — but no plan document is written to this repository. `docs/plans/`
 was deleted for the reason it is not coming back: a plan is right on the day it is written
 and unfalsifiable ever after, so it drifts silently while reading as current. What is worth
-keeping from one goes next to the code it governs, where a test can contradict it
-(`docs/plans.md` is the index of the deleted set, kept only to resolve the citations).
+keeping from one goes next to the code it governs, where a test can contradict it. A
+`Plan NN` tag surviving in a comment dates a decision; it does not point anywhere.
 
 `master` merges through a **merge queue**: auto-merge enqueues rather than merges, a green
 check never goes stale because master moved, and a check conclusion is not proof of either
