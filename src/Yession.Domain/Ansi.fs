@@ -11,6 +11,14 @@ namespace Yession.Domain
 /// the pty, where a real emulator does the job properly). The line between the two is
 /// deliberate: half an emulator would be a worse emulator and a worse parser.
 ///
+/// The line is drawn at what a STREAM can say exactly, and two things are on this side of
+/// it. A carriage return rewrites the line being written. A cursor-forward moves right over
+/// cells nothing has written, which is a run of blanks under any emulator — and it is here
+/// because this renders the LIVE SCREEN too, and a serialized screen is mostly that: the
+/// emulator writes every gap between two pieces of content as `ESC[nC`. Everything past
+/// that boundary — the other cursor moves, the erases — needs a grid to mean anything, and
+/// is dropped.
+///
 /// Pure and total: unknown escapes are dropped rather than rendered, because printing
 /// `ESC[?25l` at a person is strictly worse than printing nothing.
 type AnsiColour =
@@ -73,6 +81,13 @@ module AnsiColour =
         | IndexedColour _ -> None
 
 module Ansi =
+
+    /// The widest gap a cursor-forward is rendered as. Wider than any terminal anybody
+    /// renders, and the point is the ceiling rather than the number: `ESC[nC` is the one
+    /// sequence here that expands, `n` is written by whatever ran, and unbounded expansion of
+    /// attacker-reachable output is a way to turn a few bytes of a command's stdout into a
+    /// browser that stops responding.
+    let private cufCap = 1000
 
     /// Apply one SGR parameter list to a style. Total: a parameter this does not know
     /// leaves the style alone rather than failing the parse.
@@ -201,8 +216,34 @@ module Ansi =
                 if finalByte = 'm' then
                     closeRun ()
                     style <- applySgr style ps
-                // Every other CSI (cursor moves, erases, mode sets) is dropped: this
-                // parses output, it does not maintain a screen.
+                elif finalByte = 'C' then
+                    // Cursor forward, as that many spaces. The one cursor move a stream can
+                    // express exactly: it goes right, on the line being written, over cells
+                    // nothing has put anything in — which is a run of blanks however the
+                    // screen is maintained.
+                    //
+                    // It earns the exception because a SERIALIZED SCREEN is made of it. The
+                    // live viewport renders what `@xterm/headless` serializes, and the
+                    // serializer writes every gap between two pieces of content as `ESC[nC`
+                    // — so dropping it collapsed a full-screen program's whole layout to the
+                    // left margin, under a renderer that was only ever asked about a block's
+                    // output. Block output gains the same thing: a program that indents this
+                    // way now indents.
+                    //
+                    // Default 1 with no parameter, as the control does. Everything else still
+                    // goes: `CUU`, `CUP` and the erases need a grid to be meaningful, and the
+                    // serializer emits them only as the trailing cursor restoration a static
+                    // render has no cursor to restore.
+                    //
+                    // Bounded, because this is the one branch here that turns a few bytes of
+                    // output into many, and output is whatever a command printed. A real one
+                    // cannot exceed the screen's width — the serializer never writes a gap
+                    // wider than the terminal — so anything past `cufCap` is not a gap to
+                    // render, it is an amplifier.
+                    let by = match ps with | n :: _ when n > 0 -> min n cufCap | _ -> 1
+                    run <- run + System.String (' ', by)
+                // Every other CSI (the rest of the cursor moves, erases, mode sets) is
+                // dropped: this parses output, it does not maintain a screen.
                 i <- next
             elif c = '\027' && i + 1 < text.Length && (text.[i + 1] = ']' || text.[i + 1] = 'P') then
                 // OSC / DCS: a string-terminated sequence (BEL or ESC \). Dropped whole —

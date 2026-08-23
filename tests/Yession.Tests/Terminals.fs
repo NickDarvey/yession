@@ -1112,6 +1112,20 @@ let private ansiTests =
             let lines = Ansi.parse "\u001b[?25lhidden\u001b[2K\u001b]0;a title end"
             Expect.equal (lineTexts lines) [ "hidden end" ] "only the real text remains"
 
+        testCase "a cursor-forward is the gap it moves over" <| fun () ->
+            // A serialized screen is mostly this: `@xterm/headless` writes every gap between
+            // two pieces of content as `ESC[nC`, so a renderer that drops it puts a
+            // full-screen program's whole layout against the left margin.
+            Expect.equal (lineTexts (Ansi.parse "a\u001b[3Cb")) [ "a   b" ] "three cells of gap"
+            Expect.equal (lineTexts (Ansi.parse "a\u001b[Cb")) [ "a b" ] "no parameter is one"
+            Expect.equal (lineTexts (Ansi.parse "a\u001b[0Cb")) [ "a b" ] "and zero is one, as the control says"
+
+        testCase "a cursor-forward wider than any screen is bounded" <| fun () ->
+            // The one branch of this parser that turns a few bytes into many, over output
+            // whatever ran wrote. A gap wider than a terminal is not a gap.
+            let widest = (Ansi.parse "\u001b[999999Cx").Head.Spans.Head.Text
+            Expect.isTrue (widest.Length <= 1001) (sprintf "bounded, not %d characters" widest.Length)
+
         testCase "plain text is recoverable from a styled parse" <| fun () ->
             let text = "\u001b[32mgreen\u001b[0m\nsecond"
             Expect.equal (Ansi.plainText (Ansi.parse text)) "green\nsecond" "the words without the paint"
