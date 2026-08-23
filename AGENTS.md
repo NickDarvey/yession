@@ -187,7 +187,7 @@ WCAG 2.0 AA is the floor for every surface, not a follow-up:
 
 The version is computed from the commit history (policy at the top of `tasks.fsx`), never stored
 in a file. Every green master push publishes `1.0.0-beta.<n>`. To move the triple, put a marker in
-the commit message — for a squash-merged PR, its title or body:
+the commit message — for a squash-merged PR, its title or description:
 
 ```
 +semver: major   (or breaking, or a BREAKING CHANGE: footer)  -> 2.0.0-beta.0
@@ -213,11 +213,10 @@ a tag is cut per green master push, so nearly every release would; only an expli
 moves the triple.
 
 **Commit / PR messages.** Subjects follow conventional-commit style (`feat:`, `fix:`, `ci:`,
-`refactor:`, ...) — that is convention for readers, not the version input. PRs squash-merge with
-the PR title as the commit subject and the CONSTITUENT COMMIT MESSAGES concatenated as the body
-— the PR DESCRIPTION is discarded, so a marker that lives only there never reaches master (how
-the Plan 08 feature shipped as beta.114 instead of 1.1.0-beta.0). Put the marker on a line of
-its own in a COMMIT body on the branch; squash concatenation preserves commit bodies verbatim.
+`refactor:`, ...) — convention for readers, not the version input. A PR squash-merges as PR
+TITLE + PR DESCRIPTION, verbatim: the description IS the commit body, and branch commit
+messages are discarded. So the marker goes in the PR description, on a line of its own — and
+write that description as the commit message it becomes, not as notes for a reviewer.
 
 `version` needs full history: it refuses a shallow clone rather than emitting an
 already-released number (`git fetch --unshallow --tags`). `YESSION_VERSION` overrides the
