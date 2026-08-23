@@ -20,13 +20,23 @@ Boundaries: code/commits/PRs written normal.
 
 ## Contributing changes
 
-Read `.agents/skills/contributing-changes/SKILL.md` when completing a plan to integrate
-changes. Short version: ship each independently-shippable plan step as its own PR rather
-than banking them — the queue absorbs a moving master, but not conflict reconciliation, and
-that tax is superlinear; compare implementation to plan; if consistent (no interesting
-deviations, blockers, or uncompletable work), open PR with auto-merge, subscribe to PR
-events, then watch the master pipeline after merge — auto-fix failures and repeat the
-process until master is green. Deviations stop the loop and get reported instead.
+Read `.agents/skills/contributing-changes/SKILL.md` **before starting any change** — the
+first time a session is asked to build, fix, refactor or alter something, before the first
+edit. It decides how the work is split, and that is not a decision you can take afterwards.
+
+Short version: split the request into the smallest increments that each stand alone —
+builds, `check` passes, breaks nothing already merged — and ship each as its own PR rather
+than banking them. The queue absorbs a moving master, but not conflict reconciliation, and
+that tax is superlinear. Then compare what you built to what was asked; if consistent (no
+interesting deviations, blockers, or uncompletable work), open PR with auto-merge,
+subscribe to PR events, then watch the master pipeline after merge — auto-fix failures and
+repeat the process until master is green. Deviations stop the loop and get reported instead.
+
+**Plans are not artifacts.** Think however you need to, and say the shape of the work to the
+user before starting it — but no plan document is written to this repository. `docs/plans/`
+was deleted for the reason it is not coming back: a plan is right on the day it is written
+and unfalsifiable ever after, so it drifts silently while reading as current. What is worth
+keeping from one goes next to the code it governs, where a test can contradict it.
 
 `master` merges through a **merge queue**: auto-merge enqueues rather than merges, a green
 check never goes stale because master moved, and a check conclusion is not proof of either

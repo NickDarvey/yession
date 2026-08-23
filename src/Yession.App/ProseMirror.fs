@@ -9,6 +9,11 @@ open Yjs
 /// invariant, master #7). Hand-written for the small used surface rather than full ts2fable
 /// generation (the `Fable.Yjs` precedent, scaled down). Opaque PM values we only pass around
 /// are `obj`; only the members actually called are typed.
+///
+/// TipTap was rejected here: its value is JS-side ergonomics that F# does not collect, it drags
+/// a heavier dependency tree, and its own mount lifecycle would be a second thing fighting Lit
+/// for the editor's DOM. Raw ProseMirror is the smaller surface and the one `y-prosemirror` is
+/// written against.
 module ProseMirror =
 
     type Node = obj

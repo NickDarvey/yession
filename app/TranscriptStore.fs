@@ -273,7 +273,7 @@ let openStore (directory: string) : TranscriptStore =
                     | _ -> None) }
 
 /// The store as the session's HTTP read surface: a cursor, the ranges it resolves to, and the
-/// keyframes beside them (docs/plans/22).
+/// keyframes beside them.
 ///
 /// Here rather than at the composition root, because every rule in it is a rule about THIS
 /// state — what a terminal id has to be, what a cursor means, what a range that runs off the

@@ -16,6 +16,14 @@ module Yession.Host.Commands
 //
 // What stays in the entry is composition: which services exist, and handing the table to the
 // gate the Host owns.
+//
+// Every command here is ENSURE-shaped: re-running one with the same arguments converges on the
+// same state, records nothing, and says so. That is not politeness — the declarative form of
+// this API is a fold of a config file into these commands on every boot, so a command that
+// accumulated instead of converging would clone a repo twice, or restart a sandbox somebody is
+// working in, each time the session came up. `add_repo` answers with the current listing when
+// the checkout is already there; `start_work_sandbox` hands back the running sandbox and
+// refuses only when the configuration differs.
 
 open Yession.Domain
 open Yession.SessionProcess

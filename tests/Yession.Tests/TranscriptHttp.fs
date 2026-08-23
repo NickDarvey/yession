@@ -1,6 +1,6 @@
 module Yession.Tests.TranscriptHttp
 
-// A terminal's transcript over HTTP, read by CURSOR (docs/plans/22): a client sends the line
+// A terminal's transcript over HTTP, read by CURSOR (Plan 22): a client sends the line
 // it has folded through (`GET /terminals/{t}/after/{n}?token=…`) and the server redirects to
 // the range it chose (`/terminals/{t}/{first}-{last}`), whose bytes never change because line
 // index IS sequence number and those bounds do not move.

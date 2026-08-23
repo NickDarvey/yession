@@ -395,7 +395,7 @@ module ControlWire =
                 { ConnectionResolveResponse.Kind = get.Required.Field "kind" connectionKind.Decode
                   ConnectionResolveResponse.Value = get.Required.Field "value" Decode.string }) }
 
-    /// One Running session in the registry stream (docs/plans/09): what an operator's
+    /// One Running session in the registry stream: what an operator's
     /// serving binding needs to expose it — the OS-assigned port — plus identity for
     /// display and the pid for supervision-side correlation.
     type SessionRegistryEntry =

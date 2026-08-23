@@ -671,6 +671,15 @@ module DockerSandbox =
                                     stream.on ("error", fun e -> ended.Settle (SandboxRunFailed (string e))) |> ignore
                                     return
                                         Ok
+                                            // Written whole. Docker's double-PTY proxy is
+                                            // known to drop data on large writes, which Warp
+                                            // answers by chunking container exec writes at
+                                            // 4KB with delays. It does not bite here yet
+                                            // because instrumentation goes in at launch
+                                            // rather than by typing, so the only large write
+                                            // is a very long command line — but a caller that
+                                            // starts streaming bytes through this should
+                                            // chunk rather than assume the write survives.
                                             { Write = fun text -> stream.write (box text) |> ignore
                                               Resize = fun c r -> execResize started r c
                                               // As with the piped exec: the Engine API cannot
@@ -924,6 +933,12 @@ module SrtSandbox =
     /// Writes are unchanged: allow-only, exactly the policy's paths, plus the temp
     /// directory srt points the sandbox at and the standard streams a process expects to
     /// be able to write.
+    ///
+    /// Measured, not assumed: wrap+spawn of a trivial command is indistinguishable with the
+    /// root deny on and off (~20ms wrap either way), and the same egress probes behave
+    /// identically — srt's proxy plumbing does not live anywhere the deny hides. So there is
+    /// no performance argument for trading this back for a curated list of denied roots,
+    /// which would fail open at the first root nobody thought to name.
     let configFor (tools: SrtTools) (policy: SandboxPolicy) : SrtConfig =
         let distinct (paths: string list) = paths |> List.distinct
         { DenyRead = [ "/" ]

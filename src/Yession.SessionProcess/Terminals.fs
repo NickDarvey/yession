@@ -3,7 +3,7 @@ namespace Yession.SessionProcess
 open System
 open Yession.Domain
 
-/// One terminal's durable transcript, as a capability (docs/plans/12). The Session
+/// One terminal's durable transcript, as a capability (Plan 12). The Session
 /// Process appends to it BEFORE broadcasting a record, so a dropped frame costs latency
 /// and never the record — the same "durability before visibility" rule the event log and
 /// the doc sidecar are written under.
@@ -601,6 +601,13 @@ module SessionTerminals =
     ///
     /// Newline survives and becomes `\r`, because a heredoc IS a multi-line command and the
     /// shell reads its body from the lines that follow.
+    ///
+    /// Two repairs are not here, and their absence is a known edge rather than an oversight. A
+    /// multi-line command is not wrapped in bracketed paste, so a shell that enabled it sees
+    /// several submissions rather than one; and nothing force-clears bracketed paste or the
+    /// alternate screen when a block completes. A command that dies inside a remote TUI
+    /// therefore leaves the shell in a mode it never set and cannot clear — a terminal wedged in
+    /// the alt screen is one nobody can type into again, and today only closing it recovers.
     let internal writeFor (command: string) : string =
         let kept =
             command
@@ -665,7 +672,8 @@ module SessionTerminals =
           /// Keystrokes are never written to the transcript. The shell echoes what is typed at
           /// it, so ordinary typing is already captured as output; what recording these would
           /// add is exactly what the terminal deliberately did not display — a password at an
-          /// `ssh` prompt. See "Durable capture" in the plan.
+          /// `ssh` prompt. `TerminalFrame.TerminalInput` (Yession.Domain/Transport.fs) carries
+          /// the full rationale, including why the narrower echo-aware rule is unimplementable.
           Input : TerminalId -> ActorRef -> string -> bool
           /// Type into an UNINSTRUMENTED terminal, taking the lease first (Plan 19). The
           /// agent's hand in a source that has no blocks — and the reason a provider's own
@@ -874,6 +882,12 @@ module SessionTerminals =
         /// What each open terminal's source declared it can do (Plan 16, part D). Consulted
         /// where a capability is actually USED — before running a block, before resizing —
         /// rather than being re-derived from whether a rearmer happens to exist.
+        ///
+        /// Never removed when a terminal closes. A source's declaration is a fact about the
+        /// RECORDING, not about the live device: the questions that read this — can it be
+        /// instrumented, does it have blocks, what does its tail mean — are asked of closed
+        /// terminals too. Forgetting it made a closed serial port answer "this runs commands as
+        /// blocks" about a live-only recording sitting right there.
         let sources = Collections.Generic.Dictionary<string, SourceCapabilities> ()
         /// Whether this terminal's source claimed it can carry the OSC 133 bootstrap. An
         /// unknown terminal answers `true`: everything that existed before sources did was a
@@ -2281,6 +2295,12 @@ module TerminalScheduler =
 /// UNENFORCEABLE, because the agent had a second door with no gate on it. A gate only becomes
 /// real when there is one door, which is this — and the classifier (Plan 23) inherits exactly
 /// that property: it reads every command because every command comes through here.
+///
+/// A block is owned by the session, not by the turn that asked for it. Aborting a turn abandons
+/// this wait and nothing else: the block runs on, its output lands in the transcript, and the
+/// next turn's digest reports it. The retired `execute_command` ran a process the turn owned, so
+/// an interrupt killed it — an audit trail with holes where somebody pressed stop is not an
+/// audit trail.
 module TerminalCommands =
 
     /// How long a RUNNING command is waited for: the same bound the retired `execute_command`

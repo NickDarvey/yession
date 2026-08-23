@@ -4,7 +4,7 @@ open Yession.Domain
 
 /// Placeholder that establishes the dependency on the shared domain library. The real
 /// Session Process (event log, Yjs document, Elmish loop, agent runtime, WebRTC
-/// protocol) is built up across later delivery steps. See docs/plans/00-init.
+/// protocol) is built up across later delivery steps.
 module Bootstrap =
 
     /// Smoke helper proving the shared domain vocabulary is reachable from the process.

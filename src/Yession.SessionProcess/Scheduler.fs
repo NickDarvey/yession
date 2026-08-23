@@ -6,7 +6,13 @@ open Yession.Domain
 /// the shared message queue, and the drain here is the linearization point of
 /// "accepted by the agent". Extracted from the Host composition root so the property
 /// harness (Step 18) drives the exact machinery production runs — no HTTP or WebRTC in
-/// the loop. See docs/plans/01-turn-scheduling.md.
+/// the loop.
+///
+/// Single-consumer is structural rather than cooperative: the Manager launches exactly one
+/// process per session (`ProcessManager.launch` refuses an already-running one), so there is
+/// no second drain to serialize against and none of what follows — exactly-once, snapshot
+/// fidelity, total order — is defended by anything in this file. A topology that ran two
+/// processes over one session's stores would break all three without a test going red.
 module Scheduler =
 
     /// The scheduler's record of the running agent turn: identity for interrupt
@@ -43,7 +49,7 @@ module Scheduler =
     /// Create the scheduler for one session. `initialConsumed` seeds the log-anchored
     /// dedup set (every QueueId already named by a `MessageSent` in the durable log —
     /// the restart case); the scheduler maintains it on its own appends thereafter.
-    /// `actorFor` resolves a connection to its attribution (docs/plans/07): the
+    /// `actorFor` resolves a connection to its attribution: the
     /// Manager-verified user behind the peer when one exists, the peer itself otherwise
     /// — drafts and queue entries stay keyed by `PeerId` (connection facts); attribution
     /// is applied here, at the durable-append boundary.

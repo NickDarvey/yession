@@ -46,7 +46,7 @@ let private idleTimeout =
     | Ok window -> window
     | Error e -> Cli.abort e
 
-// Who the humans at this Manager are (docs/plans/07): `--auth localhost` trusts the
+// Who the humans at this Manager are (Plan 07): `--auth localhost` trusts the
 // loopback interface (single-machine deployment), `--auth trusted-headers` trusts the
 // canonical x-yession-* identity headers an operator-run authenticating proxy asserts.
 // No `--auth` means nobody authenticates — choosing a trust rule is deliberate, and an
@@ -65,7 +65,7 @@ let private secretsMode =
     | Ok m -> m
     | Error e -> Cli.rejectValue cli e
 
-// How this deployment is reached from outside (docs/plans/09). Parsed once, HERE, so a
+// How this deployment is reached from outside (Plan 09). Parsed once, HERE, so a
 // combination that cannot work is a refused boot rather than links and redirect URIs that
 // point somewhere unreachable. Sessions inherit the same variables by env and parse them
 // the same way.

@@ -1,6 +1,6 @@
 namespace Yession.Domain
 
-/// Where Yession is reachable from OUTSIDE this machine (docs/plans/09).
+/// Where Yession is reachable from OUTSIDE this machine (Plan 09).
 ///
 /// Two facts have to hold together: the Manager's public origin — it is the OIDC issuer
 /// every session bounces its users through — and where each session's own port is

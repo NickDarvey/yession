@@ -5,11 +5,10 @@ module Yession.Host.RetainedHub
 // snapshots, never deltas, so a reconnect is the whole recovery protocol and one
 // connect-read-disconnect is a poll.
 //
-// Generic over the payload, exactly as `NotificationHub<'n>` is: one mechanism serves the MCP tool
-// list (`/control/mcp` — which MCP services exist is infrastructure, the same for every session)
-// and the session registry (`/sessions/stream` and the management page's rows). It publishes the
-// DOMAIN value; each route projects that to its own wire format, so one publish can serve
-// consumers that want different views of the same change.
+// Generic over the payload, exactly as `NotificationHub<'n>` is: one mechanism serves the session
+// registry (`/sessions/stream` and the management page's rows). It publishes the DOMAIN value; each
+// route projects that to its own wire format, so one publish can serve consumers that want
+// different views of the same change.
 //
 // Pure of any HTTP: a sink is `Sink<'a>` (the routes supply ones that encode + write SSE), so this
 // is unit-testable without a socket. Single-threaded (the Node event loop), so the mutable state

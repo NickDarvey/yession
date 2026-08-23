@@ -32,7 +32,7 @@ type SessionHost =
       /// clients use to join (`PeerHello.Token`) and read `/events`.
       MintPeerToken : unit -> string
       /// Mint a peer token carrying an explicit attribution — what `/me` does for a
-      /// browser whose cookie names a Manager-verified user (docs/plans/07).
+      /// browser whose cookie names a Manager-verified user.
       MintPeerTokenAs : PeerAttribution -> string
       Port : int
       Log : EventLog<SessionEvent>
@@ -107,7 +107,7 @@ let startFull
     (extraHttpRoutes: (Interop.IncomingMessage -> Interop.ServerResponse -> bool) option)
     (sessionId: SessionId)
     (auth: SessionAuth.Auth option)
-    // The path this session is served under (`""` at an origin root, docs/plans/09).
+    // The path this session is served under (`""` at an origin root).
     (mount: string)
     // The Manager's public origin, baked into the shell so a disconnected client knows
     // where to ask for this session back (Plan 11). None for a Manager-less session:
@@ -168,7 +168,7 @@ let startFull
             |> Map.iter (fun _ channel ->
                 Async.StartImmediate (channel.Send (EventLog (EventsAvailable offset))))
 
-        // Peer→user attribution (docs/plans/07), derived from the durable log so it is
+        // Peer→user attribution, derived from the durable log so it is
         // restart-safe by construction: every `PeerJoined` carrying a Manager-verified
         // user binds that peer, live joins update it through the append wrapper below,
         // and a departed peer keeps its last-known binding — a still-queued message from
@@ -779,7 +779,7 @@ let startFull
                     signalSessionEnded ()
                 })
 
-        // The event read surface (docs/plans/20): a client sends the offset it has folded
+        // The event read surface: a client sends the offset it has folded
         // through, and this answers with the bounds of what came next — an address whose
         // bytes never change, so the client can keep it, the growing tail included.
         //

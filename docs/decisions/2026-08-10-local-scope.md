@@ -1,9 +1,8 @@
 # An unattributed deployment owns credentials as itself, not as a browser
 
-> Decided 2026-08-10 · Superseded by nothing · Supersedes in part:
-> [plan 08](../plans/08-connections-and-claude-auth.md) decisions 1–2,
-> [plan 07](../plans/07-byo-user-authorization.md) "peer-scoped secrets" ·
-> Related: [deployment.md](../deployment.md) `--auth localhost`, `--secrets`
+> Decided 2026-08-10 · Superseded by nothing · Supersedes in part: the connections
+> design's decisions 1–2, and peer-scoped secrets from the trusted-header identity
+> design · Related: [deployment.md](../deployment.md) `--auth localhost`, `--secrets`
 
 ## Decision
 
@@ -47,8 +46,9 @@ the compiler enumerates every place that has to decide about it — which is how
 policy, the audit attributes and the injection walk all got their answer during this change
 rather than after it.
 
-Plan 08 decision 2 said "no pseudo-user", and this keeps that promise; what it revises is the
-conclusion drawn from it, that an unattributed deployment must therefore own by browser peer.
+The connections design's decision 2 said "no pseudo-user", and this keeps that promise; what it
+revises is the conclusion drawn from it, that an unattributed deployment must therefore own by
+browser peer.
 
 ## What it costs
 
@@ -72,7 +72,7 @@ too, not merely from the write path — left half-live, a stale token in some ol
 scope would shadow the new one at turn time. The operator's single corrective action is to
 click Connect once, which is exactly what a migration would have been trying to save.
 
-`PeerScope` remains a first-class scope for generic Plan 07 secrets. It has simply stopped
+`PeerScope` remains a first-class scope for generic secrets. It has simply stopped
 being a place a *connection* lives.
 
 ## The property that makes it cheap

@@ -78,6 +78,14 @@ type private JsToolAnswer =
       if (!byNamespace.has(d.ns)) byNamespace.set(d.ns, [])
       byNamespace.get(d.ns).push(built)
     }
+    // Every entry here is one of OUR in-process SDK servers, built from the registry. A
+    // declared external server never goes in this map, tempting as its one line is: a server
+    // the model reaches directly is a second door, and its calls skip the approval gate, the
+    // tool-use record and attribution — the whole of what `ToolUseLog` and `ToolStreams` wrap
+    // the merged registry to guarantee. It also decides who holds a provider's claim: reached
+    // through the proxy the claim belongs to the SESSION, so the terminal's write lease can
+    // arbitrate between the agent and a human; reached directly it belongs to the agent's own
+    // MCP session, and nobody can take the device off it.
     const mcpServers = {}
     for (const entry of byNamespace) {
       mcpServers[entry[0]] = sdk.createSdkMcpServer({ name: entry[0], version: '1.0.0', tools: entry[1] })

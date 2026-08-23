@@ -4,8 +4,8 @@ namespace Yession.Oidc
 /// a config flag: the provider core never knows which one is plugged in, so a BYO
 /// integration is a second value of this type, not a change to the provider. This slice
 /// ships three: deny-everything (`none`, the default), trust-localhost, and
-/// trusted-headers (docs/plans/07 — an operator-run authenticating proxy asserts the
-/// user in canonical `x-yession-*` headers).
+/// trusted-headers (an operator-run authenticating proxy asserts the user in canonical
+/// `x-yession-*` headers).
 
 /// The slice of the /authorize request a strategy may inspect.
 type AuthenticationContext =
@@ -78,7 +78,7 @@ module Strategy =
                         return Denied "the localhost strategy only authenticates loopback requests"
                 } }
 
-    /// The canonical identity headers an authenticating proxy asserts (docs/plans/07).
+    /// The canonical identity headers an authenticating proxy asserts.
     /// The proxy in front of the Manager translates whatever its authenticator gives it
     /// (e.g. Tailscale serve identity headers) into these, and MUST strip them from
     /// inbound client requests — anything that reaches this strategy is trusted verbatim.

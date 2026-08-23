@@ -63,7 +63,7 @@ type Provider =
 /// endpoint port is only known once its server listens. `onTokenIssued` fires on every
 /// successful /token redeem with the launch's control secret, the client session, the
 /// authenticated subject, the verified claims behind it (None = unattributed), and the
-/// peer that rode the bounce (docs/plans/07) — the Manager's one chance to RECORD which
+/// peer that rode the bounce — the Manager's one chance to RECORD which
 /// user (and peer) it verified into which launch (Plan 06: the bindings behind ABAC).
 let create
     (issuerOf: unit -> string)

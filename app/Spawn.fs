@@ -3,7 +3,7 @@ module Yession.Host.Spawn
 // Child-process interop for the Manager (Phase 4, Step 23): spawn a Session Process,
 // await its readiness line, observe its exit, stop it. The spawn contract is
 // environment variables in and exactly one JSON readiness line out on stdout
-// (docs/plans/02-manager-process.md § Topology); everything else the child prints is
+// (Plan 02 § Topology); everything else the child prints is
 // passed through as logs.
 
 open Fable.Core

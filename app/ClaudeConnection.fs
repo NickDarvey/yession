@@ -34,6 +34,12 @@ let secretName : SecretName =
 /// cannot be registered, and the client rejects unregistered URIs), so the flow
 /// redirects to Anthropic's code-display page and completion arrives as a pasted
 /// `code#state`. `code=true` asks the consent page to display the code.
+///
+/// Anthropic's terms restrict a subscription OAuth token to Claude Code and claude.ai, so
+/// driving the Agent SDK on one is the operator's call, made when they click Connect — not
+/// something this repo asserts on their behalf. A Console API key through the same paste
+/// surface is the sanctioned path, which is why `classifyPasted` accepts both kinds rather
+/// than steering to the OAuth flow.
 let private authorizeUrl = "https://claude.ai/oauth/authorize?code=true"
 let private tokenUrl = "https://console.anthropic.com/v1/oauth/token"
 let private clientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"

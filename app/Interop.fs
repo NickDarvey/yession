@@ -99,8 +99,12 @@ let private ndcCleanup (module': obj) : unit = jsNative
 /// libdatachannel's global teardown; lazy like the constructor (loads the addon on demand).
 let cleanup () : unit = ndcCleanup (ndc ())
 
-/// Create a peer connection. Empty `iceServers` keeps gathering to local host candidates,
-/// which is all that is needed for a local-first, same-machine session.
+/// Create a peer connection. Empty `iceServers` means no STUN and no TURN: gathering stops at
+/// host candidates. Those are gathered on EVERY interface, not just loopback — so a session on
+/// an overlay network puts a routable address (a tailnet `100.x`, say) in its non-trickle SDP
+/// and a remote browser connects to it directly. That is the whole of remote data-channel
+/// access, and why it needs a network whose addresses route directly; narrowing this to
+/// loopback would silently take remote sessions with it.
 let createPeerConnection (name: string) : PeerConnection =
     let config = createObj [ "iceServers" ==> ([||]: obj[]) ]
     newPeerConnection (ndc ()) name config
@@ -206,7 +210,7 @@ let sdpField (json: string) : string = jsNative
 [<Emit("process.env[$0] || $1")>]
 let envOr (name: string) (fallback: string) : string = jsNative
 
-/// How this deployment is reached from outside (docs/plans/09): the two operator
+/// How this deployment is reached from outside: the two operator
 /// variables, parsed into the one value that decides both the Manager's public origin
 /// and where sessions live. Error = a combination that cannot be deployed; every caller
 /// fails its boot loudly rather than starting a half-reachable process.

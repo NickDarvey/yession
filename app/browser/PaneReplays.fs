@@ -71,6 +71,13 @@ let create (dispatch: ClientMsg -> unit) : Syncer =
             // playing the wrong thing. So it is rebuilt when what it should play changes, and
             // every cast this mounts is a CLOSED range, so that happens once or twice and
             // then never again.
+            //
+            // Keyed on the CAST and nothing else, which bounds what this can pick up: a replay
+            // whose `StartAt` moved over an unchanged recording does not remount, and the player
+            // keeps the position it was built with. Nothing reaches that today — the pane mounts
+            // one recording at a time, so every route that changes a start position takes the
+            // mount down on the way — but a control that moved the position within a mounted tab
+            // would need this loop to compare more than the text.
             for KeyValue (key, (_, cast)) in players |> Seq.toList do
                 match ClientModel.paneTabs model |> List.tryFind (fun t -> PaneTab.key t = key) with
                 | Some tab ->

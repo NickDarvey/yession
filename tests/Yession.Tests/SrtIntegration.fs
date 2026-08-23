@@ -1,6 +1,6 @@
 module Yession.Tests.SrtIntegration
 
-// The srt backend, driven for real (docs/plans, PR 3 of the sandboxing plan). Everything
+// The srt backend, driven for real (PR 3 of the sandboxing plan). Everything
 // here asserts DENIAL: a sandbox that runs commands is easy to build and proves nothing —
 // what has to hold is that a command cannot read outside its policy, cannot write outside
 // it, and cannot reach a domain the policy never named. The suite sits under

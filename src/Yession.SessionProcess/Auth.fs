@@ -25,7 +25,7 @@ type PendingLogins (nowUnix: unit -> int64) =
             pending <- Map.remove state pending
             if nowUnix () - issuedAt > lifetimeSeconds then None else Some verifier
 
-/// What a connection is attributed to (docs/plans/07): a Manager-verified user when the
+/// What a connection is attributed to: a Manager-verified user when the
 /// strategy attributed one, or shared access with no user behind it (trust-localhost).
 type PeerAttribution =
     | AttributedUser of UserId

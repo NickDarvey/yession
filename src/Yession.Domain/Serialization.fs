@@ -1811,6 +1811,13 @@ module TranscriptReplay =
     /// `"m"` is not a `TranscriptKind`, and it should not become one: no transcript on disk
     /// contains a marker. Chapters are a fact about the BLOCKS a terminal ran, folded from
     /// the event log at the moment a recording is assembled for a reader.
+    ///
+    /// Two residuals the player keeps, and neither is a reason to go back to the option. A
+    /// marker at exactly the cast's LAST event time is still dropped from the chapter list —
+    /// the UI filters on `time < duration`, strictly, and a marker that is the final event has
+    /// become the duration. That is a block that printed nothing, and the `"m"` event is in the
+    /// recording either way. And the control bar shows the raw poster time until the reader
+    /// first interacts, so a poster nudged past the final record reads a hair long before play.
     let castWithMarkers
         (header: TranscriptHeader)
         (records: (int * TranscriptRecord) list)

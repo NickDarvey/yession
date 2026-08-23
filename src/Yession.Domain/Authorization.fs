@@ -15,7 +15,7 @@ type AuthzSubject =
       /// Users the Manager bound to that launch at ID-token issuance.
       Users : Set<UserId>
       /// Peers the Manager witnessed into that launch at ID-token issuance (the
-      /// browser's peer id rides the authorize bounce, docs/plans/07). Like Users,
+      /// browser's peer id rides the authorize bounce, Plan 07). Like Users,
       /// recorded only by the Manager — never from request content.
       Peers : Set<PeerId>
       /// Did the Manager grant this launch UNATTRIBUTED access — an ID token whose
@@ -74,7 +74,7 @@ module Policy =
     /// The v1 policy. A session owns its session-scoped secrets outright; user-scoped
     /// secrets are listable/injectable by a session a bound user signed into, and never
     /// writable by sessions (the user surface is the recorded follow-up); peer-scoped
-    /// secrets (docs/plans/07) are fully managed by a session the Manager witnessed
+    /// secrets (Plan 07) are fully managed by a session the Manager witnessed
     /// that peer into — a peer that never completed a sign-in bounce holds nothing.
     /// Local-scoped CONNECTION credentials belong to a launch the Manager granted
     /// unattributed access; generic secrets have no local rule at all, so they deny.
