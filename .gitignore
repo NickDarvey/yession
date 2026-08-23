@@ -56,17 +56,13 @@ devenv.local.yaml
 # moving target, so an unlocked CI run resolved whatever it pointed at that minute — two jobs
 # in one pull request could build against different nixpkgs, and our cachix missed every time.
 # The committed lock carries nixpkgs ONLY. devenv's own input is left out on purpose: its rev
-# comes from the devenv CLI (2.2.2 asks for 5844e78, which devenv.yaml never names), and in a
-# github-restricted sandbox devenv.local.yaml replaces that input with a store path — neither
-# is a fact about this repository. devenv re-adds that node itself after any run, so in a
-# sandbox `.claude/setup.sh` installs a local clean filter that strips it: git then hashes the
-# working copy WITHOUT the node, so the file matches HEAD and there is nothing to see or to
-# stage. That keeps a working tree clean; it is not what makes the rule hold. A filter is per
-# clone and arrives when setup runs, so a clone where it has not yet is a clone with no guard
-# at all — which is how `/nix/store/lxdvfnj…-source` reached master once, through two commits
-# made in that window. What holds the rule is `tests/Yession.Tests/LockSource.fs`, which reads
-# the COMMITTED lock and refuses a node or a store path in it, on every pull request, whatever
-# anybody's local git is configured to do.
+# comes from the devenv CLI, and in a github-restricted sandbox devenv.local.yaml replaces that
+# input with a store path — neither is a fact about this repository. devenv re-adds that node
+# after any run, so `.claude/setup.sh` installs a local clean filter that strips it from what
+# git hashes, and the tree stays clean.
+#
+# The filter is convenience, not the guard: it is per clone and arrives when setup runs.
+# `tests/Yession.Tests/LockSource.fs` is what refuses the content, and says why at length.
 
 # Browser E2E scratch data
 tests/browser/.data*

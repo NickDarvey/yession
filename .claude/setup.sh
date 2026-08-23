@@ -120,18 +120,16 @@ fi
 # `git commit -a` away from pinning the repo's devenv input to a path no other checkout has.
 #
 # A clean filter states what is actually true — that node is not part of the file's TRACKED
-# content — so git hashes the working copy without it and the file matches HEAD. Nothing to
-# see, and nothing to stage by accident once it is installed. Local to this clone
-# (`.git/info/attributes`, never the committed `.gitattributes`), so a laptop or CI checkout is
-# untouched by any of it. An upstream nixpkgs bump still shows, still merges.
+# content — so git hashes the working copy without it and the file matches HEAD. Local to this
+# clone (`.git/info/attributes`, never the committed `.gitattributes`), so a laptop or CI
+# checkout is untouched by any of it. An upstream nixpkgs bump still shows, still merges.
 #
-# What this canNOT do is hold the rule, and it was believed to. It is installed by THIS script,
-# which runs at session start; a container whose session began before the filter existed has a
-# tracked file devenv rewrites and no filter to hash it through. Two commits went out of one
-# such window with the store path in them. `required` below closes the case where the filter
-# runs and fails; absent is a third state and it is fail-open by construction. The rule itself
-# is held by `tests/Yession.Tests/LockSource.fs`, which reads the committed lock on every pull
-# request and cannot be missing from anybody's clone.
+# It keeps the tree clean; it does not hold the rule, though it was believed to. THIS script
+# installs it, at session start, so a clone before that point has no filter at all — which is
+# how the store path once reached master. `required` below closes the neighbouring case, a
+# filter that runs and fails. `tests/Yession.Tests/LockSource.fs` refuses the content instead,
+# on every pull request, and cannot be missing from anybody's clone; read it before changing
+# anything here.
 mkdir -p "$repo/.git/info"
 grep -qs '^devenv\.lock filter=devenv-lock$' "$repo/.git/info/attributes" \
   || echo 'devenv.lock filter=devenv-lock' >> "$repo/.git/info/attributes"
@@ -163,8 +161,8 @@ git -C "$repo" config filter.devenv-lock.required true
 #
 # The one thing it does not cover: a `git checkout` that rewrites devenv.lock puts back the
 # node-less blob, and the next devenv command re-adds the node, so the file reports modified
-# again until the next session start settles it. Committing it is still impossible — the filter
-# is what guarantees that, and it holds whatever the stat cache believes.
+# again until the next session start settles it. That is cosmetic. In this clone the filter
+# still keeps the node out of the index; in every clone `LockSource` keeps it out of master.
 settle_lock() {
   ( cd "$repo" && command -v devenv >/dev/null 2>&1 && devenv info >/dev/null 2>&1 ) || true
   git -C "$repo" diff --quiet -- devenv.lock 2>/dev/null && git -C "$repo" add -- devenv.lock 2>/dev/null || true
