@@ -51,8 +51,8 @@ let subscribeMcp (baseUrl: string) (secret: string) (onSet: Sink<McpServerSet>) 
         secret
         (decoding "mcp server set" Codec.mcpServerSet onSet)
 
-/// Subscribe to the Manager's session registry stream (`/sessions/stream`,
-/// docs/plans/09) — the management surface, not a control leg, so no secret rides the
+/// Subscribe to the Manager's session registry stream (`/sessions/stream`) — the
+/// management surface, not a control leg, so no secret rides the
 /// request; `headers` carry whatever the Manager's authentication strategy wants (none
 /// under `localhost`, an `x-yession-user` assertion under `trusted-headers`). The
 /// current Running set arrives immediately, then a fresh full frame on every change;

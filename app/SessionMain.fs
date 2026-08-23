@@ -196,7 +196,7 @@ let private makeSandboxes
         | Ok sandboxes -> sandboxes
         | Error e -> failwithf "work sandboxes: %s" e
 
-// Where this session is reachable from outside (docs/plans/09), from the same two
+// Where this session is reachable from outside, from the same two
 // variables the Manager parsed, inherited by plain env. Fails the boot on a combination
 // that cannot work, rather than registering a redirect URI no browser can reach.
 let private publicAccess =
@@ -769,7 +769,7 @@ Async.StartImmediate (
         // cannot authorize users, so failure is fatal, never a half-open session.
         match controlChannel, auth with
         | Some (url, secret), Some auth ->
-            // The address is the configured public one (docs/plans/09), inherited from
+            // The address is the configured public one, inherited from
             // the Manager's env: behind a proxy the browser must land on a reachable
             // callback. Loopback when unset (the RFC 8252 default).
             let redirectUri =

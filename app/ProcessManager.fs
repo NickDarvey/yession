@@ -27,7 +27,7 @@ type SessionView =
     { Record : SessionRecord
       Status : SessionStatus }
 
-/// The session registry's wire view (docs/plans/09): the RUNNING sessions only, each with the
+/// The session registry's wire view: the RUNNING sessions only, each with the
 /// port and pid a serving binding needs to reach it. A pure projection of the published views, so
 /// `/sessions/stream` and its tests share one definition of what the registry announces — and the
 /// Manager publishes the views once, whatever shape a given consumer wants.
@@ -96,7 +96,7 @@ type ProcessManager =
       /// bindings die with the launch.
       UsersOf : SessionId -> Set<UserId>
       /// Peers the Manager witnessed into the session's live launch at ID-token
-      /// issuance (docs/plans/07): the browser's peer id rode the authorize bounce.
+      /// issuance: the browser's peer id rode the authorize bounce.
       /// Same lifetime as UsersOf.
       PeersOf : SessionId -> Set<PeerId>
       /// Has the session's live launch had an UNATTRIBUTED login — the strategy naming a
@@ -105,7 +105,7 @@ type ProcessManager =
       LocalOf : SessionId -> bool
       /// The Manager's own HTTP endpoint (control RPC + management UI), when started.
       EndpointPort : int option
-      /// How this deployment is reached from outside (docs/plans/09). The management UI
+      /// How this deployment is reached from outside. The management UI
       /// reads it to render each session's open link, so the address a human clicks and
       /// the redirect URI that session registered come from one declaration.
       Public : PublicAccess
@@ -128,7 +128,7 @@ type Options =
       /// product default is fixed — a second Manager instance must choose its own
       /// (the bind fails loudly on conflict, never a silent fallback).
       ManagerPort : int option
-      /// How this deployment is reached from outside (docs/plans/07, docs/plans/09): the
+      /// How this deployment is reached from outside: the
       /// Manager's public origin — its OIDC issuer and every URL derived from it — and
       /// where each session's port is reachable. `Loopback` is the single-machine
       /// default: the Manager is its own loopback endpoint URL and sessions answer at
@@ -141,7 +141,7 @@ type Options =
       /// adapts the child's identity (service.name/instance.id).
       OnEvent : string -> (string * obj) list -> unit
       /// How the humans at this Manager's endpoint are authenticated: /authorize for
-      /// the OIDC bounce, and every management-UI request (docs/plans/07). None = the
+      /// the OIDC bounce, and every management-UI request. None = the
       /// deny-everything strategy — nothing authenticates until the operator chooses
       /// (`Strategy.localhost` for a single-machine deployment, `Strategy.trustedHeaders`
       /// behind an authenticating proxy).
@@ -449,7 +449,7 @@ let connectionsApiFor
 
 /// Create the Manager. `ui` is the management surface (Step 25): a route handler that
 /// closes over the Manager itself, sharing the control endpoint's server. It receives
-/// the Manager's per-request authenticator (the configured strategy, docs/plans/07) so
+/// the Manager's per-request authenticator (the configured strategy) so
 /// every UI route is gated by the same trust rule as /authorize.
 let createWithUi
     (options: Options)
@@ -486,7 +486,7 @@ let createWithUi
     // keyed by the per-launch control secret so the binding dies with the launch, exactly
     // like the client registration it derives from. Durable secrets, per-login access.
     let mutable launchUsers : Map<string, Set<UserId>> = Map.empty
-    // Peers the Manager witnessed into a LAUNCH (docs/plans/07): the browser's peer id
+    // Peers the Manager witnessed into a LAUNCH: the browser's peer id
     // rides the authorize bounce and is recorded at ID-token issuance, exactly like
     // launchUsers — keyed by the per-launch control secret, dying with the launch.
     let mutable launchPeers : Map<string, Set<PeerId>> = Map.empty
@@ -506,7 +506,7 @@ let createWithUi
     // by launch secret so a sink dies exactly when its launch does.
     let mcp = KeyedRetainedHub.create McpServerSet.empty
 
-    // Session changes (docs/plans/09), published on every launch, exit, and display-name
+    // Session changes, published on every launch, exit, and display-name
     // change: the full session list with each status, retained so a new subscriber is current
     // at once. Consumers project it — `/sessions/stream` to the registry's Running set for an
     // operator's serving binding, the management page to its rendered table.
@@ -594,6 +594,13 @@ let createWithUi
 
     // Declare an MCP server. Refused rather than resolved when the name would collide — the
     // operator is standing right there and can pick another.
+    //
+    // The Manager records WHERE a server is and never talks to it — no probe here, on declare or
+    // ever. Three things follow, and each is what a probe would cost: a provider that is down
+    // cannot affect the Manager; the Manager never holds a device claim, which is what would
+    // otherwise stop a human taking the lease; and a `tools/call` has exactly one origin, which is
+    // what makes the tool-use record complete. Reachability is the `mcp_servers` query's answer,
+    // from the process that is actually connected.
     let declareMcpServer (declaration: McpDeclaration) : Result<unit, string> =
         match ManagerState.declareMcpServer declaration state with
         | Error e -> Error e
@@ -924,7 +931,9 @@ let createWithUi
             // `launchable` is the lookup AND the archived refusal (Yession.Manager.State):
             // one verb, so no caller can hold a record without having been told it is
             // archived. Already-running stays HERE, beside `children` — that is runtime
-            // state, which the durable registry deliberately holds none of.
+            // state, which the durable registry deliberately holds none of — and it is what
+            // makes the session's queue drain a single consumer (`Scheduler.fs`), not only
+            // what keeps two children off one data directory.
             match ManagerState.launchable sessionId state with
             | Error reason -> return Error reason
             | Ok _ when Map.containsKey key children -> return Error (sprintf "session %s is already running" key)

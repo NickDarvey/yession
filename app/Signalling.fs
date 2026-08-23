@@ -1,7 +1,7 @@
 module Yession.Host.Signalling
 
 // HTTP serves static app bootstrap, temporary WebRTC signalling, and the read-only history
-// surfaces — the event log (docs/plans/20) and the terminal transcripts (docs/plans/22),
+// surfaces — the event log and the terminal transcripts,
 // both read by cursor. A client sends the position it has folded through
 // (`/events/after/{n}`, `/terminals/{t}/after/{n}`) and this redirects to the range it chose
 // (`/events/{first}-{last}`, `/terminals/{t}/{first}-{last}`), whose bounds do not move — so
@@ -117,7 +117,7 @@ let start
     (auth: SessionAuth.Auth option)
     (extraRoutes: (IncomingMessage -> ServerResponse -> bool) option)
     (mintPeerToken: PeerAttribution -> string)
-    // The path this session is served under (`""` at an origin root, docs/plans/09).
+    // The path this session is served under (`""` at an origin root).
     // The proxy forwards the PUBLIC path unchanged and the session strips its own prefix
     // — the opposite contract (proxy strips, session serves at root) would make
     // correctness depend on per-proxy rewriting behaviour that cannot be tested here.
@@ -225,7 +225,7 @@ let start
     /// The events themselves, at an address that names its bounds — the same answer for
     /// ever, which is why the client keeps it. `no-store` all the same: the copy that
     /// matters is the one the client puts in its own store, and a second one in the HTTP
-    /// cache would be a spare nobody reads (docs/plans/20).
+    /// cache would be a spare nobody reads.
     let serveRange (endpoint: EventsEndpoint) (req: IncomingMessage) (url: string) (first: int64) (last: int64) (res: ServerResponse) =
         if not (authorized req url endpoint.ValidateToken) then unauthorized res
         else
@@ -236,7 +236,7 @@ let start
                     | None -> notFound res
                 })
 
-    /// A terminal's cursor, and its range — the event pair one feed over (docs/plans/22).
+    /// A terminal's cursor, and its range — the event pair one feed over.
     /// The two differ from their event counterparts in exactly one place, the terminal id,
     /// and in nothing about what a cursor or a range MEANS.
     let serveTranscriptCursor
@@ -415,7 +415,7 @@ let start
                 res.writeHead (404, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
                 res.``end`` "this session has no authorization provider"
             | Some a ->
-                // The browser's stable peer id rides the bounce (docs/plans/07) so the
+                // The browser's stable peer id rides the bounce so the
                 // Manager can witness which peer signed in; absent for headless logins.
                 let peer =
                     queryOf req.url "peer_id"
@@ -457,7 +457,7 @@ let start
         | Some Me ->
             // The browser's probe: a valid cookie (or no auth requirement at all) mints
             // a peer token for the WebRTC `PeerHello` — cookies cannot ride the data
-            // channel. The minted token CARRIES the cookie's attribution (docs/plans/07),
+            // channel. The minted token CARRIES the cookie's attribution,
             // so the Manager-verified user reaches the event log without riding any
             // peer-controlled frame. 401 tells the client to renavigate to `/login`; a
             // network error (offline) tells it to stay on the cached shell and stores.

@@ -8,7 +8,11 @@ module Yession.Host.Repos
 // Plan 15 retired that half: a human who wants a repo added asks the agent, so there is
 // one authorization path, one set of inputs to validate, and one place the act is
 // recorded. What the panel is left with is the LISTING, which is now the `repos` query
-// at the foot of this file.
+// at the foot of this file. The cost was weighed and taken: with no working agent, nobody
+// can add a repo at all. That is acceptable because it is the same session in which nothing
+// else works either — and a panel button kept "just in case" would restore the second
+// authorization path, the second set of inputs to validate, and the second place a
+// mutation's record can go missing.
 //
 // Git itself runs through the sandbox seam under the AGENT backend (`host` is the
 // explicitly lax choice; `srt` confines each spawn to the repos directory and the

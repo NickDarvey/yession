@@ -78,9 +78,9 @@ let private nameView (access: PublicAccess) (view: ProcessManager.SessionView) :
     | ProcessManager.Running (port, _) when view.Record.ArchivedAt.IsNone ->
         // A plain URL: access is authorized by the OIDC bounce (session -> manager ->
         // back), not by a token in the link. The origin is the configured public one
-        // (docs/plans/09) so a remote browser gets a link it can follow; loopback when
+        // so a remote browser gets a link it can follow; loopback when
         // unset.
-        // The address comes from the deployment's session template (docs/plans/10), the
+        // The address comes from the deployment's session template, the
         // same declaration the session itself used to register its redirect URI.
         let openUrl = sprintf "%s/" (PublicAccess.sessionAddress view.Record.SessionId port access).Url
         html
@@ -659,8 +659,8 @@ let private openingPage (target: string) (readyUrl: string) : string =
 
 /// Handle a management-UI request against the Manager. Returns false for paths that
 /// are not the UI's (the composing server falls through — e.g. to the control routes).
-/// Every UI route is gated by `identify` — the Manager's authentication strategy
-/// (docs/plans/07): a denial is a 401 on every route; both attributed and unattributed
+/// Every UI route is gated by `identify` — the Manager's authentication strategy:
+/// a denial is a 401 on every route; both attributed and unattributed
 /// outcomes are let through (under trust-localhost every loopback request is
 /// unattributed, which is exactly today's behaviour).
 let tryHandle
@@ -802,7 +802,7 @@ let tryHandle
             // recovery protocol and a consumer that connects, reads one frame, and disconnects
             // has done a poll.
             | "GET", [| "stream" |] ->
-                // The session registry (docs/plans/09): the Running set as wire frames. An
+                // The session registry: the Running set as wire frames. An
                 // operator's serving binding holds this open to reconcile its proxy.
                 Some (fun () ->
                     Sse.stream req res

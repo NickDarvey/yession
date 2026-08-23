@@ -30,11 +30,11 @@ type Auth =
       /// Does the request carry a cookie this process minted?
       IsAuthenticated : IncomingMessage -> bool
       /// The authenticated identity behind the request's cookie, when any: the subject
-      /// plus the attribution the validated ID token carried (docs/plans/07).
+      /// plus the attribution the validated ID token carried.
       IdentityOf : IncomingMessage -> CookieIdentity option
       /// Start a login: mint state + PKCE verifier, return the authorize URL. The
       /// browser's peer id (when the /login request carried one) rides along so the
-      /// Manager can witness which peer signed in (docs/plans/07).
+      /// Manager can witness which peer signed in.
       /// None until `Configure` has completed.
       BeginLogin : PeerId option -> Async<string option>
       /// Handle the callback request URL. Ok = the `Set-Cookie` value to send with the
