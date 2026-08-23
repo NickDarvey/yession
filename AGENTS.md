@@ -214,9 +214,11 @@ moves the triple.
 
 **Commit / PR messages.** Subjects follow conventional-commit style (`feat:`, `fix:`, `ci:`,
 `refactor:`, ...) — convention for readers, not the version input. A PR squash-merges as PR
-TITLE + PR DESCRIPTION, verbatim: the description IS the commit body, and branch commit
-messages are discarded. So the marker goes in the PR description, on a line of its own — and
-write that description as the commit message it becomes, not as notes for a reviewer.
+TITLE + PR DESCRIPTION: the description IS the commit body, and branch commit messages are
+discarded. So the marker goes in the PR description, on a line of its own — and write that
+description as the commit message it becomes, not as notes for a reviewer. Wrap it at 72
+columns, which is where GitHub re-wraps it on the way in; write wider and the log fills with
+ragged half-lines, re-flowed without regard for which of them was a marker.
 
 `version` needs full history: it refuses a shallow clone rather than emitting an
 already-released number (`git fetch --unshallow --tags`). `YESSION_VERSION` overrides the

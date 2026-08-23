@@ -85,9 +85,10 @@ If consistent: proceed. No need to ask.
    (see AGENTS.md Testing for capability tiers). Don't outsource the first failure to CI.
 2. Commit on the session's designated feature branch, push with `git push -u origin <branch>`.
 3. Open a PR against `master` (`mcp__github__create_pull_request`). Its description becomes
-   the squashed commit body verbatim, so write it as one: summarize the plan and note the
+   the squashed commit body, so write it as one: summarize the plan and note the
    implementation matches. A `+semver:` marker, if the change earns one, goes here on a line
-   of its own — branch commit messages are discarded at merge and never reach master.
+   of its own — branch commit messages are discarded at merge and never reach master. Wrap
+   the description at 72 columns; GitHub re-wraps anything wider.
 4. Enable auto-merge: `mcp__github__enable_pr_auto_merge` (squash). Under the queue this
    enqueues the PR when it is otherwise ready — see Merge semantics above. There is no
    manual-merge fallback: direct merges to `master` are blocked by the ruleset.
