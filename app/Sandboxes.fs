@@ -80,8 +80,8 @@ let egressFor (backend: SandboxBackend) (ambient: Map<string, string>) : string 
 ///
 /// One module because these are not independent facts. A terminal starts in the
 /// workspace, so a checkout that is not under it is a checkout nobody sees without being
-/// told its absolute path first — and an agent told to find one spends its step ceiling
-/// looking. Computed apart, in the composition root, they drifted into siblings: `ls` in
+/// told its absolute path first — and an agent told to find one spends the turn looking.
+/// Computed apart, in the composition root, they drifted into siblings: `ls` in
 /// a fresh terminal showed an empty directory while the clones sat next door.
 module SessionLayout =
 
@@ -138,7 +138,7 @@ module SessionLayout =
 /// One function because three things have to name the same place and cannot be allowed to
 /// drift: the mount, the sandbox's write path, and — the half that was missing — the
 /// ANSWER a repo verb gives. A checkout the agent cannot name is a checkout it hunts for,
-/// and hunting is what the step ceiling gets spent on.
+/// and hunting is what the turn gets spent on.
 let reposVisibleAt (backend: SandboxBackend) (hostReposDir: string) : string =
     match backend with
     | HostBackend

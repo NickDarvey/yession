@@ -31,7 +31,7 @@ type private JsToolAnswer =
     abstract ok : bool
     abstract text : string
 
-[<Emit("""(async function (prompts, agentEnv, claudePath, descriptors, invoke, allowedTools, onChunk, registerAbort, claudeSpawner, maxTurns) {
+[<Emit("""(async function (prompts, agentEnv, claudePath, descriptors, invoke, allowedTools, onChunk, registerAbort, claudeSpawner) {
   try {
     const sdk = await import('@anthropic-ai/claude-agent-sdk')
     const { z } = await import('zod')
@@ -90,7 +90,9 @@ type private JsToolAnswer =
         // what leaves the pick to the SDK, and passing an empty string instead would be
         // this session inventing a model id of "".
         ...(prompts.model ? { model: prompts.model } : {}),
-        maxTurns: maxTurns,
+        // No `maxTurns`: unset is the SDK's no-cap default, the same setting interactive
+        // Claude Code runs under. A turn ends when the model is done or somebody
+        // interrupts it, never at a step count this file picked.
         settingSources: [],
         includePartialMessages: true,
         mcpServers,
@@ -133,10 +135,6 @@ type private JsToolAnswer =
         cacheCreationTokens = u.cache_creation_input_tokens || 0
         if (m.modelUsage) { const ks = Object.keys(m.modelUsage); if (ks.length) model = ks[0] }
         if (m.subtype === 'success') body = (typeof m.result === 'string' && m.result !== '') ? m.result : streamed
-        // The step ceiling is the one ending a person can do something about, so it says
-        // what happened in words rather than handing back an SDK subtype nobody outside
-        // this file has ever read.
-        else if (m.subtype === 'error_max_turns') failed = 'this turn stopped at its step limit of ' + maxTurns + ' model turns without finishing — say so and I will carry on from here'
         else failed = 'agent run ended: ' + m.subtype
       }
     }
@@ -145,7 +143,7 @@ type private JsToolAnswer =
   } catch (err) {
     return { ok: false, body: '', reason: String((err && err.message) || err), inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, model: '' }
   }
-})($0, $1, $2, $3, $4, $5, $6, $7, $8, $9)""")>]
+})($0, $1, $2, $3, $4, $5, $6, $7, $8)""")>]
 let private runQuery
     (prompts: {| system: string; prompt: string; model: string |})
     (agentEnv: obj)
@@ -158,21 +156,8 @@ let private runQuery
     (onChunk: string -> unit)
     (registerAbort: (unit -> unit) -> unit)
     (claudeSpawner: obj)
-    (maxTurns: int)
     : JS.Promise<RunOutcome> =
     jsNative
-
-/// How many model turns one session turn may take before the SDK stops it.
-///
-/// A bound belongs here — a turn that loops is a turn spending somebody's money — but the
-/// old one was 8, which is fewer steps than the shortest real errand this session offers.
-/// "Clone a repo and look at it" is add_repo, a status, a sandbox, a command, the command's
-/// result, and an answer: six before anything goes wrong, and every recovery from a wrong
-/// guess costs two more. Hitting the ceiling is not a soft landing either — the SDK returns
-/// no result, so the turn FAILS and everything it did is presented as a crash. So the
-/// ceiling is set where an errand that goes badly twice still finishes, and the reason a
-/// turn hit it is now said out loud (`error_max_turns` above, `Conversation.applyEvent`).
-let maxTurns = 32
 
 /// Some sandboxes disallow the SDK's own vendored executable; `YESSION_CLAUDE_PATH`
 /// points the SDK at a system Claude Code install instead. Empty = SDK default.
@@ -349,7 +334,6 @@ let runWith (credential: (string * string) option) : RunAgent =
                     (fun text -> onChunk { Text = text })
                     signal.OnAbort
                     (Sandboxes.AgentSandbox.claudeSpawnerFor (agentBackend ()) ambient home env)
-                    maxTurns
                 |> Interop.awaitPromise
             let usage =
                 { InputTokens = outcome.inputTokens

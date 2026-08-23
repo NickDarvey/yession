@@ -207,11 +207,11 @@ let private turnTests =
                 ConversationProjection.applyEvents
                     None
                     [ envelope 0L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId })
-                      envelope 1L (AgentTurnFailed { AgentTurnId = turnId; Reason = "stopped at its step limit" }) ]
+                      envelope 1L (AgentTurnFailed { AgentTurnId = turnId; Reason = "agent run ended: error_during_execution" }) ]
                     ConversationProjection.empty
             Expect.equal
                 (projection.Items |> List.map (fun i -> i.Body, i.Status))
-                [ "stopped at its step limit", ConversationItemStatus.Failed ]
+                [ "agent run ended: error_during_execution", ConversationItemStatus.Failed ]
                 "the reason is the item's account of itself"
 
         testCase "a turn that fails before its message started still shows in the conversation" <| fun () ->

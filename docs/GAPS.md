@@ -435,20 +435,16 @@ Items are roughly ordered by how much they matter.
   case failed, and the reason the one that ships is capped at 90s (ten times its real 6.9s)
   rather than at something comfortable. A tier that spawns real processes and a tier of pure
   folds want different budgets; they have one.
-- **A turn has a step ceiling, and the ceiling is ours.** `maxTurns` is OPTIONAL on the Agent
-  SDK's `query()`, and unset means no cap — interactive Claude Code sets none, and `claude -p`
-  takes `--max-turns` only when an automation asks for one. So `error_max_turns` is a state
-  this repository opted into: `Agent.maxTurns` bounds one turn at 32 model turns, past which
-  the SDK stops the query and the turn ENDS. The item keeps whatever it streamed and now
-  carries the reason (`Conversation.applyEvent`), so a person can say "carry on" and the next
-  turn resumes from the transcript.
+- **A turn has no step ceiling, and nothing automatic bounds a runaway one.** `maxTurns` is
+  OPTIONAL on the Agent SDK's `query()`, and unset means no cap — which is what `Agent.fs`
+  now passes, the same setting interactive Claude Code runs under. The ceiling that used to
+  be here (32 model turns) was a bound that ENDED the turn as a failure, and an errand long
+  enough to hit it was the errand least well served by being cut off mid-way.
 
-  It is opted into because the setting differs from a terminal's. A turn spends the TURN
-  HUMAN's credential in a session other people can watch and nobody need be watching, so the
-  interrupt — which is what bounds a runaway turn in Claude Code — is a bound only while
-  somebody is present. What is missing is everything automatic: no continuation turn, no
-  budget the model can see, and no signal to it that it is approaching the ceiling. A long
-  errand is therefore a conversation, not one call.
+  What replaces it is only the interrupt. A turn spends the TURN HUMAN's credential in a
+  session other people can watch and nobody need be watching, so a bound that requires
+  somebody present is no bound at all for an unattended session. Missing: a budget the model
+  can see, any signal that a turn is running long, and any cost ceiling per turn or session.
 - **Repo integration is the read-only bootstrap slice** ([Plan 14](plans/14-git-repos.md)):
   typed clone-and-orient verbs beside the agent, one repos dir shared into the
   WorkSandbox, GitHub sign-in per user over the device flow. Remaining, deliberate:
