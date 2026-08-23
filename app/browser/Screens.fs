@@ -35,6 +35,48 @@ open Yession.App
 open Yession.SessionProcess
 open Yession.Host
 
+/// The holder's viewport size in CHARACTER CELLS, measured from the rendered screen rather
+/// than assumed: the pane is one width on a desktop and another on a phone, and the program
+/// on the other end lays its screen out to whatever it is told. Measured by putting a known
+/// run of characters in the element and reading the box it takes, which is the only way to
+/// get a font's advance width without hard-coding one.
+[<Emit("""(function (terminalId) {
+  const el = document.querySelector('[data-terminal-screen="' + terminalId + '"]')
+  if (!el) return null
+  const probe = document.createElement('span')
+  probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre'
+  probe.textContent = 'M'.repeat(80)
+  el.appendChild(probe)
+  const cell = probe.getBoundingClientRect().width / 80
+  const line = probe.getBoundingClientRect().height
+  el.removeChild(probe)
+  if (!(cell > 0) || !(line > 0)) return null
+  const box = el.getBoundingClientRect()
+  const cols = Math.max(1, Math.floor((box.width - 24) / cell))
+  const rows = Math.max(1, Math.floor((box.height - 16) / line))
+  return [cols, rows]
+})($0)""")>]
+let private measure (terminalId: string) : (int * int) option = jsNative
+
+/// The screen this peer is typing into, if one is on screen. `tabindex="0"` is what makes it
+/// the holder's: the other two variants the view renders are `role="region"`, and the pane
+/// shows one tab at a time.
+[<Emit("document.querySelector('[data-terminal-screen][tabindex=\"0\"]')")>]
+let private holderScreen () : obj = jsNative
+
+[<Emit("new ResizeObserver($0)")>]
+let private newResizeObserver (onResized: unit -> unit) : obj = jsNative
+
+[<Emit("$0.observe($1)")>]
+let private observe (observer: obj) (element: obj) : unit = jsNative
+
+/// Every target at once, which is all of them: exactly one element is ever observed.
+[<Emit("$0.disconnect()")>]
+let private disconnect (observer: obj) : unit = jsNative
+
+[<Emit("$0 === $1")>]
+let private isSame (a: obj) (b: obj) : bool = jsNative
+
 /// One terminal's screen as this client composes it.
 type private Live =
     { Emulator : Emulator
@@ -56,7 +98,17 @@ type Screens =
       /// one left behind for a terminal nobody is in is a leak with no screen.
       Forget : TerminalId -> unit }
 
-let create (dispatch: ClientMsg -> unit) : Screens =
+/// `report` is told the holder's viewport size whenever it changes — the app relays it to the
+/// Session Process, which resizes the pty.
+///
+/// It lives here, with the screen, rather than in the app beside the connection. The size of a
+/// screen is a fact about that screen: the element to measure is the one this already tracks,
+/// the moment to measure is a render this already runs after, and the de-duplication is about
+/// what this already knows. In the app it was also unreachable — the browser tier drives the
+/// harness, which has no copy of it — which is how the one thing it does wrong went unnoticed:
+/// it ran only from `setState`, so a splitter drag or a window resize, which change the box
+/// and dispatch nothing, never reached the pty at all.
+let create (dispatch: ClientMsg -> unit) (report: TerminalId -> int -> int -> unit) : Screens =
     let live = System.Collections.Generic.Dictionary<string, Live> ()
 
     /// Whether this client held each terminal's lease at the last sync — the other half of the
@@ -65,8 +117,14 @@ let create (dispatch: ClientMsg -> unit) : Screens =
     /// would miss exactly the terminal somebody just opened.
     let held = System.Collections.Generic.Dictionary<string, bool> ()
 
+    /// The size each terminal's viewport was last reported at, so a render that moved nothing
+    /// does not re-send it — a resize is a signal to the program on the other end, and
+    /// repeating it makes a full-screen program redraw for no reason.
+    let reportedSize = System.Collections.Generic.Dictionary<string, int * int> ()
+
     let forget (key: string) =
         held.Remove key |> ignore
+        reportedSize.Remove key |> ignore
         match live.TryGetValue key with
         | true, existing ->
             existing.Emulator.Dispose ()
@@ -84,6 +142,43 @@ let create (dispatch: ClientMsg -> unit) : Screens =
                     entry.Rendered <- screen
                     dispatch (TerminalScreenMsg (id, screen))
             })
+
+    /// The model as of the last sync, so the observer below has something to measure against.
+    /// A box changing is not a model change — that is the whole point of watching it — so the
+    /// callback cannot be handed one.
+    let mutable latest : ClientModel option = None
+
+    /// Tell the app how big the holder's screen is. Only the HOLDER: the pty has one size and
+    /// every peer is looking at the same screen, so a viewer with a narrower pane scrolls
+    /// rather than reshaping everyone else's terminal.
+    let reportSizes (model: ClientModel) =
+        let mine = ActorRef.PeerRef model.Peer.PeerId
+        for terminal in TerminalProjection.openTerminals model.Terminals do
+            if terminal.Lease = Some mine then
+                let key = TerminalId.value terminal.TerminalId
+                match measure key with
+                | None -> ()
+                | Some (cols, rows) ->
+                    let last = match reportedSize.TryGetValue key with | true, v -> Some v | _ -> None
+                    if last <> Some (cols, rows) then
+                        reportedSize.[key] <- (cols, rows)
+                        report terminal.TerminalId cols rows
+
+    /// One observer, re-pointed at whichever screen the holder is typing into. A box can change
+    /// without the model changing — the splitter is dragged, the window is resized, the phone
+    /// is turned — and those are exactly the cases a render-loop measurement cannot see.
+    ///
+    /// `reportedSize` is what keeps this cheap: an observer fires on every frame of a drag, and
+    /// only the frames that cross a whole character cell send anything.
+    let observer = newResizeObserver (fun () -> latest |> Option.iter reportSizes)
+    let mutable observed : obj = null
+
+    let watchHolderScreen () =
+        let element = holderScreen ()
+        if not (isSame element observed) then
+            disconnect observer
+            observed <- element
+            if not (isNull element) then observe observer element
 
     { Snapshot =
         fun id keyframe ->
@@ -165,27 +260,9 @@ let create (dispatch: ClientMsg -> unit) : Screens =
                 |> Seq.distinct
                 |> Seq.toList do
                 forget stale
+            // Last, because both read the document this render has just produced: which screen
+            // the holder is typing into, and how big it is.
+            latest <- Some model
+            watchHolderScreen ()
+            reportSizes model
       Forget = fun id -> forget (TerminalId.value id) }
-
-/// The holder's viewport size in CHARACTER CELLS, measured from the rendered screen rather
-/// than assumed: the pane is one width on a desktop and another on a phone, and the program
-/// on the other end lays its screen out to whatever it is told. Measured by putting a known
-/// run of characters in the element and reading the box it takes, which is the only way to
-/// get a font's advance width without hard-coding one.
-[<Emit("""(function (terminalId) {
-  const el = document.querySelector('[data-terminal-screen="' + terminalId + '"]')
-  if (!el) return null
-  const probe = document.createElement('span')
-  probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre'
-  probe.textContent = 'M'.repeat(80)
-  el.appendChild(probe)
-  const cell = probe.getBoundingClientRect().width / 80
-  const line = probe.getBoundingClientRect().height
-  el.removeChild(probe)
-  if (!(cell > 0) || !(line > 0)) return null
-  const box = el.getBoundingClientRect()
-  const cols = Math.max(1, Math.floor((box.width - 24) / cell))
-  const rows = Math.max(1, Math.floor((box.height - 16) / line))
-  return [cols, rows]
-})($0)""")>]
-let measure (terminalId: string) : (int * int) option = jsNative

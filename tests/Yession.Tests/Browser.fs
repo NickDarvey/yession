@@ -1404,6 +1404,32 @@ let editorTests =
                 let! atHundred = widthOfLineEndingIn "Y"
                 Expect.equal atHundred 100 "and of a 100-column one, after the resize"
             }
+        // A box can change without the model changing — the splitter is dragged, the window is
+        // resized, the phone is turned — and the pty has to be told, or the program inside it
+        // lays its screen out to a width that stopped being true. Only a browser can answer
+        // this: what is under test is a measurement of a real box, taken because the box moved
+        // rather than because anything was dispatched.
+        editorCaseIn 1440 900 "a pane the reader resized tells the pty its new width" (EDITOR_PORT + 19) <| fun page ->
+            async {
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                do! awaitU (page.ClickAsync "#shell [data-terminal-tab='term-live']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
+
+                // The size this client reported for the pane as it stands.
+                let reported () = page.EvaluateAsync<string> "() => window.__resized || ''"
+                let! _ = await (page.WaitForFunctionAsync "window.__resized")
+                let! before = await (reported ())
+
+                // Widen the column from the keyboard, which dispatches nothing at all: the
+                // splitter writes a CSS custom property on the shell root.
+                do! awaitU (page.FocusAsync "#shell [data-term-resize]")
+                for _ in 1 .. 12 do
+                    do! awaitU (page.Keyboard.PressAsync "ArrowLeft")
+                let! _ =
+                    await (page.WaitForFunctionAsync (sprintf "window.__resized !== '%s'" before))
+                let! after = await (reported ())
+                Expect.notEqual after before "the pty is told the width the reader chose"
+            }
         // The DVR (Plan 14, stage 7). What only a browser can answer: that rewinding a LIVE
         // terminal really mounts a player over what it has recorded so far — the same player
         // and the same cast a finished terminal's replay uses, which is what "rewound like
