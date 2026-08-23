@@ -318,7 +318,7 @@ let private interruptTests =
                             // A well-behaved runner returns promptly once aborted; the
                             // orchestrator must discard this result — the Interrupted
                             // event is already the terminal fact.
-                            signal.OnAbort (fun () -> resume (AgentFailed "aborted mid-flight")))
+                            signal.OnAbort (fun () -> resume (AgentFailed ("aborted mid-flight", None))))
                 let release () =
                     match pending with
                     | Some resume ->
