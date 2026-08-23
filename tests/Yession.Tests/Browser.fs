@@ -1127,6 +1127,37 @@ let editorTests =
                                }""")
                 Expect.isFalse sideways "the conversation column does not scroll sideways"
             }
+        // The title is written per keystroke, so Enter has nothing to save — and that is
+        // exactly why it has to DO something: a phone holds its keyboard open for as long as
+        // the field holds focus, and a return key that answers nothing reads as an edit the
+        // app declined to take. The promise is that Enter finishes with the field, and that
+        // finishing keeps what was typed.
+        //
+        // Both halves, because either alone is satisfied by a bug: a field that let go and
+        // reverted would pass the focus check, and one that kept the text with the keyboard
+        // still over it would pass the value check. Only a browser can see either — focus and
+        // a key event are not things a rendered string has.
+        editorCaseIn 390 844 "Enter in the session title lets go of the field and keeps what was typed" (EDITOR_PORT + 16) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-session-title]")
+                do! awaitU (page.FocusAsync "#shell [data-session-title]")
+                do! awaitU (page.Keyboard.TypeAsync " on a phone")
+                // Ground truth: the field really is where the typing went, and it really is
+                // the focused element for Enter to release.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.hasAttribute('data-session-title') === true""")
+
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.hasAttribute('data-session-title') !== true""")
+                let! title =
+                    await (page.EvaluateAsync<string>
+                            "() => document.querySelector('#shell [data-session-title]').value")
+                Expect.stringContains title "on a phone" "the committed title is the one that was typed"
+            }
         // The split between the two columns is the reader's to set. What is pinned is the
         // PROMISE, not the geometry: that the divider can be moved without a pointer at all.
         // A splitter that only answers a drag is a control a keyboard user cannot reach, and
