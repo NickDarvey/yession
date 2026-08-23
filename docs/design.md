@@ -1,8 +1,8 @@
 # Yession — Design & System Fundamentals
 
 This document captures the durable principles and system design for Yession. It is the
-canonical reference for *why* the runtime is shaped the way it is. Delivery steps in
-[plans/00-init/](plans/00-init/) reference this document rather than restating it.
+canonical reference for *why* the runtime is shaped the way it is. The delivery plans
+referenced this document rather than restating it.
 
 For the product framing, see the [root README](../README.md).
 
@@ -102,8 +102,8 @@ Browser Client
 
 Session Manager (Phase 2)
   - launches Session Processes
-  - grants scoped capabilities
-  - owns container/repo/environment authority
+  - owns launch, identity, and secret custody
+  - declares what a session may reach; holds no environment authority itself
 ```
 
 ### 2.2 State split
@@ -131,8 +131,8 @@ HTTP is allowed only for: serving the web app, initial local bootstrap, and temp
 signalling. **HTTP is not the session API.**
 
 One read path is the exception the rule permits, and it is read-only: the durable HISTORY is
-also served over HTTP, by CURSOR — the event log (docs/plans/20) and each terminal's
-transcript (docs/plans/22), on identical terms. A client sends the position it has folded
+also served over HTTP, by CURSOR — the event log and each terminal's transcript, on
+identical terms. A client sends the position it has folded
 through (`GET /events/after/{n}`, `GET /terminals/{t}/after/{n}`, or the bare path from the
 beginning) and the server answers with a redirect to the range it chose (`GET
 /events/{first}-{last}`, `GET /terminals/{t}/{first}-{last}`), or `204` when that client is
@@ -185,17 +185,22 @@ cheap tier in zero real time ([ADR](decisions/2026-08-20-session-link-liveness.m
 
 ## 3. Authority model (Phase 2)
 
-The Session Process must not hold ambient Docker or host authority. The Session Manager
-launches the Session Process and grants capabilities already scoped to that session.
+The Manager owns launch, identity, and secret custody — not environment authority. A
+Session Process spawns its own sandboxes through the `CreateSandbox` seam and confines
+them with whichever `SandboxBackend` it was booted with (`Yession.Domain/Sandbox.fs`);
+secrets are the one thing it cannot mint, and they cross from the Manager only at sandbox
+spawn, over the authenticated control channel. The earlier design — Manager-issued,
+session-scoped container handles — was replaced by the sandbox seam, which confines the
+agent's own CLI as well as the work it runs.
 
 ```text
-Session Manager   owns authority; enforces session/container scope.
-Session Process   owns orchestration; calls delegated, scoped capabilities.
-Session Environment   a container associated with exactly one SessionId; started lazily.
+Session Manager   owns launch, identity, and secret custody.
+Session Process   owns orchestration; spawns and confines its own sandboxes.
+Session Environment   a sandbox associated with exactly one SessionId; started lazily.
 ```
 
 Environments start **lazily**, only when the agent determines work requires one. A
-one-shot conversational answer must not start a container.
+one-shot conversational answer must not start a sandbox.
 
 ### Threat model (Phases 1–2)
 
@@ -208,9 +213,8 @@ Command-to-container encryption is designed for but not implemented yet.
 
 User access to a session is authorized through the Manager as an OIDC provider
 (authorization code + PKCE; each Session Process registers as a client with its
-per-launch control secret — see docs/plans/04-session-authorization.md). Three
-authentication strategies ship (docs/plans/07-byo-user-authorization.md), selected by
-the `--auth` argument at Manager start: `none` (the default — nothing authenticates
+per-launch control secret). Three authentication strategies ship, selected by the
+`--auth` argument at Manager start: `none` (the default — nothing authenticates
 until the operator chooses a trust rule), `localhost` (any loopback request is the
 single unattributed `local` subject, matching this threat model), and
 `trusted-headers` (an operator-run authenticating proxy — e.g. Tailscale plus a
@@ -218,13 +222,25 @@ header-rewriting proxy — asserts the user in canonical `x-yession-*` headers; 
 proxy must be the only non-local path in and must strip those headers from client
 requests). Further schemes are strategy swaps, not redesigns.
 
-Secrets are Manager-owned authority (docs/plans/06-secrets-and-abac.md): encrypted at
-rest under a key the OS credential manager holds (no credential manager → no
-persistence), authorized by a pure default-deny policy over the composite identity the
-Manager verified itself (the calling session + the users bound to its launch at
-ID-token issuance). Sessions hold pre-scoped write/list/delete capabilities only —
-secret values reach workloads exclusively by Manager-side injection into a launched
-environment, never through the agent loop and never back over the control channel.
+Secrets are Manager-owned authority: encrypted at rest under a key the OS credential
+manager holds (no credential manager → no persistence), authorized by a pure
+default-deny policy over the composite identity the Manager verified itself (the
+calling session + the users bound to its launch at ID-token issuance). Sessions hold
+pre-scoped write/list/delete capabilities and no agent-facing read. Values leave the
+store through exactly two resolve-shaped routes, each gated to the caller's readable
+scopes: `/control/secrets/resolve`, which feeds `SecretRef` env injection at the
+session's own sandbox spawn (sandboxes are session-owned, so the injection point is
+there rather than in the Manager), and `/control/connections/resolve`, which releases a
+connection credential for one agent turn. Refresh tokens never leave the Manager, and no
+agent tool wraps either route.
+
+MCP servers are Manager-owned authority in the same way: a declaration names a url and
+who reaches it, it lives in `ManagerState`, and every session it names connects itself
+over the reverse control leg. The Manager never becomes an MCP client, and neither an
+agent nor a peer can name a url — what a session talks to is the operator's decision,
+and a stream a tool result offers is admitted only on the host the operator already
+declared. The tool descriptions that come back are the one untrusted text the model must
+read; see [GAPS.md](GAPS.md).
 
 ---
 
@@ -263,16 +279,23 @@ Capabilities are scoped, not ambient.
 Verification is automated end-to-end, not manual.
 ```
 
+`Ylmish is the encoding/sync boundary` has one deliberate exception, and it is narrow
+enough to name: message bodies and terminal command lines are top-level Yjs roots the app
+co-manages directly (`src/Yession.Domain/RichText.fs`), because Ylmish's structural decode
+cannot traverse a `Y.XmlFragment` — it recurses into the fragment's cyclic internals and
+crashes the decode. They are keyed by `BodyKey`, never nested in the encoded tree, and
+never read by a whole-doc structural decode. Everything else still crosses through the
+codec; folding a body back into the Ylmish schema breaks decoding for every peer at once.
+
 ---
 
 ## 6. Cross-cutting type vocabulary
 
-Identity and envelope types are shared across nearly every step. They are introduced in
-[00-foundations-and-domain-types.md](plans/00-init/00-foundations-and-domain-types.md)
-and referenced throughout. Each delivery step introduces the additional schemas it owns
-and links back here for the surrounding context.
+Identity and envelope types are shared across nearly every step. They are declared in
+`Yession.Domain/Identity.fs` and referenced throughout; each delivery step introduced
+the additional schemas it owned and leant on this document for the surrounding context.
 
-The actor glossary (docs/plans/07-byo-user-authorization.md):
+The actor glossary:
 
 - **User** (`UserId`) — a durable, Manager-verified human identity: the OIDC `sub` the
   Manager itself issued. Exists only when a real authentication strategy attributed one.

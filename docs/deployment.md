@@ -97,6 +97,30 @@ The Manager is also the OIDC issuer its sessions bounce users through, so
 `YESSION_MANAGER_URL` (below) has to name the origin a browser can actually reach. Getting
 that wrong sends remote logins to an address only the host can resolve.
 
+### Session lifetime
+
+```sh
+YESSION_SESSION_IDLE_TIMEOUT=30m                 # or 90s, 2h; unset means never
+```
+
+`YESSION_SESSION_IDLE_TIMEOUT` lets the Manager stop sessions nobody is using. A session
+reports busy or idle over its control channel — a connected peer, a running turn, a command in
+a terminal, a non-empty queue — and the Manager reaps on **silence**, so no single report has
+to arrive; unset is the default, because stopping a session nobody asked to have stopped is not
+a behaviour to acquire by upgrading.
+
+Two costs to decide on first: a reaped launch takes its OAuth client registration and
+per-launch user bindings with it, so the next visitor signs in again (invisible under `--auth
+localhost`, a re-bounce under `trusted-headers`); and a session wedged after readiness stops
+beating and is stopped as `NeverReported` rather than diagnosed.
+
+What it buys beyond the Node process, Yjs replica and loaded event log an idle session holds:
+point `YESSION_SESSION_BIN` at a path that floats with your builds, and sessions upgrade
+continuously as they idle out and relaunch, while the Manager — whose own restart evicts
+everybody — is left alone until nothing is running. A MAJOR version difference refuses the
+launch rather than pairing two processes whose control protocol may disagree, which drains the
+running set and hands you that quiet moment.
+
 ### Addressing
 
 ```sh
@@ -116,6 +140,12 @@ stripped it again. A path here is rejected.
 
 That constraint is what lets the Manager share an origin with its sessions: the Manager owns
 `/`, sessions own `/s/*`.
+
+The origin named here must resolve **from this host too**, not only from browsers. Every
+launched session runs OIDC discovery, JWKS and token requests against it while it boots, so
+split-horizon DNS — or a proxy listening only on an external interface — fails session
+registration. Fatally, and by design: a session that cannot authorize its users must not
+half-start.
 
 #### Sessions
 
@@ -157,6 +187,12 @@ publishes full snapshots, not deltas:
 curl -sN http://127.0.0.1:8321/sessions/stream
 # data: {"sessions":[{"id":"local-session","name":"…","port":57239,"pid":95225}]}
 ```
+
+The stream is gated by the Manager's trust rule like every other management route: under
+`localhost` a same-machine binding just works; under `trusted-headers` the binding asserts its
+own `x-yession-user` on the subscribe, from inside the loopback trust boundary the proxy
+already defines. A binding that forgets it does not fail loudly — it gets 401s, sees no frames,
+and reconciles every mapping away as though the Manager had gone.
 
 The template is deliberately **not** on the wire. The stream carries `id` and `port`; the
 deployment applies its own template, so the prefix has exactly one home.
@@ -215,8 +251,8 @@ box lets anyone local set `x-yession-user` to whatever they like, because under
 `trusted-headers` that header *is* the subject.
 
 > The identity headers and the overwrite behaviour above are verified against a live tailnet
-> (Tailscale 1.98, plain HTTP). The Caddy composition is not: the directives come from
-> [plan 07](plans/07-byo-user-authorization.md) and have not been stood up end to end.
+> (Tailscale 1.98, plain HTTP). The Caddy composition is not: the directives were written
+> alongside the trusted-headers design and have not been stood up end to end.
 
 ##### What `--auth localhost` costs here
 
@@ -283,6 +319,13 @@ Use `--https` instead of `--http` on a tailnet with certificates, and match the 
 URLs. Derive it from one variable — the Manager and its sessions must land on the *same*
 listener, or they are two origins and the shared-origin arrangement quietly stops being one.
 
+Prefer `--https` for a second reason the certificate note does not name. A browser withholds
+the Cache API and service workers outside a secure context, so a session reached over plain
+HTTP at a non-loopback address keeps no history on the device and can never open cold with no
+network — it degrades to today's behaviour rather than breaking, and the settings pane says so,
+but the remedy is this flag and nothing on the client side can substitute for it. Loopback is a
+secure context, so the zero-config default is unaffected.
+
 ##### Keeping mappings in step
 
 Subscribe to the registry stream and reconcile level-based, applying the whole desired set per
@@ -300,6 +343,11 @@ structural and retires any state file recording which mappings were created:
 tailscale serve status -json \
   | jq -r '(.Web["host.example.ts.net:8321"].Handlers // {}) | keys[] | select(startswith("/s/"))'
 ```
+
+Run it at boot as well as on every frame. `serve --bg` config is persisted, so mappings survive
+a reboot, a Manager SIGKILL, and the reconciler's own crash — while the sessions they point at
+survive none of those. Nothing prunes a stale `/s/` handler unless something reconciles before
+the Manager launches anything new.
 
 A frame that never arrives is not an empty set. A Manager restart ends the stream, and
 reconnecting yields a fresh snapshot that heals whatever was missed. Only a connect that
