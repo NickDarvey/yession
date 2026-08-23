@@ -164,11 +164,14 @@ jobs:
           echo "nix package boot smoke passed"
 
   release:
-    # `bench` is here so its artifact exists to download, NOT so it can stop the release: the
-    # job is continue-on-error, so a failed measurement completes as a success from `needs`'
-    # point of view and the download below simply finds nothing.
+    # `bench` is here so its artifact exists to download, NOT so it can stop the release. The
+    # steps inside bench.yml tolerate a failed measurement, but the JOB can still fail for
+    # reasons that have nothing to do with a number — a runner it could not get, a cache it
+    # could not reach — and a `needs` on a failed job skips this one silently. So the condition
+    # names what actually has to have worked: the package. Anything bench did or did not manage
+    # is read off `needs` by the download below, which is `continue-on-error` itself.
     needs: [package-npm, bench]
-    if: github.ref == 'refs/heads/master'
+    if: ${{ !cancelled() && github.ref == 'refs/heads/master' && needs.package-npm.result == 'success' }}
     runs-on: ubuntu-latest
     env:
       # The versioning policy lives in tasks.fsx; the package:npm job computed it — reuse it here

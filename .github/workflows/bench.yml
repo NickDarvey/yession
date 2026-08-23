@@ -94,6 +94,7 @@ jobs:
       # job that calls this workflow. When `guard` IS on — a pull request — a failed measurement
       # fails the job, because a guard that cannot measure has not cleared anything.
       - name: Measure
+        id: measure
         continue-on-error: ${{ !inputs.guard }}
         run: devenv shell -- bench
       # Separate from the measurement, because judging and measuring are different jobs and only
@@ -102,8 +103,11 @@ jobs:
       - name: Judge against the recorded baseline
         if: inputs.guard
         run: devenv shell -- bench-guard
+      # Only what was actually measured is recorded: when the measurement was tolerated into
+      # failing (the release's case), there is no `dist/bench.json` to append and a history that
+      # skips a release is honest, while one carrying a run that did not happen is not.
       - name: Record and redraw
-        if: inputs.record
+        if: inputs.record && steps.measure.outcome == 'success'
         continue-on-error: ${{ !inputs.guard }}
         env:
           LABEL: ${{ inputs.label }}
