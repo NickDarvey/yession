@@ -41,6 +41,11 @@
     <Compile Include="Models.fs" />
     <Compile Include="Conversation.fs" />
     <Compile Include="Repos.fs" />
+    <!-- What a repo asks a session for (`yession.yaml`, Plan 27). After Environment.fs
+         (a declaration is an `EnvironmentSpec` serialization), Identity.fs (it is keyed
+         by `SandboxRef`) and Repos.fs, which owns the repo it belongs to. Pure and
+         parser-free: it decodes a tree somebody else parsed. -->
+    <Compile Include="Config.fs" />
     <!-- The read half of the imperative session API (Plan 15). Depends on nothing but
          System: a query is a declaration, and what it declares about is somebody else's. -->
     <Compile Include="Queries.fs" />
