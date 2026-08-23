@@ -1359,6 +1359,35 @@ let editorTests =
                     await (page.EvaluateAsync<string> "() => document.activeElement?.outerHTML?.slice(0, 60) ?? 'NOTHING'")
                 Expect.stringContains kept "data-term-resize" "a lease landing leaves focus that survived the render where it was"
             }
+        // Moving by WORD, which is most of what navigating a line you have already typed
+        // means. Its own case rather than an extra assertion on the one above: that pins the
+        // printable/control/escape table and should keep failing for only that reason.
+        //
+        // A `KeyboardEvent` with modifiers on it is the part only a real browser has — the
+        // combination is what carries the meaning, and there is no rendered string that holds
+        // whether Alt was down when a key went by.
+        editorCase "word-navigation keys reach the pty as the escape sequences they are" (EDITOR_PORT + 20) <| fun page ->
+            async {
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                do! awaitU (page.ClickAsync "#shell [data-terminal-tab='term-live']")
+                let screen = "#shell [data-terminal-screen='term-live']"
+                let! _ = await (page.WaitForSelectorAsync screen)
+                do! awaitU (page.FocusAsync screen)
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.getAttribute('data-terminal-screen') === 'term-live'""")
+
+                do! awaitU (page.Keyboard.PressAsync "Control+ArrowLeft")
+                do! awaitU (page.Keyboard.PressAsync "Alt+b")
+                do! awaitU (page.Keyboard.PressAsync "Alt+Backspace")
+                do! awaitU (page.Keyboard.PressAsync "Control+Backspace")
+                do! awaitU (page.Keyboard.PressAsync "Shift+ArrowRight")
+                let! typed = await (page.EvaluateAsync<string> "() => window.__typed || ''")
+                Expect.equal
+                    typed
+                    "\u001b[1;5D\u001bb\u001b\u007f\b\u001b[1;2C"
+                    "a word left, a word back, rub a word out twice, and a selection right"
+            }
         // A screen is a paint at a GEOMETRY, and the client's emulator has to be the geometry
         // the pty is or everything on it lands in the wrong column. Only a browser can answer
         // it: this is the real `@xterm/headless` composing a real screen, and what is asserted
