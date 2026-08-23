@@ -19,7 +19,12 @@ open Yession.Oidc
 /// A session's runtime status — never persisted.
 type SessionStatus =
     | NotRunning
-    | Running of port: int * pid: int
+    /// The BUILD is what the launch reported on its readiness line — the only place the
+    /// answer exists, and the reason it rides the status rather than the record: a session
+    /// runs the image it was spawned from, so a promotion moves what the NEXT launch gets
+    /// and nothing about this one. Two rows wearing two builds is what says so out loud.
+    /// `None` from a bundle older than the field (see `Spawn.LaunchedSession`).
+    | Running of port: int * pid: int * build: string option
     /// The child exited without the Manager stopping it (crash or self-exit).
     | Exited of code: int option
 
@@ -36,12 +41,13 @@ let registryFrameOf (views: SessionView list) : ControlWire.SessionRegistryFrame
         views
         |> List.choose (fun view ->
             match view.Status with
-            | Running (port, pid) ->
+            | Running (port, pid, build) ->
                 Some
                     { ControlWire.SessionRegistryEntry.Id = view.Record.SessionId
                       Name = view.Record.DisplayName
                       Port = port
-                      Pid = pid }
+                      Pid = pid
+                      Build = build }
             | NotRunning
             | Exited _ -> None) }
 
@@ -461,7 +467,7 @@ let createWithUi
 
     // Runtime-only: the child handle per running session, and the last observed exit
     // for sessions that died without a Stop.
-    let mutable children : Map<string, Spawn.RunningChild * int> = Map.empty
+    let mutable children : Map<string, Spawn.LaunchedSession> = Map.empty
     let mutable lastExit : Map<string, int option> = Map.empty
     // Stops in flight: their exits are expected, not crashes.
     let mutable stopping : Set<string> = Set.empty
@@ -515,7 +521,7 @@ let createWithUi
     let statusOf (record: SessionRecord) : SessionStatus =
         let key = SessionId.value record.SessionId
         match Map.tryFind key children with
-        | Some (child, port) -> Running (port, child.Pid)
+        | Some launched -> Running (launched.Port, launched.Child.Pid, launched.Build)
         | None ->
             match Map.tryFind key lastExit with
             | Some code -> Exited code
@@ -1017,8 +1023,9 @@ let createWithUi
                     revokeSecret ()
                     activity <- Map.remove key activity
                     return Error reason
-                | Ok (child, port) ->
-                    children <- Map.add key (child, port) children
+                | Ok launched ->
+                    let child, port = launched.Child, launched.Port
+                    children <- Map.add key launched children
                     lastExit <- Map.remove key lastExit
                     publishSessions ()
                     // The Manager emits its own lifecycle telemetry directly (session launched).
@@ -1058,7 +1065,7 @@ let createWithUi
             let key = SessionId.value sessionId
             match Map.tryFind key children with
             | None -> return Error (sprintf "session %s is not running" key)
-            | Some (child, _) ->
+            | Some { Child = child } ->
                 stopping <- Set.add key stopping
                 return!
                     Async.FromContinuations (fun (cont, _, _) ->
@@ -1157,7 +1164,7 @@ let createWithUi
             fun sessionId ->
                 match Map.tryFind (SessionId.value sessionId) children with
                 | None -> async { return () }
-                | Some (child, _) ->
+                | Some { Child = child } ->
                     Async.FromContinuations (fun (cont, _, _) -> child.OnExit (fun _ -> cont ()))
           TryFind =
             fun sessionId ->

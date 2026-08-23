@@ -32,8 +32,16 @@ module private Col =
     /// ids were set in whatever monospace a box happened to have, and the switch to a shipped
     /// face made them 6px too wide for it. The first thing to go on a phone.
     let id = "w-[210px] max-md:hidden"
-    /// Holds the status word plus `port · pid` uncut; on a phone, just the word.
-    let status = "w-[256px] max-md:w-[100px]"
+    /// Holds the status word plus `port · pid · build` uncut; below `xl`, just the word.
+    ///
+    /// MEASURED like its neighbours, and the threshold moved with the third fact rather than
+    /// the width alone: 256px fitted `port · pid`, a build takes ~105px more, and the name
+    /// column is what pays — it is the only elastic one. At the 1152px this table is capped
+    /// to, 384px leaves the name 190px, which is a name; on the widths between `md` and `xl`
+    /// it would have left a letter and an ellipsis, which is the failure this column was
+    /// already sized around once. So the plumbing yields there exactly as it does on a phone,
+    /// and the cell keeps the word it exists to say.
+    let status = "w-[384px] max-xl:w-[100px]"
     /// `2026-08-18 09:12Z` in the 12px mono face, plus the cell's gutter. MEASURED like the
     /// id beside it: 17 characters of 12px Monaspace Neon is 123px, and the caps header over
     /// it is narrower than that. Goes with the id on a phone — it is the sort KEY, and a sort
@@ -61,9 +69,19 @@ let private statusView (view: ProcessManager.SessionView) : TemplateResult =
         html $"""<span class="{Style.statusFaint}" data-status="{Dom.Manager.statusArchived}">archived</span>"""
     | None, ProcessManager.NotRunning ->
         html $"""<span class="{Style.statusFaint}" data-status="{Dom.Manager.statusStopped}">stopped</span>"""
-    | None, ProcessManager.Running (port, pid) ->
+    | None, ProcessManager.Running (port, pid, build) ->
+        // The build joins port and pid because it is the same KIND of fact — which process,
+        // running what — and because it is only legible next to its neighbours: one row
+        // saying 0.0.0-gf1ce52b beside another saying 0.0.0-g5fdc8a2 is the whole answer to
+        // "is this session running what I merged", with no reference value to publish and
+        // nothing to keep in sync. A launch that reported no build adds nothing here rather
+        // than a word standing in for one.
+        let plumbing =
+            match build with
+            | Some build -> sprintf "port %d · pid %d · %s" port pid build
+            | None -> sprintf "port %d · pid %d" port pid
         html
-            $"""<span class="{Style.statusOk}" data-status="{Dom.Manager.statusRunning}"><span class="{Style.statusDotPulse}"></span>running</span><span class="font-terminal text-code-sm text-ink-faint tabular-nums ml-2.5 max-md:hidden">port {port} · pid {pid}</span>"""
+            $"""<span class="{Style.statusOk}" data-status="{Dom.Manager.statusRunning}"><span class="{Style.statusDotPulse}"></span>running</span><span class="font-terminal text-code-sm text-ink-faint tabular-nums ml-2.5 max-xl:hidden" data-session-build>{plumbing}</span>"""
     | None, ProcessManager.Exited code ->
         let reason = code |> Option.map string |> Option.defaultValue "signal"
         html $"""<span class="{Style.statusErr}" data-status="{Dom.Manager.statusExited}">exited ({reason})</span>"""
@@ -75,7 +93,7 @@ let private statusView (view: ProcessManager.SessionView) : TemplateResult =
 /// nothing to open yet, so its name is plain text and its row's one control says Launch.
 let private nameView (access: PublicAccess) (view: ProcessManager.SessionView) : TemplateResult =
     match view.Status with
-    | ProcessManager.Running (port, _) when view.Record.ArchivedAt.IsNone ->
+    | ProcessManager.Running (port, _, _) when view.Record.ArchivedAt.IsNone ->
         // A plain URL: access is authorized by the OIDC bounce (session -> manager ->
         // back), not by a token in the link. The origin is the configured public one
         // so a remote browser gets a link it can follow; loopback when
@@ -462,6 +480,16 @@ let private bodyTemplate
           <div class="max-w-6xl w-full mx-auto flex flex-col px-8 max-md:px-4">
             <header class="h-[88px] shrink-0 flex items-end pb-5 border-b border-hair">
               <h1 class="{Style.wordmark}">yession<span class="text-green">.</span> <span class="{Style.label}">manager</span></h1>
+              <!-- The Manager's own build, in the same faint mono step the rows use for
+                   theirs. It belongs beside them because it is the same question asked of a
+                   different process, and because the Manager is the one that CANNOT roll
+                   forward on its own: it keeps the image it exec'd until something restarts
+                   it, so it is routinely the oldest thing on the page.
+                   It yields at the SAME width its rows do, though the header has room to
+                   spare: the answer here is a comparison, and a page showing one process's
+                   build while hiding every other's reads as the Manager's version banner —
+                   which is the thing that was already there to be misread. -->
+              <span class="font-terminal text-code-sm text-ink-faint tabular-nums ml-3 pb-0.5 max-xl:hidden" data-manager-build>{Version.current}</span>
             </header>
             <!-- Creating takes nothing but the press. The id is minted server-side (a
                  Docker-safe Crockford one) and a session is NAMED from inside itself, in the
@@ -867,7 +895,7 @@ let tryHandle
                                     // has is not a relaunch.
                                     let! port =
                                         match view.Status with
-                                        | ProcessManager.Running (port, _) -> async { return Ok port }
+                                        | ProcessManager.Running (port, _, _) -> async { return Ok port }
                                         | ProcessManager.NotRunning
                                         | ProcessManager.Exited _ -> pm.Launch sessionId
                                     match port with
@@ -901,7 +929,7 @@ let tryHandle
                             | ProcessManager.NotRunning
                             | ProcessManager.Exited _ ->
                                 respond res 503 "text/plain" "the session is not running"
-                            | ProcessManager.Running (port, _) ->
+                            | ProcessManager.Running (port, _, _) ->
                                 let address = PublicAccess.sessionAddress sessionId port pm.Public
                                 Async.StartImmediate (
                                     async {
