@@ -386,6 +386,67 @@ module SandboxName =
 
     let value (SandboxName name) = name
 
+/// WHO declared a sandbox (Plan 27).
+///
+/// The session has always had its own — `default`, and whatever the agent starts. A repo
+/// that carries a `yession.yaml` declares its own, and the scope is what keeps the two
+/// apart: two repos may both want a sandbox called `dev`, and neither is wrong.
+///
+/// This is what makes the union of several repos' files TOTAL. The key is a pair, the
+/// repos are disjoint, so there is no precedence rule to invent and nothing can shadow
+/// anything — a clash is only possible INSIDE one file, where it is refused at the point
+/// somebody can still pick another name.
+type SandboxScope =
+    /// The session's own — `default`, and whatever the agent started. No file declares one.
+    | SessionOwned
+    /// Declared by a repo's `yession.yaml`.
+    | RepoOwned of RepoRef
+
+/// One sandbox, named within its scope.
+///
+/// The scope rides BESIDE the name rather than inside it, because `SandboxName`'s charset
+/// is the intersection of everything a name has to survive — a Docker object-name
+/// component, a directory, a terminal label — and `owner/repo:name` is none of those.
+/// Smuggling the scope into the string would put a `/` and a `:` through every one of
+/// those consumers.
+///
+/// A pair in a single-case union rather than a record, following `RepoRef`: the two
+/// obvious field names (`Scope`, `Name`) are `SecretId`'s, and a second record wearing
+/// them would silently capture every `{ Scope = …; Name = … }` in the codebase.
+type SandboxRef = private SandboxRef of scope: SandboxScope * name: SandboxName
+
+module SandboxRef =
+
+    let create (scope: SandboxScope) (name: SandboxName) : SandboxRef = SandboxRef (scope, name)
+
+    /// The sandbox a terminal that names nothing lands in. Unchanged by scoping: it is the
+    /// session's, and no file may declare it.
+    let defaultRef : SandboxRef = SandboxRef (SessionOwned, SandboxName.defaultName)
+
+    /// One a repo declared.
+    let inScope (repo: RepoRef) (name: SandboxName) : SandboxRef = SandboxRef (RepoOwned repo, name)
+
+    let scope (SandboxRef (s, _)) = s
+    let name (SandboxRef (_, n)) = n
+
+    /// How it is written for a person and for the agent's tools: `dev` for the session's
+    /// own, `octo/hello:dev` for a repo's. Unambiguous because neither half's charset
+    /// admits a `:`.
+    let render (SandboxRef (scope, name)) : string =
+        match scope with
+        | SessionOwned -> SandboxName.value name
+        | RepoOwned repo -> sprintf "%s:%s" (RepoRef.value repo) (SandboxName.value name)
+
+    /// Read one back. Total by returning a `Result`: this parses agent input.
+    let parse (raw: string) : Result<SandboxRef, string> =
+        let trimmed = (defaultArg (Option.ofObj raw) "").Trim()
+        match trimmed.Split ':' with
+        | [| name |] -> SandboxName.create name |> Result.map (fun n -> SandboxRef (SessionOwned, n))
+        | [| repo; name |] ->
+            RepoRef.create repo
+            |> Result.bind (fun r -> SandboxName.create name |> Result.map (fun n -> inScope r n))
+        | _ -> Error (sprintf "'%s' is not a sandbox (expected 'name' or 'owner/repo:name')" trimmed)
+
 /// What a server is called — and, because Plan 16 part A made a namespace the SDK MCP
 /// server's NAME, the namespace every one of its tools lands in.
 ///
