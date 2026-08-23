@@ -14,6 +14,13 @@ namespace Yession.Domain
 //
 // What a provider has to do to be heard here — the offer, its admission, and the wire behind
 // the url — is `docs/streams.md`.
+//
+// An offer opens a terminal automatically, and there is deliberately no `attach_stream` tool
+// for the agent to call afterwards. An offer is already a provider's answer to a call somebody
+// made on purpose; a second step in which the agent asks for the thing it was just handed is
+// the selection layer the MCP configuration work deleted twice — a step that only ever gets
+// performed. A provider that does not want a terminal opened does not offer one, and that knob
+// is on the side that knows.
 
 open System.Collections.Generic
 

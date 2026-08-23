@@ -4,7 +4,7 @@ namespace Yession.Domain
 /// the Session Process and the Browser Client; the actual WebRTC/HTTP carrier is an
 /// adapter that implements a frame channel over these types. State-sync payloads are
 /// opaque to the transport (owned by the Ylmish sync boundary in Step 05), hence the
-/// `'State` type parameter. See docs/design.md §2.3 and docs/plans/00-init/03-*.
+/// `'State` type parameter. See docs/design.md §2.3.
 
 /// Commands are how clients ask for durable facts the CRDT cannot express. Drafting,
 /// sending (enqueueing), editing, reordering, and deleting are all pure CRDT writes —
@@ -88,9 +88,12 @@ type StateFrame<'State> = StateSync of 'State
 /// already direct, ordered and reliable.
 ///
 /// HISTORY still rides HTTP, and that is not a contradiction — it is the same split the
-/// event log already makes. Immutable transcript chunks are cacheable
-/// (`TranscriptChunk`), so a reload replays terminals out of the browser cache; only the
-/// live tail needs the channel.
+/// event log already makes. A transcript is read by CURSOR and answered at an address
+/// naming the range it chose (`TranscriptChunk`), so those bytes never change and the
+/// client keeps the ranges it has folded in its own Cache API store — the responses
+/// themselves are `no-store`, because the address a cursor is asked at is not the address
+/// the answer is kept under. A reload replays terminals out of that store; only the live
+/// tail needs the channel.
 type TerminalFrame =
     /// One transcript record as it is written, with the line index it was written at.
     /// The seq is what makes the live leg and the HTTP leg interchangeable: a client
@@ -119,10 +122,17 @@ type TerminalFrame =
     /// there is no response frame here by design, because a keystroke that needed an
     /// acknowledgement would make typing a round trip.
     ///
-    /// Never recorded as a transcript `"i"` record. The shell echoes what is typed at it, so
-    /// ordinary keystrokes already appear as OUTPUT; what would be added by recording these
-    /// is precisely what the terminal deliberately did not display — a password at an `ssh`
-    /// prompt. See "Durable capture" in the plan.
+    /// Never recorded as a transcript `"i"` record.
+    ///
+    /// The obvious narrower rule — record keystrokes except while the pty's ECHO bit is off —
+    /// cannot be implemented on this seam. `termios` lives kernel-side on the pty slave,
+    /// neither `node-pty` nor `docker exec` surfaces it, and it is not inferable from the byte
+    /// stream a headless emulator sees. So the choice is all keystrokes or none, and none is
+    /// right: live mode makes typing a password ordinary (`ssh`, `sudo`, a REPL token prompt),
+    /// and a durable, replayable, HTTP-fetchable keystroke log is a class of exposure the
+    /// session never had. Nothing is lost from the audit, because a shell echoes what is typed
+    /// at it — what recording these would add is exactly what the terminal deliberately did not
+    /// display. Attribution survives in the lease events, which bracket transcript ranges.
     | TerminalInput of TerminalId * data: string
     /// The lease holder's viewport size, relayed to the pty (Plan 13, stage 2e). Live-mode
     /// only: their foreground program is the one that has to agree with the pty, so in block
@@ -154,6 +164,12 @@ type Focus = { Field : FocusField; Pos : CursorPos }
 /// Process (never durable, never in Yjs, never an event) so a collaborator's cursor is visible
 /// while they edit. `Focus = None` when the peer's caret is nowhere collaborative, or the peer
 /// has left (which clears it everywhere).
+///
+/// Deliberately NOT Yjs awareness. Awareness would carry presence on a second, binary relay
+/// keyed by Yjs `clientID`, which means a `clientID`↔`PeerId` mapping to maintain and a sync
+/// path outside the typed frames — Ylmish is the sync boundary, and presence is not doc state.
+/// The typed frame costs a little more render code and buys one identity, one relay, and a
+/// payload the cheap tier can round-trip.
 type PresencePayload =
     { PeerId : PeerId
       DisplayName : string

@@ -17,6 +17,15 @@ namespace Yession.Domain
 /// exit code nobody produced and a truncated transcript range — a failed command recorded as
 /// successful, in the record that exists to be trusted. So a mark without this terminal's
 /// nonce is not a mark; it is bytes that happen to look like one, and it stays in the output.
+///
+/// Warp, whose block model this is, does not use OSC 133 for boundaries at all: it carries
+/// hex-encoded JSON on a private DCS channel, because it must move USER DATA out of a shell it
+/// does not control — a cwd or a PS1 containing `ESC` would otherwise terminate the sequence
+/// carrying it. We need none of that. The drain COMPOSED the command line and already recorded
+/// it in `TerminalBlockStarted`, so all that has to come back is "it started" and "it finished,
+/// with this code" — which is exactly what `C` and `D` say, and what
+/// `registerOscHandler(133, …)` reads without a parser of ours. Anything richer means
+/// encoding, and encoding means a payload.
 type TerminalMark =
     /// `A` — the shell is about to print its prompt. The handshake the open-probe waits for,
     /// and the only evidence that instrumentation took at all.

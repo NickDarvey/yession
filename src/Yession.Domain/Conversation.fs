@@ -3,7 +3,7 @@ namespace Yession.Domain
 /// The conversation is a *projection* of the event log — never read from Yjs/draft state.
 /// The projection type and its fold live in the shared Domain library because both the
 /// Session Process and the Browser Client derive the conversation the same way.
-/// See docs/design.md §1 "Reactive", §2.2 and docs/plans/00-init/02-*.
+/// See docs/design.md §1 "Reactive" and §2.2.
 
 type ConversationItemStatus =
     | Complete

@@ -31,6 +31,12 @@ module McpToolList =
 // and read-only, with commands belonging to the agent), and no agent command to attach what
 // the operator already declared. An operator who declares a server declares it in order for
 // it to be used.
+//
+// The org/repo shape — a broad scope that allows, a narrow one that enables — was the earlier
+// draft and is the wrong size here. Selection below policy earns its keep when one broad scope
+// covers many narrow ones with different owners and different needs; a Yession host has one
+// operator and a handful of sessions, so a gate with the same person on both sides is a step
+// that only ever gets performed. The scope survives and the selection does not.
 // ---------------------------------------------------------------------------------------
 
 /// How to reach it. One case, because localhost HTTP is the only transport this round — a DU
@@ -46,6 +52,12 @@ module McpTransport =
         | McpHttp url -> url
 
 /// One server, as the operator described it.
+///
+/// There is deliberately no `Headers` or credential field. This round's servers are loopback
+/// and unauthenticated, and when one needs a credential it belongs in Connections/Secrets —
+/// which already own who may read one and inject it — not on a declaration, where a token
+/// would sit in the Manager's state file in the clear and be copied to every session the
+/// audience names. The absence is the point: a field that exists gets filled in.
 type McpServerRef =
     { Name : McpServerName
       Transport : McpTransport

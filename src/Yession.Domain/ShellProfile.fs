@@ -11,6 +11,18 @@ namespace Yession.Domain
 /// transcript, since a shell that starts by running somebody's script has already run it
 /// before the first prompt mark. `execute_command` is the one door; each field here is
 /// applied by the SPAWN, never typed at a prompt.
+///
+/// The next field this record grows is environment variables, and they must be
+/// `EnvironmentVariableRef`s rather than strings: a profile is an EVENT, so a plain value is
+/// recorded verbatim in the log and readable by everyone in the session for as long as it
+/// exists. A token belongs in `set_secret` and a `SecretRef` to it belongs here, resolved at
+/// open through the same seam the sandbox policy uses — and the query prints a ref by name,
+/// never by value.
+///
+/// This is a layer over a LIVE sandbox, which is why it can be set mid-turn.
+/// `EnvironmentSpec.WorkingDirectory` is fixed when the sandbox is created, so moving it means
+/// recreating the sandbox — which kills everything running inside it. A default about where
+/// new shells start is not worth somebody's build.
 
 type ShellProfile =
     { /// Where a shell opened under this profile starts. `None` = the sandbox's own

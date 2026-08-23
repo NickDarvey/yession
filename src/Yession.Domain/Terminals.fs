@@ -1,6 +1,6 @@
 namespace Yession.Domain
 
-/// Terminals, projected from the event log (docs/plans/12). Like the conversation, this
+/// Terminals, projected from the event log (Plan 12). Like the conversation, this
 /// is a pure fold over ordered events and nothing else — never the doc, never live
 /// output. That is what makes the terminal list, its blocks, and their exit codes
 /// identical on every replica and after every reload, and it is why there is no way for a

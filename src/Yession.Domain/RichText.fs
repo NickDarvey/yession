@@ -1,9 +1,9 @@
 namespace Yession.Domain
 
-// Rich-text bodies (docs/plans/03-rich-text-editing.md). A draft/queue body is a structured
-// ProseMirror document held as a Yjs `XmlFragment`. It is a top-level named root on the doc,
-// keyed by `BodyKey`, NOT nested inside the `drafts`/`queue` maps and NOT declared in the
-// Ylmish schema. Two reasons the body stays out of the Ylmish-encoded state:
+// Rich-text bodies. A draft/queue body is a structured ProseMirror document held as a Yjs
+// `XmlFragment`. It is a top-level named root on the doc, keyed by `BodyKey`, NOT nested
+// inside the `drafts`/`queue` maps and NOT declared in the Ylmish schema. Two reasons the
+// body stays out of the Ylmish-encoded state:
 //   1. a custom nested in a keyed `Encode.map` cannot round-trip Ylmish's structural decode
 //      (it never yields `ElCustom`), so the value would never decode anyway; and
 //   2. Ylmish's structural reader walks a `Y.XmlFragment` as a plain object and recurses into
@@ -13,6 +13,15 @@ namespace Yession.Domain
 // transport as everything else, and read by the Session Process straight from the doc (it has
 // no Ylmish binding). `getXmlFragment key` is idempotent and merges by name, so every replica
 // binds the same fragment with no creation race.
+//
+// A body is structured because the syntax is meant to disappear as you type it. Two cheaper
+// shapes were rejected for the same reason: keeping markdown SOURCE in a `Y.Text` and
+// decorating it live is boundary-pure but leaves the syntax on screen, and running ProseMirror
+// over a `Y.Text` by re-serializing the document to markdown on every keystroke replaces a
+// structural merge with a text merge — an impedance mismatch that degrades exactly the
+// concurrent editing the CRDT is here for. Markdown remains the interchange format, produced
+// only at the edges (`Markdown.ofFragment` at the drain, on paste, and for the read-only
+// timeline).
 
 open Yjs
 

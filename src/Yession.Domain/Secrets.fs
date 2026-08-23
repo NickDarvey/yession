@@ -9,7 +9,7 @@ open System
 
 /// Who a secret belongs to. `UserId`/`PeerId` live in Identity.fs — the same identities
 /// events attribute to (`ActorRef`), not secrets-only concepts. A peer scope names a
-/// stable browser identity (docs/plans/07): meaningful in unattributed deployments where
+/// stable browser identity (Plan 07): meaningful in unattributed deployments where
 /// no user exists; under a real strategy, `UserScope` is the durable home.
 type SecretScope =
     | SessionScope of SessionId

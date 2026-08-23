@@ -583,6 +583,11 @@ type RunAgent = AgentContextPack -> AgentCapabilities -> AgentAbortSignal -> (Ag
 /// from a page read before the turn appends its own `AgentTurnStarted`, so
 /// `TerminalDigest.window` already reports every block that started or completed since the
 /// previous turn. The wake decides WHEN a turn runs; the digest is what it then reads.
+///
+/// There is deliberately no way to cancel a pending wake. The debt is DERIVED from the log
+/// rather than stored, which is what buys the restart-safety above — so nothing client-local
+/// could suppress it, and a cancellation would have to be a durable fact of its own. A person
+/// can always interrupt the turn a wake starts.
 module AgentWake =
 
     /// Due iff some BACKGROUND block completed at or after the last `AgentTurnStarted`.
