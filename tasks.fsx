@@ -1029,6 +1029,297 @@ let verify (args: string list) =
            "Jumpstarter" ]
          @ args)
 
+// --- bench: what a person waits for, and whether it is getting worse --------------------------
+
+// `check` proves behaviour and says nothing about time, which leaves a whole class of change
+// invisible. So: a measuring run (`bench`), a judgement (`bench-guard`) and a record
+// (`bench-publish`) — three verbs because they are three jobs, and keeping them apart is what
+// lets the release record without judging and a pull request judge without recording.
+//
+// The history lives on an ORPHAN `bench` branch, one JSON line per release. Orphan so it never
+// touches master's history and never triggers release.yml (`branches: [master]`), and a branch
+// rather than a file on master so recording a measurement is not a commit everybody rebases past.
+
+let private benchJson = Path.Combine (dist, "bench.json")
+let private benchSvg = Path.Combine (dist, "bench.svg")
+let private benchBranch = "bench"
+let private benchHistoryFile = "history.jsonl"
+
+/// A recorded point: what it was, and every metric it carried.
+type private BenchPoint = { Label : string; Metrics : Map<string, float> }
+
+let private readMetrics (json: string) : Map<string, float> =
+    use doc = Text.Json.JsonDocument.Parse json
+    let array =
+        // A recorded line wraps the array in an object; `dist/bench.json` is the bare array.
+        match doc.RootElement.ValueKind with
+        | Text.Json.JsonValueKind.Array -> doc.RootElement
+        | _ -> doc.RootElement.GetProperty "metrics"
+    array.EnumerateArray ()
+    |> Seq.map (fun e -> e.GetProperty("name").GetString (), e.GetProperty("value").GetDouble ())
+    |> Map.ofSeq
+
+/// Every point recorded so far, oldest first. Read with `git show` rather than a checkout, so
+/// this never disturbs the working tree it is being run from.
+let private benchHistory () : BenchPoint list =
+    match tryRun "git" [ "show"; sprintf "%s:%s" benchBranch benchHistoryFile ] with
+    | None -> []
+    | Some text ->
+        text.Split '\n'
+        |> Array.map (fun l -> l.Trim ())
+        |> Array.filter (fun l -> l.StartsWith "{")
+        |> Array.map (fun line ->
+            use doc = Text.Json.JsonDocument.Parse line
+            let label =
+                match doc.RootElement.TryGetProperty "version" with
+                | true, v -> v.GetString ()
+                | _ -> "?"
+            { Label = label; Metrics = readMetrics line })
+        |> List.ofArray
+
+let private measured () : Map<string, float> =
+    if not (File.Exists benchJson) then
+        failwithf "no %s — run `bench` first (it is what produces the measurement this judges)" benchJson
+    readMetrics (File.ReadAllText benchJson)
+
+/// The middle value of a list. Used for the baseline, so one unlucky release cannot move it.
+let private median (xs: float list) : float =
+    let sorted = List.sort xs
+    sorted.[List.length sorted / 2]
+
+// THE THRESHOLDS, AND WHY THEY ARE THIS LOOSE.
+//
+// A millisecond budget on a shared CI runner is the flaky test this repo warns about: it goes
+// red for reasons nobody changed, everyone learns to re-run it, and it stops being read. A 3x
+// one does not — that is far outside anything scheduling noise produces, and it is exactly the
+// class of change worth stopping.
+//
+// The additive floor is what stops a SUB-MILLISECOND metric tripping on jitter, where "3x" is
+// 0.9ms and means nothing. 2ms, calibrated against what these metrics actually do: `caret.push`
+// sits at 0.3ms and varies by about 0.1 between runs, so the floor is twenty times its jitter
+// and still lets a 3x regression in the ~7ms metrics trip. It was 8ms first — half a frame, on
+// the reasoning that below that nobody can tell — which made every metric here untrippable,
+// because they are all smaller than that. A floor above the thing it is protecting is not a
+// floor, it is an off switch.
+//
+// The slope is a RATIO, so it barely moves with the hardware it was taken on — it can afford
+// to be tighter, and it is the one that answers the question this suite was built for.
+let private regressionFactor = 3.0
+let private regressionFloorMs = 2.0
+let private slopeFactor = 2.0
+let private slopeMetric = "caret.push.slope"
+/// Below this many recorded points there is no baseline worth the name. A guard with nothing to
+/// compare against must not invent something.
+let private minimumHistory = 3
+/// How far back the baseline looks. Long enough to be stable, short enough to track reality.
+let private baselineWindow = 10
+
+let private thresholdFor (metric: string) (baseline: float) =
+    if metric = slopeMetric then baseline * slopeFactor
+    else max (baseline * regressionFactor) (baseline + regressionFloorMs)
+
+/// The metrics a regression is judged on: p50 (the tail is where a runner's noise lives) and
+/// the slope. p95 is recorded and charted; it is just not what trips the wire.
+let private judged (name: string) = name.Contains ".p50@" || name = slopeMetric
+
+let private benchBaselines () : Map<string, float> =
+    let history = benchHistory ()
+    if List.length history < minimumHistory then Map.empty
+    else
+        let window =
+            history
+            |> List.rev
+            |> List.truncate baselineWindow
+        window
+        |> List.collect (fun p -> Map.toList p.Metrics)
+        |> List.groupBy fst
+        |> List.map (fun (name, pairs) -> name, median (List.map snd pairs))
+        |> Map.ofList
+
+/// Run the measurement. Never judges: `bench-guard` does that, and the release deliberately
+/// wants the first without the second.
+let bench (args: string list) =
+    check ([ "Browser"; "Bench"; "--only"; "Editor performance" ] @ args)
+    let now = measured ()
+    match benchBaselines () with
+    | b when Map.isEmpty b ->
+        printfn "bench: no baseline yet (%d recorded points; %d needed)" (List.length (benchHistory ())) minimumHistory
+    | baselines ->
+        printfn ""
+        printfn "  %-26s %10s %10s %8s" "metric (vs baseline)" "baseline" "now" "change"
+        for KeyValue (name, value) in now do
+            if judged name then
+                match Map.tryFind name baselines with
+                | Some b when b > 0.0 ->
+                    printfn "  %-26s %10.2f %10.2f %+7.0f%%" name b value ((value / b - 1.0) * 100.0)
+                | _ -> ()
+        printfn ""
+
+/// Judge the measurement against the recorded history. The ONLY thing in this design that fails
+/// on a number, and it fails only on a big one.
+///
+/// `remeasure` re-runs the suite once when something trips and requires it to trip twice. The
+/// dominant flake mode is a single unlucky sample; the scenario costs seconds, so this buys most
+/// of the stability a repeat-until-stable loop would, for almost none of the time.
+let benchGuard () =
+    let baselines = benchBaselines ()
+    if Map.isEmpty baselines then
+        printfn
+            "bench-guard: %d recorded points (%d needed) — recording only, nothing to judge against."
+            (List.length (benchHistory ())) minimumHistory
+    else
+        let trips (values: Map<string, float>) =
+            [ for KeyValue (name, value) in values do
+                if judged name then
+                    match Map.tryFind name baselines with
+                    | Some baseline when baseline > 0.0 ->
+                        let limit = thresholdFor name baseline
+                        if value > limit then yield name, baseline, value, limit
+                    | _ -> () ]
+        match trips (measured ()) with
+        | [] -> printfn "bench-guard: no metric is more than %gx its baseline." regressionFactor
+        | first ->
+            printfn "bench-guard: %d metric(s) over the line — measuring again before calling it." (List.length first)
+            bench []
+            let again = trips (measured ())
+            let confirmed =
+                again |> List.filter (fun (name, _, _, _) -> first |> List.exists (fun (n, _, _, _) -> n = name))
+            if List.isEmpty confirmed then
+                printfn "bench-guard: nothing tripped twice — treating the first run as noise."
+            else
+                let lines =
+                    confirmed
+                    |> List.map (fun (name, baseline, value, limit) ->
+                        let firstValue =
+                            first |> List.pick (fun (n, _, v, _) -> if n = name then Some v else None)
+                        sprintf
+                            "  %s: baseline %.2f, measured %.2f then %.2f, limit %.2f (%.1fx baseline)"
+                            name baseline firstValue value limit (value / baseline))
+                failwithf
+                    "bench-guard: a big performance regression, confirmed by a second measurement:\n%s\n\
+                     Baseline is the median of the last %d recorded points on the `%s` branch. Small\n\
+                     regressions are charted, not enforced — this is over %gx (%gx for the slope)."
+                    (String.concat "\n" lines) baselineWindow benchBranch regressionFactor slopeFactor
+
+// --- the chart -------------------------------------------------------------------------------
+
+// Hand-authored SVG, for two reasons. It adds no dependency to a repository that has been
+// careful about them, and the asset has to read on GitHub in BOTH themes — which one
+// `prefers-color-scheme` block inside the file handles and no chart library reliably does.
+//
+// Small multiples: one panel per metric, x = release, one line per document size. The sweep is
+// the whole point of the suite, so it is the whole point of the picture.
+
+let private panelW, panelH = 300.0, 150.0
+let private padL, padT, gapX, gapY = 46.0, 26.0, 26.0, 42.0
+
+let private benchSeries = [ "type"; "receive"; "caret.push"; "caret.paint" ]
+let private benchSizes = [ 200; 2_000; 20_000 ]
+/// One hue per document size, darkest = largest. Ordered, because the sizes are.
+let private sizeColours = [ "#7fd0f5"; "#1ba1e2"; "#0b5f88" ]
+
+let private svgEscape (t: string) = t.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;")
+
+let private renderChart (history: BenchPoint list) : string =
+    let sb = Text.StringBuilder ()
+    let add (fmt: Printf.StringFormat<'a, unit>) = Printf.kprintf (fun s -> sb.AppendLine s |> ignore) fmt
+    // Every panel plus one for the slope, two across.
+    let panels = benchSeries @ [ slopeMetric ]
+    let cols = 2
+    let rows = (List.length panels + cols - 1) / cols
+    let width = padL + float cols * (panelW + gapX)
+    let height = padT + float rows * (panelH + gapY) + 18.0
+    add "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 %.0f %.0f\" width=\"%.0f\" role=\"img\" aria-label=\"Yession editor latency by release, at three document sizes\">" width height width
+    add "<style>"
+    add "  :root { --ink:#1c1c1c; --dim:#6b6b6b; --grid:#e2e2e2; --ground:#ffffff }"
+    add "  @media (prefers-color-scheme: dark) { :root { --ink:#f0f0f0; --dim:#9a9a9a; --grid:#2a2a2a; --ground:#0d1117 } }"
+    add "  text { font-family: ui-sans-serif, system-ui, sans-serif; fill: var(--ink) }"
+    add "  .ax { fill: var(--dim); font-size: 9px }"
+    add "  .ti { font-size: 11px; font-weight: 600 }"
+    add "  .gr { stroke: var(--grid); stroke-width: 1 }"
+    add "</style>"
+    add "<rect width=\"100%%\" height=\"100%%\" fill=\"var(--ground)\"/>"
+
+    let at (i: int) = padL + float (i % cols) * (panelW + gapX), padT + float (i / cols) * (panelH + gapY)
+    let points (name: string) = history |> List.map (fun p -> Map.tryFind name p.Metrics)
+
+    panels |> List.iteri (fun i metric ->
+        let x0, y0 = at i
+        let series =
+            if metric = slopeMetric then [ (metric, "") ]
+            else benchSizes |> List.map (fun size -> sprintf "%s.p50@%d" metric size, string size)
+        let values = series |> List.collect (fun (n, _) -> points n |> List.choose id)
+        let top = if List.isEmpty values then 1.0 else max 0.001 (List.max values) * 1.15
+        add "<text class=\"ti\" x=\"%.0f\" y=\"%.0f\">%s</text>" x0 (y0 - 8.0) (svgEscape metric)
+        add "<line class=\"gr\" x1=\"%.0f\" y1=\"%.0f\" x2=\"%.0f\" y2=\"%.0f\"/>" x0 (y0 + panelH) (x0 + panelW) (y0 + panelH)
+        add "<line class=\"gr\" x1=\"%.0f\" y1=\"%.0f\" x2=\"%.0f\" y2=\"%.0f\"/>" x0 y0 x0 (y0 + panelH)
+        add "<text class=\"ax\" x=\"%.0f\" y=\"%.0f\" text-anchor=\"end\">%.1f%s</text>" (x0 - 4.0) (y0 + 8.0) top (if metric = slopeMetric then "x" else "ms")
+        add "<text class=\"ax\" x=\"%.0f\" y=\"%.0f\" text-anchor=\"end\">0</text>" (x0 - 4.0) (y0 + panelH)
+        let n = max 1 (List.length history - 1)
+        series |> List.iteri (fun k (name, label) ->
+            let colour = if metric = slopeMetric then "#a8dd00" else List.item (min k (List.length sizeColours - 1)) sizeColours
+            let path =
+                points name
+                |> List.mapi (fun j v -> j, v)
+                |> List.choose (fun (j, v) -> v |> Option.map (fun v ->
+                    sprintf "%.1f,%.1f" (x0 + panelW * float j / float n) (y0 + panelH - panelH * v / top)))
+            if not (List.isEmpty path) then
+                add "<polyline fill=\"none\" stroke=\"%s\" stroke-width=\"1.6\" points=\"%s\"/>" colour (String.concat " " path)
+                if label <> "" then
+                    add "<text class=\"ax\" x=\"%.0f\" y=\"%.0f\" fill=\"%s\">%s</text>" (x0 + panelW - 4.0) (y0 + 10.0 + 11.0 * float k) colour (svgEscape (label + " chars"))))
+
+    let last = history |> List.tryLast |> Option.map (fun p -> p.Label) |> Option.defaultValue "?"
+    add "<text class=\"ax\" x=\"%.0f\" y=\"%.0f\">%d releases, oldest left · newest: %s · p50 · lower is better</text>" padL (height - 4.0) (List.length history) (svgEscape last)
+    add "</svg>"
+    sb.ToString ()
+
+/// Record this measurement and redraw. Appends one line to the orphan `bench` branch and pushes
+/// it; the chart is rendered from the whole history, including the line just added.
+let benchPublish (label: string) =
+    let metrics = File.ReadAllText benchJson
+    let stamp = DateTime.UtcNow.ToString "yyyy-MM-ddTHH:mm:ssZ"
+    let commit = tryRun "git" [ "rev-parse"; "--short"; "HEAD" ] |> Option.defaultValue "?"
+    let runner =
+        match Environment.GetEnvironmentVariable "RUNNER_OS" with
+        | null | "" -> Environment.OSVersion.Platform.ToString ()
+        | os -> os
+    // One line, so appending is appending and the history is diffable by eye.
+    let line =
+        sprintf
+            "{\"version\":%s,\"commit\":%s,\"at\":%s,\"runner\":%s,\"metrics\":%s}"
+            (Text.Json.JsonSerializer.Serialize label)
+            (Text.Json.JsonSerializer.Serialize commit)
+            (Text.Json.JsonSerializer.Serialize stamp)
+            (Text.Json.JsonSerializer.Serialize runner)
+            (Text.Json.JsonSerializer.Serialize (Text.Json.JsonDocument.Parse(metrics).RootElement))
+
+    // A worktree rather than a checkout: this runs in a tree that has just built, and a branch
+    // switch under it would be a surprise to everything else in the job.
+    let work = Path.Combine (Path.GetTempPath (), sprintf "yession-bench-%s" (Path.GetRandomFileName ()))
+    tryRun "git" [ "fetch"; "origin"; sprintf "%s:%s" benchBranch benchBranch ] |> ignore
+    let existing = benchHistory ()
+    if tryRun "git" [ "rev-parse"; "--verify"; benchBranch ] |> Option.isSome then
+        exec "git" [ "worktree"; "add"; work; benchBranch ]
+    else
+        // First ever run: an ORPHAN, so this branch shares no history with master and nothing
+        // that walks master's log ever sees a measurement commit.
+        exec "git" [ "worktree"; "add"; "--detach"; work; "HEAD" ]
+        exec "git" [ "-C"; work; "checkout"; "--orphan"; benchBranch ]
+        exec "git" [ "-C"; work; "rm"; "-rf"; "--quiet"; "." ]
+    try
+        File.AppendAllText (Path.Combine (work, benchHistoryFile), line + "\n")
+        exec "git" [ "-C"; work; "add"; benchHistoryFile ]
+        exec "git" [ "-C"; work; "-c"; "user.name=yession-bench"; "-c"; "user.email=bench@yession.invalid"
+                     "commit"; "-m"; sprintf "bench: %s" label ]
+        exec "git" [ "-C"; work; "push"; "origin"; benchBranch ]
+    finally
+        exec "git" [ "worktree"; "remove"; "--force"; work ]
+
+    Directory.CreateDirectory dist |> ignore
+    let history = existing @ [ { Label = label; Metrics = readMetrics metrics } ]
+    File.WriteAllText (benchSvg, renderChart history)
+    printfn "bench-publish: recorded %s on `%s` (%d points) -> %s" label benchBranch (List.length history) benchSvg
+
 // --- lint: the GitHub Actions workflows -------------------------------------------------------
 
 // A workflow file is only validated by GitHub when it RUNS. release.yml runs on master — after a
@@ -1099,6 +1390,9 @@ match arg 1 with
 | Some "check" -> check (rest 2)
 | Some "verify" -> verify (rest 2)
 | Some "lint" -> lint ()
+| Some "bench" -> bench (rest 2)
+| Some "bench-guard" -> benchGuard ()
+| Some "bench-publish" -> benchPublish (arg 2 |> Option.defaultWith defaultVersion)
 | Some "package" -> package (arg 2 |> Option.defaultWith defaultVersion)
 | Some "install-smoke" ->
     match arg 2 with

@@ -208,6 +208,63 @@ let private exposeConvState (f: unit -> string) : unit = jsNative
 })""")>]
 let private convStateJson (docA: string) (docB: string) (pushes: int) : string = jsNative
 
+// --- The performance surface's interop ---------------------------------------------------
+
+[<Emit("performance.now()")>]
+let private now () : float = jsNative
+
+/// Resolve on the next animation frame — the browser saying "I have painted". Every latency
+/// here is measured against this and nothing else.
+[<Emit("new Promise(r => requestAnimationFrame(() => r()))")>]
+let private nextFrame () : JS.Promise<unit> = jsNative
+
+/// Every keystroke reaching `host`, timed from the browser's OWN event timestamp to the frame
+/// it paints on. `event.timeStamp` shares `performance.now()`'s time origin, so the difference
+/// is real input-to-paint including the browser's dispatch — which is what a person means by
+/// "does typing feel instant".
+///
+/// Deliberately NOT the Event Timing API: `PerformanceEventTiming.duration` is rounded to 8ms
+/// for privacy. That is a fine threshold for judging one interaction and useless for watching
+/// a trend move, which is this suite's whole job.
+///
+/// Capturing (`true`), so a keystroke is timed from before the editor sees it.
+[<Emit("""(function (host, take) {
+  host.addEventListener('keydown', function (e) {
+    requestAnimationFrame(function () { take(performance.now() - e.timeStamp) })
+  }, true)
+})($0, $1)""")>]
+let private onKeystrokePainted (host: obj) (take: float -> unit) : unit = jsNative
+
+/// Two named number series as one JSON object — the shape every scenario returns.
+[<Emit("JSON.stringify({ [$0]: $1, [$2]: $3 })")>]
+let private twoSeries (a: string) (xs: float[]) (b: string) (ys: float[]) : string = jsNative
+
+[<Emit("(function(f){ window.__benchSeed = f; })($0)")>]
+let private exposeSeed (f: int -> JS.Promise<int>) : unit = jsNative
+
+[<Emit("(function(f){ window.__benchCarets = f; })($0)")>]
+let private exposeCarets (f: int -> JS.Promise<string>) : unit = jsNative
+
+[<Emit("(function(f){ window.__benchReset = f; })($0)")>]
+let private exposeBenchReset (f: unit -> unit) : unit = jsNative
+
+[<Emit("(function(f){ window.__benchTyping = f; })($0)")>]
+let private exposeTyping (f: unit -> string) : unit = jsNative
+
+/// Markdown of roughly `chars` characters, as paragraphs rather than one enormous line: what
+/// the reconciliation walks is NODES, so a document's structure is part of what is being
+/// measured and a single block would flatter it.
+let private filler (chars: int) : string =
+    let sentence = "The quick brown fox jumps over the lazy dog. "
+    let perPara = 200
+    let one = (String.replicate (perPara / sentence.Length + 1) sentence).Substring (0, perPara)
+    String.concat "\n\n" (List.replicate (max 1 (chars / perPara)) one)
+
+/// Set by the bench wiring below, called by the relay. A mutable seam rather than a second
+/// relay registration, because two listeners on one doc would make the ORDER of "carry it" and
+/// "start the clock" something the reader has to guess at.
+let mutable private relayObserved : unit -> unit = ignore
+
 let private docA = Y.Doc.Create ()
 let private docB = Y.Doc.Create ()
 
@@ -215,7 +272,10 @@ do
     // The relay: each doc's local updates become the other's remote ones, exactly as the
     // Session Process relays them between two browsers — minus the transport.
     DocSync.onLocalUpdate docA (fun payload -> DocSync.applyRemote docB payload) |> ignore
-    DocSync.onLocalUpdate docB (fun payload -> DocSync.applyRemote docA payload) |> ignore
+    DocSync.onLocalUpdate docB (fun payload ->
+        relayObserved ()
+        DocSync.applyRemote docA payload)
+    |> ignore
 
     // Watch the MIRROR: it is the one whose carets are pushed, so it is the one whose
     // write-back would race the content arriving into it.
@@ -229,8 +289,9 @@ do
     // with its own binding writing back into its own doc. A read-only mount is the easier case
     // and proves less — it was the first thing this surface tried, and it converged happily.
     let mutable selectionA : (string * string) option = None
+    let mutable selectionB : (string * string) option = None
     Editor.mountEditor peerAHost fragmentA false (fun sel -> selectionA <- sel) None "" |> ignore
-    let mirror = Editor.mountEditor peerBHost fragmentB false ignore None ""
+    let mirror = Editor.mountEditor peerBHost fragmentB false (fun sel -> selectionB <- sel) None ""
 
     let mutable storming = false
     let mutable pushes = 0
@@ -268,6 +329,84 @@ do
             storming <- true
             onFrame storm
         else storming <- on)
+
+    // --- What a person waits for ----------------------------------------------------------
+    //
+    // Three latencies and one budget, over the same two peers. `check` proves behaviour and
+    // says nothing about time, so a cost like y-prosemirror's whole-document reconciliation on
+    // every caret push (`view.update` is not gated on `docChanged`) degrades silently until
+    // somebody notices typing feels bad on a long message.
+    //
+    // Every measurement is the same primitive: mark a start, and let the browser say when it
+    // painted. Three uses, one thing to get right.
+    //
+    // Sampled at several document SIZES by the driver, which is the whole point — the concern
+    // is O(document), and a number taken at one size cannot show a complexity regression at
+    // all. The size sweep is what turns four latencies into a slope.
+
+    let typeSamples = ResizeArray<float> ()
+    let receiveSamples = ResizeArray<float> ()
+
+    // Local echo: the author's own keystroke, from the browser's event timestamp to the frame
+    // it paints on. Peer B is the one the driver types into, so B is the one listened to.
+    onKeystrokePainted peerBHost typeSamples.Add
+
+    // The other half of the same keystroke: the co-editor's screen. Marked at the relay, which
+    // is where an update "arrives" — everything after it (apply, render, paint) is what the
+    // person on the other end is waiting through.
+    relayObserved <- fun () ->
+        let t0 = now ()
+        onFrame (fun () -> receiveSamples.Add (now () - t0))
+
+    exposeBenchReset (fun () ->
+        typeSamples.Clear ()
+        receiveSamples.Clear ())
+
+    exposeTyping (fun () ->
+        twoSeries "type" (typeSamples.ToArray ()) "receive" (receiveSamples.ToArray ()))
+
+    // Fill BOTH docs to roughly `chars`, through the real relay, and settle. One write rather
+    // than a keystroke drip: this is setup, and nothing here is timed.
+    exposeSeed (fun chars ->
+        async {
+            Markdown.intoFragment (filler chars) fragmentA
+            do! nextFrame () |> Async.AwaitPromise
+            do! nextFrame () |> Async.AwaitPromise
+            return (Markdown.ofFragment fragmentB).Length
+        }
+        |> Async.StartAsPromise)
+
+    // The caret push, timed twice: the WORK (everything `view.dispatch` sets off, which is the
+    // reconciliation this suite exists to watch) and the WAIT (until it is on screen).
+    //
+    // A frame is yielded between samples so the browser can actually paint. A tight loop would
+    // measure a hot cache and a starved compositor, which is nobody's experience.
+    exposeCarets (fun samples ->
+        async {
+            let push = ResizeArray<float> ()
+            let paint = ResizeArray<float> ()
+            for _ in 1 .. samples do
+                // The decoration set is rebuilt on every `setMeta` regardless of whether the
+                // position moved (`presenceDecorationsPlugin`'s `apply`), so one position is
+                // enough to make the work real. It is B's OWN reported selection, which means
+                // it is a position that resolves in B's doc rather than a replayed constant.
+                let cursors =
+                    match selectionB with
+                    | Some (anchor, head) ->
+                        [ ({ Colour = "hsl(200, 70%, 55%)"
+                             Selection = "hsla(200, 70%, 55%, 0.25)"
+                             Name = "ada"
+                             Anchor = anchor
+                             Head = head } : Editor.RemoteBodyCursor) ]
+                    | None -> []
+                let t0 = now ()
+                mirror.PushPresences cursors
+                push.Add (now () - t0)
+                do! nextFrame () |> Async.AwaitPromise
+                paint.Add (now () - t0)
+            return twoSeries "push" (push.ToArray ()) "paint" (paint.ToArray ())
+        }
+        |> Async.StartAsPromise)
 
 // --- The shell, host-free (Plan 14, stage 2) --------------------------------------------
 //

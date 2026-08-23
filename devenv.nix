@@ -161,6 +161,11 @@ ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
   # actionlint over .github/workflows — release.yml is otherwise only validated when it runs,
   # which is on master, after a merge.
   scripts.lint.exec = ''exec dotnet fsi tasks.fsx lint'';
+  # Measuring, judging and recording, deliberately three: the release records without judging,
+  # a pull request judges without recording, and `bench` alone is what a person runs on a branch.
+  scripts.bench.exec = ''exec dotnet fsi tasks.fsx bench "$@"'';
+  scripts."bench-guard".exec = ''exec dotnet fsi tasks.fsx bench-guard'';
+  scripts."bench-publish".exec = ''exec dotnet fsi tasks.fsx bench-publish "$@"'';
   scripts.version.exec = ''exec dotnet fsi tasks.fsx version'';
   # Local package (compile + bundle + smoke + pack). For the release tarball as a Nix output,
   # use `devenv build outputs.npm`. Usage: package [1.2.3] — with no argument tasks.fsx computes
