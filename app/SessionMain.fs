@@ -600,7 +600,7 @@ Async.StartImmediate (
                       // what anyone here can act on, and `set_shell_profile` resolves it
                       // against the same root. The absolute path stays the sandbox's.
                       VisibleAt =
-                        Sandboxes.reposReachedFrom
+                        SandboxPath.reachedFrom
                             (workspaceFor SandboxName.defaultName)
                             (Sandboxes.reposVisibleAt workBackend reposDir)
                       ExtraReadPaths = []

@@ -416,6 +416,47 @@ let private sandboxPolicyTests =
             let docker = Sandboxes.policyFor DockerBackend ambient resolved None None
             Expect.equal (Map.tryFind "PATH" docker.Env) None "a docker image supplies its own base env"
             Expect.equal (Map.tryFind "TOKEN" docker.Env) (Some "t") "only the spec's variables inject"
+
+        // The one place a path in this session's vocabulary becomes an absolute one. Every
+        // backend's spawn asks this and nothing else does the arithmetic itself — which is
+        // what keeps `repos/octo/hello` meaning the same directory in the timeline, in a
+        // repo verb's answer, and in the shell a terminal opens.
+        testCase "a spawn's directory is resolved against the sandbox's own root" <| fun () ->
+            Expect.equal
+                (SandboxPath.resolvedFrom (Some "/data/s/workspace") (Some "repos/octo/hello"))
+                (Some "/data/s/workspace/repos/octo/hello")
+                "a relative path means what a terminal in this sandbox means by it"
+            Expect.equal
+                (SandboxPath.resolvedFrom (Some "/data/s/workspace/") (Some "repos/octo/hello"))
+                (Some "/data/s/workspace/repos/octo/hello")
+                "a trailing slash on the root is the same root"
+
+        testCase "an absolute directory is already an answer, and none at all is the root" <| fun () ->
+            Expect.equal
+                (SandboxPath.resolvedFrom (Some "/ws") (Some "/repos/octo/hello"))
+                (Some "/repos/octo/hello")
+                "docker's bind, a named sandbox's shared repos dir — resolved against nothing"
+            Expect.equal
+                (SandboxPath.resolvedFrom (Some "/ws") None)
+                (Some "/ws")
+                "a spawn with no opinion runs where the policy puts it"
+
+        // The round trip is the point: what a session HANDS OUT it has to be able to take
+        // back, or the two halves drift and a path stops naming a directory.
+        testCase "a directory handed out relative resolves back to the one it came from" <| fun () ->
+            let root = Some "/data/s/workspace"
+            let absolute = "/data/s/workspace/repos/octo/hello"
+            Expect.equal
+                (SandboxPath.resolvedFrom root (Some (SandboxPath.reachedFrom root absolute)))
+                (Some absolute)
+                "reachedFrom and resolvedFrom are one fact seen twice"
+
+        testCase "the sandbox's own root round-trips too, as the one path that is always true" <| fun () ->
+            // Otherwise the workspace itself is the one directory that can only be said with
+            // the operator's home directory in front of it.
+            let root = Some "/data/s/workspace"
+            Expect.equal (SandboxPath.reachedFrom root "/data/s/workspace") "." "where a terminal already stands"
+            Expect.equal (SandboxPath.resolvedFrom root (Some ".")) root "and back"
     ]
 
 // -----------------------------------------------------------------------------

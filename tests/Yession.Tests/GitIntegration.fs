@@ -97,25 +97,25 @@ let private pureTests =
         // directory. Relative only where that is TRUE.
         testCase "a checkout is reported from where a terminal stands, when it stands over it" <| fun () ->
             Expect.equal
-                (Sandboxes.reposReachedFrom (Some "/data/s/workspace") "/data/s/workspace/repos")
+                (SandboxPath.reachedFrom (Some "/data/s/workspace") "/data/s/workspace/repos")
                 "repos"
                 "the whole path an agent needs, and it survives a long data directory"
             Expect.equal
-                (Sandboxes.reposReachedFrom (Some "/data/s/workspace/") "/data/s/workspace/repos")
+                (SandboxPath.reachedFrom (Some "/data/s/workspace/") "/data/s/workspace/repos")
                 "repos"
                 "a trailing slash on the workspace is the same workspace"
 
         testCase "a checkout a terminal does not stand over is reported in full" <| fun () ->
             Expect.equal
-                (Sandboxes.reposReachedFrom None "/repos")
+                (SandboxPath.reachedFrom None "/repos")
                 "/repos"
                 "docker: the workspace is the image's, so nothing here knows what to relate to"
             Expect.equal
-                (Sandboxes.reposReachedFrom (Some "/data/s/sandboxes/review/workspace") "/data/s/workspace/repos")
+                (SandboxPath.reachedFrom (Some "/data/s/sandboxes/review/workspace") "/data/s/workspace/repos")
                 "/data/s/workspace/repos"
                 "a named sandbox reaches the shared directory from outside its own workspace"
             Expect.equal
-                (Sandboxes.reposReachedFrom (Some "/data/s/work") "/data/s/workspace/repos")
+                (SandboxPath.reachedFrom (Some "/data/s/work") "/data/s/workspace/repos")
                 "/data/s/workspace/repos"
                 "a shared prefix is not containment — `/work` does not contain `/workspace`"
 

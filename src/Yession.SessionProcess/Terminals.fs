@@ -720,10 +720,18 @@ module SessionTerminals =
           /// append without validating is an actor who can point every future terminal at a
           /// directory that is not there, and an actor able to validate without appending has
           /// only asked a question. `None` clears it.
+          ///
+          /// The directory arrives, and is stored, in the vocabulary the rest of the session
+          /// speaks (`SandboxPath`): as a terminal in that sandbox reaches it. What the
+          /// sandbox resolves it to is the sandbox's own business and stays there.
           SetProfile : ActorRef -> SandboxName -> string option -> Async<Result<string, string>>
           /// Clear every profile whose directory is inside this tree, because the tree is
           /// about to stop existing (Plan 26; Plan 25's upstream half). Answers with the
           /// sandboxes it cleared, so the caller can say so.
+          ///
+          /// The tree is a path as a terminal reaches it, which is what `SetProfile` stores
+          /// and what a repo verb answers with — the two have to be one vocabulary or this
+          /// compares a relative path against an absolute one and clears nothing.
           ///
           /// Here rather than at the caller for the reason `SetProfile` is: whoever is
           /// deleting a tree knows only that it is going, and a caller left to work out
@@ -1995,15 +2003,23 @@ module SessionTerminals =
                 // Checked AND RESOLVED in one spawn, by the sandbox, because the sandbox
                 // is the only thing that knows both. `cd` lands a relative path against
                 // the sandbox's own working directory — the same root a terminal opens in,
-                // which is what makes `repos/octo/hello` mean anything — and `pwd` says
-                // where that turned out to be. What gets stored is always the absolute
-                // answer, so the projection, the spawn and Plan 26's tree matching never
-                // see a path whose meaning depends on where anyone stood.
+                // which is what makes `repos/octo/hello` mean anything — and the two `pwd`s
+                // say what that root is and where the path turned out to be. Both, in one
+                // spawn: the answer is only a path this session can hold once it is stated
+                // relative to the root, and a second spawn to ask for the root is a second
+                // sandbox state to disagree with the first.
                 //
                 // This is why a relative path is no longer refused. The old objection was
                 // that "relative to what" is the very thing being set — true of a SHELL's
                 // idea of relative, and not true of the sandbox's, which is fixed and
                 // known before any of this runs.
+                //
+                // What gets STORED is `SandboxPath.reachedFrom` of the two: the directory as
+                // a terminal here reaches it, which is the same vocabulary the repo verbs
+                // answer in and the only one `ClearProfilesUnder` can compare against. The
+                // absolute form stays the sandbox's business — it is the operator's home
+                // directory, and every reader of the projection (the timeline note, the
+                // query, the tool's own answer) would otherwise carry it.
                 let! checked' =
                     match ensured, cwd with
                     | EnvironmentUnavailable reason, _ -> async { return Error reason }
@@ -2014,7 +2030,7 @@ module SessionTerminals =
                             let! spawned =
                                 (environmentFor sandbox).Spawn
                                     { Executable = shell.Executable
-                                      Arguments = shell.Arguments @ [ "cd \"$1\" && pwd"; "sh"; path ]
+                                      Arguments = shell.Arguments @ [ "pwd && cd \"$1\" && pwd"; "sh"; path ]
                                       Env = Map.empty
                                       WorkingDirectory = None }
                                     (fun (stream, chunk) ->
@@ -2026,18 +2042,24 @@ module SessionTerminals =
                             | Ok handle ->
                                 match! handle.Exited with
                                 | SandboxExited 0 ->
-                                    match answered.Trim () with
-                                    | "" ->
-                                        // `cd` succeeded and `pwd` said nothing, which no
-                                        // shell does. Refused rather than stored: a profile
-                                        // of "" is a terminal that opens nowhere.
+                                    let said =
+                                        answered.Split '\n'
+                                        |> Array.map (fun line -> line.Trim ())
+                                        |> Array.filter (fun line -> line <> "")
+                                        |> List.ofArray
+                                    match said with
+                                    | [ root; resolved ] -> return Ok (Some (SandboxPath.reachedFrom (Some root) resolved))
+                                    | _ ->
+                                        // `cd` succeeded and the two `pwd`s did not answer,
+                                        // which no shell does. Refused rather than stored: a
+                                        // profile assembled out of whatever else came back is
+                                        // a terminal that opens nowhere.
                                         return
                                             Error (
                                                 sprintf
                                                     "the %s sandbox could not say where %s is, so nothing was set."
                                                     name
                                                     path)
-                                    | resolved -> return Ok (Some resolved)
                                 | SandboxExited _ ->
                                     return
                                         Error (
@@ -2057,7 +2079,8 @@ module SessionTerminals =
                         SessionEvent.ShellProfileSet
                             { MessageId = mintMessageId ()
                               Sandbox = sandbox
-                              // The RESOLVED path, never what the caller typed.
+                              // The path the sandbox resolved, said the way a terminal here
+                              // reaches it — never what the caller typed.
                               WorkingDirectory = resolved
                               Actor = actor }
                     do! appendAs actor event
@@ -2082,8 +2105,12 @@ module SessionTerminals =
                         let! _ = closeTerminal id "the shell profile changed"
                         ()
                     | _ -> ()
+                    // What was STORED, not what the caller typed: the answer, the timeline
+                    // note and the query say one thing, and it is the thing anybody here can
+                    // act on. An agent told it set the profile to a path in a vocabulary
+                    // nothing else uses is an agent that will hand that path back.
                     let where =
-                        match cwd with
+                        match resolved with
                         | Some path -> sprintf "new terminals in %s start in %s." name path
                         | None -> sprintf "new terminals in %s start where the sandbox puts them." name
                     let mine =
