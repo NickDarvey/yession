@@ -947,6 +947,26 @@ module View =
     [<Fable.Core.Emit("(function (e) { return (e && e.target && typeof e.target.selectionStart === 'number') ? [e.target.selectionStart, e.target.selectionEnd] : null })($0)")>]
     let private selectionOf (e: obj) : (int * int) option = Fable.Core.Util.jsNative
 
+    /// Enter, in a one-line field that has nothing to submit: let go of it.
+    ///
+    /// The title is a CRDT — every keystroke is already written, shared and reported to the
+    /// Manager, so there is no save left for a key to perform. What there IS on a phone is a
+    /// keyboard filling half the screen, held open by the field's own focus, with no submit
+    /// button anywhere to close it: the return key does nothing, so the edit reads as one the
+    /// app never took. Blurring is what a text input can honestly do with Enter — it closes
+    /// the keyboard, uncovers the title that was just typed, and clears the presence caret
+    /// through the field's own `@blur`.
+    ///
+    /// `isComposing` guards the IME exactly as the command line's Enter does (`Browser`'s
+    /// `bindTerminalInput`): mid-composition, Enter accepts a candidate word, and taking the
+    /// field away from someone in the middle of typing one is not what they asked for.
+    [<Fable.Core.Emit("""(function (e) {
+  if (e.key !== 'Enter' || e.isComposing) return
+  e.preventDefault()
+  e.currentTarget.blur()
+})($0)""")>]
+    let private commitOnEnter (e: obj) : unit = Fable.Core.Util.jsNative
+
     /// The bytes a keydown means to a pty (Plan 14, stage 6).
     ///
     /// A keyboard event is not a byte stream, and the translation is the whole of what a
@@ -1035,11 +1055,17 @@ module View =
             <header class="{Style.header}">
               <button type="button" class="{Style.cls [ Style.navChevronForward; Style.navReopen ]}" aria-label="Show sidebar" data-nav-toggle="show" @click={Ev(fun _ -> actions.ToggleNav ())}>{Icon.right}</button>
               <div class="{Style.titleWrap}">
+                <!-- `enterkeyhint="done"` because that is what the return key now does here
+                     (`commitOnEnter`): it finishes with the field. A phone draws the hint on
+                     the key itself, so the promise is legible before it is pressed rather
+                     than only after. -->
                 <input type="text" class="{Style.titleInput}" data-session-title aria-label="Session title" placeholder="session"
                        autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"
+                       enterkeyhint="done"
                        value="{titleStr}"
                        .value={titleStr}
                        @input={EvVal(fun v -> dispatch (EditTitleMsg (Ylmish.Text.edit v model.Synced.Title)))}
+                       @keydown={Ev(fun e -> commitOnEnter e)}
                        @keyup={Ev(fun e -> actions.ReportTitleSelection (selectionOf e))}
                        @click={Ev(fun e -> actions.ReportTitleSelection (selectionOf e))}
                        @select={Ev(fun e -> actions.ReportTitleSelection (selectionOf e))}
