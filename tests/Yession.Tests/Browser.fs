@@ -215,7 +215,14 @@ let private reporting (label: string) (page: IPage) (ev: Evidence) (body: Async<
                                            try {
                                              const out = {}
                                              for (const n of await caches.keys()) {
-                                               out[n] = (await (await caches.open(n)).keys()).length
+                                               const reqs = await (await caches.open(n)).keys()
+                                               // The ADDRESSES, not just how many. A transcript
+                                               // answer is kept under the cursor it was asked
+                                               // from, so the address says which line the entry
+                                               // starts on — and a replay that has entries but
+                                               // none starting at the beginning folds nothing.
+                                               // "6 entries" cannot tell those apart.
+                                               out[n] = reqs.map(r => r.url.replace(location.origin, '').replace(/\?token=[^&]*/, ''))
                                              }
                                              return out
                                            } catch (e) { return 'unreadable: ' + e.message }
@@ -1606,6 +1613,29 @@ let private printedInTerminal = "printed-before-the-session-died"
 /// killing the session inside it left the reload nothing to replay and the case timed out
 /// naming no cause. Waiting on the store is the difference between testing this and testing
 /// that race, exactly as waiting on the worker's registration is below.
+/// The store search `keptIn` is, with the body test spelled out — for a case where "the text
+/// is in there somewhere" is not the question being asked.
+let private keptWhere (cachePart: string) (bodyTest: string) =
+    sprintf
+        """(async () => {
+             try {
+               const names = (await caches.keys()).filter(n => n.includes('%s'))
+               for (const n of names) {
+                 const c = await caches.open(n)
+                 for (const req of await c.keys()) {
+                   const r = await c.match(req)
+                   if (r) {
+                     const body = await r.text()
+                     if (%s) return true
+                   }
+                 }
+               }
+             } catch (e) { return false }
+             return false
+           })()"""
+        cachePart
+        bodyTest
+
 let private keptIn (cachePart: string) (text: string) =
     sprintf
         """(async () => {
@@ -1624,7 +1654,22 @@ let private keptIn (cachePart: string) (text: string) =
         cachePart
         text
 
-let private transcriptKept = keptIn "/terminals/" printedInTerminal
+/// The transcript store holding what the terminal PRINTED — an asciicast `"o"` record, not
+/// the `"i"` record of the command that caused it.
+///
+/// The distinction is the whole precondition. `echo printed-before-the-session-died` CONTAINS
+/// the text this case looks for, so a plain search of the store is satisfied the moment the
+/// typed line is kept — before the shell has answered, let alone before the answer has been
+/// fetched and written. The session was then killed inside that window and the reload replayed
+/// a recording with the command in it and no output, so `[data-terminal-output]` never carried
+/// the text and the case timed out naming a wait rather than a cause. Green on an idle box,
+/// red on a loaded runner, twice on the release gate.
+let private transcriptKept =
+    keptWhere
+        "/terminals/"
+        (sprintf
+            """body.split('\n').some(l => l.includes('"o"') && l.includes('%s'))"""
+            printedInTerminal)
 let private conversationKept = keptIn "/events" saidInTimeline
 
 let private terminalPrinted =
