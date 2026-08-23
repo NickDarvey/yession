@@ -114,6 +114,21 @@ jobs:
       - name: Cheap tier + browser + native WebRTC/host E2E + sandbox escape probes + serial + jumpstarter
         run: devenv shell -- check Browser Ports Native Srt Serial Jumpstarter
 
+  # What a person waits for, and whether this pull request made it worse. Its own job, parallel
+  # to `test`, so it costs nothing on the gate's critical path — and blocking, because a
+  # regression should be caught by the person who caused it rather than read off a chart weeks
+  # later. Only a BIG one fails (3x a baseline that is the median of the last ten releases); the
+  # thresholds and the reasoning are in tasks.fsx.
+  #
+  # It does NOT record. The history is master's, and a pull request measuring itself into it
+  # would make the baseline a average of everything anybody ever tried.
+  bench:
+    uses: ./.github/workflows/bench.yml
+    with:
+      guard: true
+      record: false
+    secrets: inherit
+
   # The installable package, built on macOS. flake.nix advertises aarch64-darwin and
   # x86_64-darwin and nix/node-datachannel.nix claims platforms.unix, but every other job
   # here is ubuntu-latest — so the darwin build went unexercised, and silently unbuildable:

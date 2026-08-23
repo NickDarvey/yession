@@ -44,6 +44,7 @@ type Need =
     | Pty         // the native `node-pty` addon — a real pseudo-terminal, not a pipe
     | Serial      // a real serial engine: the `serialport` addon, `udevadm`, and socat for a PTY pair
     | Jumpstarter // uv, and a resolvable Python environment for the jumpstarter example
+    | Bench       // this run is MEASURING, not asserting — see `tasks.fsx bench`
 
 // process.env under Node; the CLR reads it through System.Environment below. Guarded so this
 // branch is dead-code-eliminated out of the .NET build path — jsNative would throw there.
@@ -56,6 +57,9 @@ let private getEnv (name: string) : string =
         match System.Environment.GetEnvironmentVariable name with null -> "" | v -> v
     else jsEnv name
 
+// `Bench` is deliberately absent: `verify` means "every capability", and a timing suite in the
+// release gate is minutes of runtime buying a number nothing in the gate asserts on. It is asked
+// for by name, by `tasks.fsx bench`, and nowhere else.
 let private allNeeds = [ Browser; Ports; Native; Docker; LiveAgent; Keyring; Nix; Srt; Pty; Serial; Jumpstarter ]
 
 let private parseNeed (s: string) : Need option =
@@ -71,6 +75,7 @@ let private parseNeed (s: string) : Need option =
     | "pty"       -> Some Pty
     | "serial"    -> Some Serial
     | "jumpstarter" -> Some Jumpstarter
+    | "bench"     -> Some Bench
     | _           -> None
 
 /// The capabilities THIS run declares it has. `YESSION_TEST_CAPS` is the primary API (a
