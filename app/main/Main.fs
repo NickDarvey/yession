@@ -31,7 +31,12 @@ let private expect =
     | Ok v -> v
     | Error e -> failwith e
 
-let private sessionKey = Interop.envOr "YESSION_SESSION" "local-session"
+// The session this Manager creates and launches at boot. An OPERATOR variable, despite
+// having once shared a name with the per-launch identity the Manager MINTS for a child
+// (`Launch.Variable`) — one name meaning two different things in two processes, on opposite
+// sides of the trust boundary.
+let private defaultSession =
+    Interop.envOr "YESSION_DEFAULT_SESSION" (SessionId.value SessionId.local)
 let private dataDir = Interop.envOr "YESSION_DATA_DIR" ".yession"
 // The management UI wants a bookmarkable address, so its default is fixed; a second
 // Manager instance must choose its own port (bind conflicts fail loudly).
@@ -124,10 +129,10 @@ Async.StartImmediate(
                 (Some ManagerUi.tryHandle)
 
         // Ensure the default session exists (an existing registration is resume).
-        let sessionId = SessionId.create sessionKey |> expect
+        let sessionId = SessionId.create defaultSession |> expect
         match manager.TryFind sessionId with
         | Some _ -> ()
-        | None -> manager.CreateSession sessionKey sessionKey |> expect |> ignore
+        | None -> manager.CreateSession defaultSession defaultSession |> expect |> ignore
 
         // An ARCHIVED default session is not launched, and is not fatal. Launching it is a
         // convenience, not a precondition for the Manager — and a boot that died here would
@@ -143,14 +148,14 @@ Async.StartImmediate(
         if archived then
             printfn
                 "Yession Manager: session %s is archived — not launching it. Unarchive it in the management UI."
-                sessionKey
+                defaultSession
         else
             match! manager.Launch sessionId with
             | Error reason -> failwithf "default session failed to launch: %s" reason
             | Ok sessionPort ->
                 printfn
                     "Yession Manager: session %s launched at http://127.0.0.1:%d/  (child process, data=%s)"
-                    sessionKey
+                    defaultSession
                     sessionPort
                     dataDir
 

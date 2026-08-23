@@ -75,6 +75,15 @@ module SessionId =
     /// Mint a fresh id: 128 random bits, Crockford base32-encoded (26 chars, Docker-safe).
     let mint () : SessionId = SessionId (Base32Crockford.encode (Base32Crockford.guidBytes ()))
 
+    /// The id a Session Process runs under when nobody minted one for it: a bare
+    /// `yession-session`, the test harness, and the Manager's own default session.
+    ///
+    /// Named here, beside the rule it satisfies, rather than spelled as a string literal at
+    /// each of the three boundaries that wanted it — each of which had to `create` it and
+    /// then decide what to do with an `Error` that cannot happen. Constructed directly, so
+    /// it is a `SessionId` and not a `Result` nobody knows how to fail.
+    let local : SessionId = SessionId "local-session"
+
     let value (SessionId s) = s
 
 type PeerId = private PeerId of string

@@ -1695,7 +1695,7 @@ let private startMountedHost () : unit =
     psi.UseShellExecute <- false
     psi.RedirectStandardOutput <- true
     psi.EnvironmentVariables.["YESSION_MANAGER_PORT"] <- string MOUNT_MANAGER_PORT
-    psi.EnvironmentVariables.["YESSION_SESSION"] <- MOUNT_SESSION
+    psi.EnvironmentVariables.["YESSION_DEFAULT_SESSION"] <- MOUNT_SESSION
     psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- mountDataDir
     psi.EnvironmentVariables.["YESSION_MANAGER_URL"] <- sprintf "http://127.0.0.1:%d" MOUNT_MANAGER_PORT
     psi.EnvironmentVariables.["YESSION_SESSION_URL"] <- sprintf "http://127.0.0.1:%d/s/{id}" MOUNT_PROXY_PORT
@@ -2254,7 +2254,7 @@ let private startFrontedHost () : unit =
     psi.UseShellExecute <- false
     psi.RedirectStandardOutput <- true
     psi.EnvironmentVariables.["YESSION_MANAGER_PORT"] <- string FRONT_MANAGER_PORT
-    psi.EnvironmentVariables.["YESSION_SESSION"] <- FRONT_SESSION
+    psi.EnvironmentVariables.["YESSION_DEFAULT_SESSION"] <- FRONT_SESSION
     psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- frontDataDir
     psi.EnvironmentVariables.["YESSION_MANAGER_URL"] <- sprintf "http://127.0.0.1:%d" FRONT_PORT
     psi.EnvironmentVariables.["YESSION_SESSION_URL"] <- sprintf "http://127.0.0.1:%d/s/{id}" FRONT_PORT
