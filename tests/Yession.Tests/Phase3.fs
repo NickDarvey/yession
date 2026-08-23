@@ -2,7 +2,7 @@ module Yession.Tests.Phase3
 
 // Phase 3 (Steps 15–16) verification: the collaborative message queue and the drain.
 //
-// The named races from docs/plans/01-turn-scheduling.md — delete-vs-accept and
+// The named turn-scheduling races — delete-vs-accept and
 // reorder-vs-accept in both orderings, edit-vs-accept, the crash-window repair, and
 // drain liveness/single-flight — are pinned deterministically: peers are real client
 // programs on their own Yjs docs, "delivery" is an explicit update application (so a

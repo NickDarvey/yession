@@ -4,8 +4,7 @@ open System
 open Yession.Domain
 
 /// Function-shaped event-log capabilities. The Session Process is the only caller of
-/// these. See docs/design.md §1 ("Durable facts are events", "Composition at the top")
-/// and docs/plans/00-init/01-event-log.md.
+/// these. See docs/design.md §1 ("Durable facts are events", "Composition at the top").
 ///
 /// `ReadEvents` returns a single page of at most `limit` events after the given offset.
 /// Callers page by re-reading from `page.LastOffset` until `page.IsEnd`. This single-page

@@ -1,14 +1,13 @@
 module Yession.Tests.DockerIntegration
 
-// Docker backend integration suite (docs/plans/03, reworked over the sandbox seam).
-// Drives the REAL dockerode-backed sandbox — create/spawn/dispose, and the spec fields
-// the backend interprets (env vars via the policy, working dir, mounts + the named
-// workspace volume, build spec, secret refs resolved at spawn). The whole suite sits
-// under `Tag.needs [Docker]` (Node + verify tier), which is the ONLY daemon gate:
-// `check` probes for a daemon and drops the capability when there is none, so these
-// report one skip instead of running empty — and the cheap tier never reaches them.
-// Under YESSION_REQUIRE_DOCKER (release.yml) the capability is never dropped, so a
-// gate promised a daemon fails here rather than skipping to green.
+// Docker backend integration suite, reworked over the sandbox seam. Drives the REAL
+// dockerode-backed sandbox — create/spawn/dispose, and the spec fields the backend
+// interprets (env vars via the policy, working dir, mounts + the named workspace volume,
+// build spec, secret refs resolved at spawn). The whole suite sits under
+// `Tag.needs [Docker]` (Node + verify tier), which is the ONLY daemon gate: a run that
+// did not ask for Docker reports one skip instead of running empty, so the cheap tier
+// never reaches these. `verify` ASKS FOR Docker, and asking for a capability requires it
+// — an unreachable daemon fails the gate rather than dropping to a green skip.
 
 open System
 open Fable.Core

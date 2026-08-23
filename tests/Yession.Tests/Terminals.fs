@@ -1,6 +1,6 @@
 module Yession.Tests.Terminals
 
-// Terminals on the WorkSandbox (docs/plans/12). Everything here runs in the CHEAP tier:
+// Terminals on the WorkSandbox (Plan 12). Everything here runs in the CHEAP tier:
 // the sandbox is a scripted `SessionEnvironment` record, so a block's whole lifecycle —
 // spawn, streamed output, exit code, transcript, events — is exercised deterministically
 // with no process, port, or native addon in the loop. What a real sandbox adds is covered

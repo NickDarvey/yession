@@ -1,6 +1,6 @@
 module Yession.Tests.EventsHttp
 
-// The event log over HTTP, read by CURSOR (docs/plans/20): a client sends the offset it
+// The event log over HTTP, read by CURSOR (Plan 20): a client sends the offset it
 // has folded through (`GET /events/after/{n}?token=…`) and the server redirects to the
 // range it chose (`/events/{first}-{last}`), whose bytes never change because its bounds
 // do not. Verified here: that a range keeps answering the same bytes after the log has

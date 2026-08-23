@@ -19,6 +19,13 @@ a JSON schema. Reimplementing jumpstarter's gRPC in F# would have been a protoco
 reimplementation to maintain forever; using its own SDK is ~600 lines and upstream keeps it
 working.
 
+**Why not `jmp mcp serve`.** Jumpstarter ships an MCP server of its own, and it is the first
+thing to reach for. It does not fit twice over: it speaks stdio, which is not a transport
+Yession declares servers over, and it resolves a *controller-backed* client config — an
+endpoint and a token — so it cannot address a direct-mode exporter at all. Both halves would
+have to change upstream. Writing the bridge is what makes the claim and the console stream
+this provider's to own.
+
 **Arbitration is yours when the service does not do it.** Jumpstarter arbitrates with
 *leases*, and leases live in its Kubernetes controller. A direct-mode exporter has none, so
 this server claims it: one holder, named in refusals, released when its MCP session goes

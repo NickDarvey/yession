@@ -1,4 +1,4 @@
-"""The provider: eight tools, one claim, and the MCP server they hang off.
+"""The provider: five tools, one claim, and the MCP server they hang off.
 
 Nothing here is Yession-shaped. Point any MCP client at the control url and it works, which
 is the whole point of an out-of-process provider and the reason this is an example rather
@@ -9,6 +9,11 @@ live in the controller — which a direct-mode exporter does not have. So the ar
 this server's, and it is one claim over the WHOLE exporter rather than one per driver:
 powering the board off invalidates the console session, so a claim per driver would be a
 promise of isolation the hardware does not keep.
+
+If a controller ever appears, this claim is REPLACED by a jumpstarter lease rather than
+layered over one. Two locks over one exporter is two answers to "who has it", and the pair
+disagrees exactly when it matters — a holder here whose lease upstream has already been
+handed to somebody else.
 """
 
 from __future__ import annotations

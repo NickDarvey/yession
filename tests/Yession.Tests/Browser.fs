@@ -119,7 +119,7 @@ let private startHost () : unit =
     let psi = ProcessStartInfo "node"
     psi.ArgumentList.Add "app/out/Main.js"
     // Single-machine loopback trust (the shipped default `none` denies everything and
-    // the login bounce would 401 before any page ever connects — docs/plans/07).
+    // the login bounce would 401 before any page ever connects).
     psi.ArgumentList.Add "--auth"
     psi.ArgumentList.Add "localhost"
     psi.UseShellExecute <- false
@@ -341,7 +341,7 @@ let tests =
                             Args = [| "--disable-features=WebRtcHideLocalIpsWithMdns" |])))
                 browser <- b
                 // One isolated context per peer: the peer id is stable per browser
-                // PROFILE now (localStorage, docs/plans/07), so two pages in one context
+                // PROFILE now (localStorage), so two pages in one context
                 // would be one peer — a single human in two tabs — not the two distinct
                 // collaborators this flow verifies.
                 let! contextA = await (browser.NewContextAsync ())
@@ -1481,7 +1481,7 @@ let editorTests =
             }
     ]
 
-// --- A path-mounted session in a real browser (docs/plans/10) ---------------------------
+// --- A path-mounted session in a real browser --------------------------------------------
 
 let private MOUNT_PROXY_PORT = 8186
 let private MOUNT_MANAGER_PORT = 8188
@@ -1987,7 +1987,7 @@ let mountedTests =
 //
 // The deployment nothing else here has: ONE public origin, with the Manager at its root and
 // every session under `/s/<id>`, fronted by a door that learns where those sessions really
-// are from the Manager's registry stream (docs/plans/09, docs/plans/10). That door is BEHIND
+// are from the Manager's registry stream. That door is BEHIND
 // — a session exists and is running for a moment before a mapping for it appears — and what
 // it answers in that window is `404 not found`.
 //
@@ -2077,7 +2077,7 @@ let private startFrontDoor (publicPort: int) (managerPort: int) (lag: int) : Htt
                                 ctx.Response.OutputStream.Write (bytes, 0, bytes.Length)
                             | _ ->
                                 // The path goes through UNCHANGED: a session strips its own
-                                // `/s/<id>` mount (docs/plans/10), and the Manager is what
+                                // `/s/<id>` mount, and the Manager is what
                                 // this origin's root is.
                                 let port =
                                     match session with

@@ -18,7 +18,7 @@ type [<AllowNullLiteral>] Configuration =
 
 /// Validated ID-token claims, exposed by the token response's `claims()` helper.
 /// The optional members are the profile claims Yession's provider adds when its
-/// strategy attributed a real user (docs/plans/07); absent otherwise.
+/// strategy attributed a real user; absent otherwise.
 type [<AllowNullLiteral>] IdTokenClaims =
     abstract iss : string
     abstract sub : string

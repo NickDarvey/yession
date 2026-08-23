@@ -10,6 +10,12 @@ module AgentTurn =
 
     /// The product-authored system prompt (Step 12): the agent distinguishes one-shot
     /// conversation from work that needs an environment, and starts one only then.
+    ///
+    /// Product-authored, not mechanical: the environment lines carry the lazy-start rule
+    /// (design.md §3) into the only place that can honour it at run time. The agent decides
+    /// whether a one-shot answer opens a sandbox, and no test can see that decision — the
+    /// lazy-lifecycle suite scripts its agent — so trimming these lines removes an invariant
+    /// while every gate stays green.
     let systemPrompt =
         "You are participating in a collaborative engineering session. "
         + "Reply to the latest message, using the conversation so far as context. "

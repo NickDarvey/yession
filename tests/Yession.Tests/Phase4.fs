@@ -1173,7 +1173,7 @@ let private reapingTests =
                 let events = ResizeArray<string * (string * obj) list> ()
                 // A free port rather than a fixed one, like the fronted registry test below:
                 // the Manager must actually ANSWER on the origin it declares, because a
-                // launched session fetches OIDC discovery against it (docs/plans/10).
+                // launched session fetches OIDC discovery against it (Plan 10).
                 // Declaring one it does not answer on fails the launch, not the assertion.
                 let! managerPort = freePort ()
                 let origin = sprintf "http://127.0.0.1:%d" managerPort
@@ -1765,7 +1765,7 @@ let private mcpStreamTests =
     ]
 
 // -----------------------------------------------------------------------------
-// Session registry stream (docs/plans/09) — the Running set as full-snapshot
+// Session registry stream (Plan 09) — the Running set as full-snapshot
 // frames, published to whoever serves sessions (an operator's serving binding).
 // Codec, hub, and public-origin assembly are cheap tier; the SSE stream over a
 // real Manager + real children is verify tier.
@@ -1811,7 +1811,7 @@ let private registryTests =
             Expect.isTrue (running.Contains "href=\"http://home.example.ts.net:8199/\"") "the open link is followable from a remote browser"
     ]
 
-// --- Public access: the deployment's two addresses as one value (docs/plans/09) ------------
+// --- Public access: the deployment's two addresses as one value (Plan 09) ----------------
 
 let private publicAccessTests =
     let sessionId = SessionId.create "ui-render" |> expect

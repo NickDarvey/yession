@@ -1,6 +1,6 @@
 module Yession.Tests.Editor
 
-// Regression guards for the rich-text editor (docs/plans/03-rich-text-editing.md). These are
+// Regression guards for the rich-text editor. These are
 // the DOM-free half — markdown serialization, the send-time content copy, CRDT convergence,
 // and the BodyRegistry root anchoring — so they run in the cheap tier on Node (no browser).
 // They assert on MARKDOWN output, a serialize idempotence PROPERTY, and reference equality —
