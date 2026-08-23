@@ -4,7 +4,7 @@ namespace Yession.App
 /// a browser offer "add to home screen" and then launch this without its chrome.
 ///
 /// Why it is here and not in a static file: a session does not necessarily own the root of
-/// its origin (an operator's proxy may mount it under a path — docs/plans/09), so both the
+/// its origin (an operator's proxy may mount it under a path — Plan 09), so both the
 /// manifest and every URL inside it have to be relative, and the icon has to come from a
 /// process that may be serving from a store path with no assets directory beside it. The
 /// icon is therefore a constant in the binary, like every other thing the shell needs to be
@@ -81,9 +81,11 @@ module WebApp =
     /// * **the shell** — network-first, because it is `no-cache` for a real reason (it NAMES
     ///   the fingerprinted assets, so a stale one pins the whole UI to a build that is gone).
     ///   The cached copy is the fallback, and it is what makes a cold open possible at all.
-    /// * **fingerprinted assets** — cache-first, for ever, because their address pins their
-    ///   bytes. Kept on the way past rather than pre-fetched from a list: the build already
-    ///   decides what it ships, and a list here would be a second place that has to agree.
+    /// * **fingerprinted assets** — cache-first to SERVE, but PRECACHED at install from `KEEP`,
+    ///   not kept on the way past. The install handler below says why that is the whole
+    ///   difference between working and not. And `KEEP` is not a second place that has to agree
+    ///   with the build: the server that ships the assets generates it from the same map it
+    ///   answers from (`app/Signalling.fs`), so nothing here is written by hand.
     ///
     /// And it keeps NOTHING else. Not the event log — the page owns that cache directly and a
     /// copy here would be the redundant spare. Not `/me`, `/signal`, `/queries`, `/claude*`:

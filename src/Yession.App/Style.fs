@@ -8,8 +8,15 @@ open Yession.Domain
 /// fonts, keyframes — live in the `@theme` block of `app/tailwind.css`, and nothing here
 /// carries a raw hex or a structural pixel count that has a token.
 ///
-/// The design is Metro / Zune (pre-Windows 8) worn by a Slack/Cursor workspace anatomy —
-/// see docs/plans/02-metro-zune-styling.md. The rules that keep it coherent:
+/// The design is Metro / Zune (pre-Windows 8) worn by a Slack/Cursor workspace anatomy.
+/// Zune's own panorama — horizontal surfaces you pan between — was considered for the whole
+/// shell and rejected: it is a media-browsing metaphor, and the job here is watching one
+/// conversation, editing a queue, and intervening fast. The session is one room, and
+/// navigation through it is vertical time, not horizontal space. Zune survives in the type,
+/// the colour and the motion, and the pivot idiom survives at exactly one scale — the
+/// sidebar's two destinations (`navPivot`), which are a place you go, not a surface you pan.
+///
+/// The rules that keep it coherent:
 ///
 ///   Type grid — everything sits on a 4px baseline rhythm, as paired size/line tokens:
 ///     label 11/16 · small 13/16 · body 15/24 · pivot 19/24 · heading 28/32 ·

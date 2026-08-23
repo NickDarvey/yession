@@ -127,6 +127,13 @@ module App =
     ///
     /// Total, like the feed: a store that cannot be opened reads empty, and the client is
     /// exactly the client it is today, asking the network from its cursor.
+    ///
+    /// The port exists so the store can be swapped, and there is exactly one thing that may
+    /// trigger a swap: measurement that the Cache API is not holding what a client was given.
+    /// Then an IndexedDB store keyed by offset goes behind this same port and the Cache API one
+    /// is deleted — a replacement, never an addition beside it. An insecure context is
+    /// explicitly not a trigger: a store only that deployment exercises is the spare that rots
+    /// unverified, and its real remedy is one flag on the operator's side.
     type HistoryCache =
         { /// Every address kept, in NO promised order — a bag, not a queue. The Cache API's
           /// `put` of an address already held deletes and re-appends it, so an answer two tabs
@@ -295,7 +302,7 @@ module App =
         /// ASKED rather than from where the answer lives: the answer to `after n` begins at
         /// line `n + 1`. A transcript line cannot carry its own index — the file is an
         /// asciicast and a private index field in it would stop it being one — so the cursor
-        /// contract is what numbering rests on, and it has a test of its own (docs/plans/22).
+        /// contract is what numbering rests on, and it has a test of its own (Plan 22).
         /// `caches` is where a settled answer is kept — `TranscriptCaches.none` for a client
         /// with no store, which is then exactly today's client, asking the network from its
         /// cursor.
@@ -404,8 +411,9 @@ module App =
           /// Events per `ReadEventsAfter` request.
           PageSize : int
           /// When given, event pages are fetched through this feed instead of
-          /// `ReadEventsAfter` frames — the browser passes its HTTP chunk fetcher here
-          /// so the browser cache serves history (immutable full chunks); pure
+          /// `ReadEventsAfter` frames — the browser passes its cursor-addressed HTTP
+          /// fetcher here, and serves history out of its OWN store of the ranges it was
+          /// given (the HTTP cache keeps none of it; every response is `no-store`); pure
           /// data-channel peers leave it `None` and read over frames.
           FetchEvents : EventFeed option
           /// When given, terminal history is fetched through this feed (Plan 13). `None`
@@ -451,7 +459,7 @@ module App =
     /// as exactly that — a cursor (`/events/after/{n}`) — and decodes the JSONL envelopes
     /// of whatever the server redirects it to. The address it lands on names its own
     /// bounds and so never changes its bytes, which is what lets a client keep the answer
-    /// (docs/plans/20); this function does not keep anything itself. Also home to the
+    /// (Plan 20); this function does not keep anything itself. Also home to the
     /// shipped resilience policy for that feed — the policy is a value here so the
     /// composition site is one line and the TEST runs the same policy that ships.
     module EventFetch =

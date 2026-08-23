@@ -6,7 +6,7 @@ open Yession.Domain
 /// performs the token-gated hello/accept handshake and pumps inbound frames into
 /// `ClientMsg` values, so the Elmish model reflects connection-state transitions. The
 /// channel is supplied by the WebRTC adapter (or an in-memory pair in tests), keeping
-/// this logic free of Node/WebRTC IO. See docs/plans/00-init/04-*.
+/// this logic free of Node/WebRTC IO.
 module Connection =
 
     /// Run the client connection until the channel closes.
