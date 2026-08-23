@@ -103,7 +103,7 @@ Items are roughly ordered by how much they matter.
   is the localhost trust rule working as stated, not an oversight.
 - **Sandboxes confine by default; `host` is the opt-out.** Both sandboxes default to
   `srt` (bubblewrap on Linux, Seatbelt on macOS): agent-issued commands and the agent CLI
-  are OS-confined unless an operator asks for something else. `YESSION_WORK_SANDBOX=host`
+  are OS-confined unless an operator asks for something else. `YESSION_SESSION_WORK_BACKEND=host`
   is still there and still honest about what it is — no filesystem or network confinement,
   only the env allowlist (which the credential-leak regression test pins) — it just has to
   be chosen now. `=docker` remains the full-userland option for the WorkSandbox.
@@ -124,7 +124,7 @@ Items are roughly ordered by how much they matter.
     apart) and then forgotten rather than memoized into every later sandbox, and what it
     reports contradicts srt's sentence instead of repeating it. Undo when srt stats an
     absolute path — still `which` in 0.0.73 — or at least surfaces the spawn's errno.
-  - **An unprivileged container needs `YESSION_SANDBOX_NESTED=weak`** (below), which is
+  - **An unprivileged container needs `YESSION_NESTED_SANDBOX=weak`** (below), which is
     now on the default path rather than an opt-in one.
   - **An srt sandbox reads what its policy names and nothing else** (Plan 24). srt's read model
     is permissive by default, so denying only the invoking user's home — which is what this did
@@ -137,7 +137,7 @@ Items are roughly ordered by how much they matter.
     can be anywhere, so the allow-back is a platform list (`SrtTools.Runtime`) plus the
     install prefix of whatever is already running — `process.execPath`, srt's own package
     (its wrapped argv execs a vendored helper from inside the sandbox), and
-    `YESSION_CLAUDE_PATH`, `YESSION_GIT_PATH` — plus `YESSION_SANDBOX_READ_PATHS` for a
+    `YESSION_BIN_CLAUDE`, `YESSION_BIN_GIT` — plus `YESSION_SESSION_READ` for a
     toolchain neither finds. That last one ADDS to the platform list rather than replacing
     it. A path the list is missing fails loudly and locally: a command cannot find its
     interpreter.
@@ -153,12 +153,12 @@ Items are roughly ordered by how much they matter.
       reads as a broken Xcode install and is not one. The fix was to stop asking the host
       which git to run (below), not to widen the scope for a shim.
   - **Every binary a confined spawn execs is NAMED; git was the last exception.**
-    `YESSION_GIT_PATH` (the installable sets it on both platforms, unlike the Linux-only
-    srt tools) joins `YESSION_BWRAP_PATH`, `YESSION_SOCAT_PATH`, `YESSION_RIPGREP_PATH`
-    and `YESSION_CLAUDE_PATH`. Unset, the verbs still fall back to PATH so an off-Nix
+    `YESSION_BIN_GIT` (the installable sets it on both platforms, unlike the Linux-only
+    srt tools) joins `YESSION_BIN_BWRAP`, `YESSION_BIN_SOCAT`, `YESSION_BIN_RIPGREP`
+    and `YESSION_BIN_CLAUDE`. Unset, the verbs still fall back to PATH so an off-Nix
     install does not regress — and an `npm i -g yession` on macOS is exactly where that
     fallback is wrong, so the git sandbox proves `git --version` before any verb runs one
-    and refuses with a sentence naming `YESSION_GIT_PATH` and `YESSION_SANDBOX_READ_PATHS`
+    and refuses with a sentence naming `YESSION_BIN_GIT` and `YESSION_SESSION_READ`
     instead of passing the host binary's excuse through.
     - **That probe then refused a git that worked, because it was the one git spawn built
       without the hardened env.** `git --version` ran with an EMPTY env, which is an env no
@@ -168,7 +168,7 @@ Items are roughly ordered by how much they matter.
       home-manager install always does — the probe died `fatal: unable to access …
       (Operation not permitted)`, exit 128, and every repo verb was refused for the
       sandbox's whole lifetime in words blaming the binary and the read scope. Neither was
-      at fault, and taking the sentence's advice (`YESSION_SANDBOX_READ_PATHS=$HOME/.config
+      at fault, and taking the sentence's advice (`YESSION_SESSION_READ=$HOME/.config
       /git`) would have widened the scope to hand back part of the home Plan 24 exists to
       deny. Every git spawned by the repo verbs is now built by one function that carries
       the env, so a probe cannot again gate verbs it does not run as.
@@ -196,7 +196,7 @@ Items are roughly ordered by how much they matter.
   credential, and a process-group kill on the SDK's forwarded abort signal.
   srt — the default — adds OS confinement around it: the CLI reads and writes its scratch
   HOME and reads the host runtime, and nothing else of the operator's files; and it reaches
-  only `AgentSandbox`'s domains (`YESSION_AGENT_DOMAINS`). `YESSION_AGENT_SANDBOX=host` opts out, leaving the file
+  only `AgentSandbox`'s domains (`YESSION_SESSION_AGENT_NET`). `YESSION_SESSION_AGENT_BACKEND=host` opts out, leaving the file
   system and network open to the CLI. Docker is BY DESIGN not an agent backend: a container
   per session boot is the opposite of the sub-second start the agent needs, and the
   WorkSandbox keeps it.
@@ -213,7 +213,7 @@ Items are roughly ordered by how much they matter.
 - **The strict confinement profile needs a nested user namespace, which an unprivileged
   container refuses.** srt's seccomp helper creates one inside bubblewrap's to drop
   capabilities and mount a fresh `/proc`; Docker's default (and this repo's dev container)
-  denies it. `YESSION_SANDBOX_NESTED=weak` is srt's documented answer — the host's `/proc`
+  denies it. `YESSION_NESTED_SANDBOX=weak` is srt's documented answer — the host's `/proc`
   stays visible and capabilities are not dropped, so it is genuinely weaker confinement,
   and it is therefore CONFIGURED rather than fallen back to: an unset value means strict,
   and a session on a host that cannot host it fails at boot instead of quietly running
@@ -483,7 +483,7 @@ Items are roughly ordered by how much they matter.
     terminals do local git only until somebody starts a named sandbox. Commit/push
     attribution machinery (author = requesting user, `Co-Authored-By`) is absent
     everywhere, forwarded credential or not.
-  - **Under `YESSION_AGENT_SANDBOX=host` the git verbs run unconfined** — the
+  - **Under `YESSION_SESSION_AGENT_BACKEND=host` the git verbs run unconfined** — the
     operator's explicitly lax choice, as everywhere `host` is chosen. The per-invocation
     hardening (hooks/fsmonitor/ext off, no global config, protocol pinned) still
     applies; the filesystem and egress boundaries do not.
@@ -573,7 +573,7 @@ Items are roughly ordered by how much they matter.
   requires it: `verify` declares the `LiveAgent` capability, so a run without
   `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` fails rather than skipping quietly (which
   is how every release up to `v5.0.0-beta.0` shipped with the live suite silently
-  skipped). A cheap-tier run simply never asks. `YESSION_CLAUDE_PATH` matters in sandboxes
+  skipped). A cheap-tier run simply never asks. `YESSION_BIN_CLAUDE` matters in sandboxes
   that kill the SDK's vendored binary.
 
   What that gate does NOT cover is the credential going missing after it passes. It is
@@ -598,7 +598,7 @@ Items are roughly ordered by how much they matter.
   of needing Nix.)
 - **First install downloads the native `claude`** (~240 MB, platform-specific): it is
   not in the 300 KB tarball, npm fetches it. So the *first* install needs network and
-  disk; the SDK's own resolution finds it thereafter (no `YESSION_CLAUDE_PATH` needed).
+  disk; the SDK's own resolution finds it thereafter (no `YESSION_BIN_CLAUDE` needed).
 - **The composition E2E and install smoke run on Linux/CI**; other platforms' npm
   resolution rides npm's own optional-dependency machinery, unverified per-commit.
 - **No per-platform build matrix for the npm route, no code signing.** Release CI ships one

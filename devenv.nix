@@ -55,11 +55,11 @@ in
   # (nix/packages.nix), so a dev-shell run and an installed run confine through the same
   # binaries. Empty on darwin, where Seatbelt needs neither — the backend reads a blank the
   # same as unset.
-  env.YESSION_BWRAP_PATH =
+  env.YESSION_BIN_BWRAP =
     lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.bubblewrap}/bin/bwrap";
-  env.YESSION_SOCAT_PATH =
+  env.YESSION_BIN_SOCAT =
     lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.socat}/bin/socat";
-  env.YESSION_RIPGREP_PATH =
+  env.YESSION_BIN_RIPGREP =
     lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.ripgrep}/bin/rg";
 
   env.UV_PYTHON = "${pkgs.python312}/bin/python3.12";

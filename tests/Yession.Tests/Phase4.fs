@@ -538,7 +538,7 @@ let private controlRpcTests =
 
                 // The child inherits our environment: run its built-in diagnostic agent.
                 let! launched =
-                    Support.withEnv [ "YESSION_AGENT", Some "diagnostic" ] (fun () -> pm.Launch record.SessionId)
+                    Support.withEnv [ "YESSION_SESSION_AGENT", Some "diagnostic" ] (fun () -> pm.Launch record.SessionId)
                 let port = launched |> expect
 
                 let! opened = OidcHttp.openSession (sprintf "http://127.0.0.1:%d" port)
@@ -551,7 +551,7 @@ let private controlRpcTests =
                 // it, and streamed the events back to a client.
                 //
                 // The running environment's ref is `srt`, which is the DEFAULT asserted
-                // rather than the configuration: nothing here sets YESSION_WORK_SANDBOX,
+                // rather than the configuration: nothing here sets YESSION_SESSION_WORK_BACKEND,
                 // so this is what a session gets when nobody chose — and a revert to an
                 // unconfined default would fail here instead of passing quietly.
                 do! a.Runner.WaitFor (fun m ->
@@ -1292,7 +1292,7 @@ let private spawnRaw : obj = Fable.Core.Util.jsNative
 // Run the packaged manager bundle on this Node, pointing it at the packaged session
 // bundle (what the `yession` bin shim does in an install). `--auth localhost` mirrors a
 // single-machine operator's choice — the shipped default (`none`) denies everything.
-[<Emit("$0(process.execPath, [$1, '--auth', 'localhost'], { env: { ...process.env, YESSION_SESSION_MAIN: $3, ...Object.fromEntries($2) }, stdio: ['pipe', 'pipe', 'inherit'] })")>]
+[<Emit("$0(process.execPath, [$1, '--auth', 'localhost'], { env: { ...process.env, YESSION_SPAWN_MAIN: $3, ...Object.fromEntries($2) }, stdio: ['pipe', 'pipe', 'inherit'] })")>]
 let private spawnBundle (spawn: obj) (managerJs: string) (env: (string * string) array) (sessionJs: string) : obj = Fable.Core.Util.jsNative
 
 [<Emit("$0.stdout.on('data', $1)")>]
@@ -1366,10 +1366,10 @@ let private compositionTests =
                     sprintf "tests/Yession.Tests/out/.data/composed-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
                 let env =
                     [ "YESSION_DATA_DIR", dataDir
-                      "YESSION_MANAGER_PORT", "0"
+                      "YESSION_PORT", "0"
                       // Children inherit this: the built-in diagnostic agent exercises
                       // the control RPC on the shipped binaries, credential-free.
-                      "YESSION_AGENT", "diagnostic" ]
+                      "YESSION_SESSION_AGENT", "diagnostic" ]
 
                 let! manager = startPackagedManager env
 
@@ -1471,7 +1471,7 @@ let private telemetryTests =
                 // straight to the stub collector (no Manager receiver).
                 let! launched =
                     Support.withEnv
-                        [ "YESSION_AGENT", Some "usage-probe"
+                        [ "YESSION_SESSION_AGENT", Some "usage-probe"
                           "OTEL_LOGS_EXPORTER", Some "otlp"
                           "OTEL_EXPORTER_OTLP_ENDPOINT", Some stub.Url ]
                         (fun () -> pm.Launch record.SessionId)

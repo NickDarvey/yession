@@ -1205,7 +1205,7 @@ let private routeTests =
     ]
 
 // --- [Ports; Native]: per-actor credentials across real processes ---------------------------
-// A real Manager + real child session (YESSION_AGENT=credential-probe) + real WebRTC
+// A real Manager + real child session (YESSION_SESSION_AGENT=credential-probe) + real WebRTC
 // clients. Proves the whole loop: gate off before any sign-in; a paste through the
 // session's /claude surface flips the gate WITHOUT a relaunch; each turn resolves the
 // TURN ACTOR's credential; an unconnected actor fails legibly; a session-scoped
@@ -1265,7 +1265,7 @@ let private e2eTests =
                     Support.withEnv
                         [ "ANTHROPIC_API_KEY", Some ""
                           "CLAUDE_CODE_OAUTH_TOKEN", Some ""
-                          "YESSION_AGENT", Some "credential-probe" ]
+                          "YESSION_SESSION_AGENT", Some "credential-probe" ]
                         (fun () -> async {
                             let! pm =
                                 ProcessManager.create
@@ -1381,7 +1381,7 @@ let private e2eTests =
                     Support.withEnv
                         [ "ANTHROPIC_API_KEY", Some ""
                           "CLAUDE_CODE_OAUTH_TOKEN", Some ""
-                          "YESSION_AGENT", Some "credential-probe" ]
+                          "YESSION_SESSION_AGENT", Some "credential-probe" ]
                         (fun () -> async {
                             let! pm =
                                 ProcessManager.create

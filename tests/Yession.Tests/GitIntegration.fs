@@ -134,11 +134,11 @@ let private pureTests =
         // follow, for the same reason.
         testCase "the git a verb runs is the one named, not whatever PATH resolves" <| fun () ->
             Expect.equal
-                (Repos.gitExecutable (Map.ofList [ "YESSION_GIT_PATH", " /nix/store/x/bin/git " ]))
+                (Repos.gitExecutable (Map.ofList [ "YESSION_BIN_GIT", " /nix/store/x/bin/git " ]))
                 "/nix/store/x/bin/git"
                 "a named git is trimmed and used"
             Expect.equal
-                (Repos.gitExecutable (Map.ofList [ "YESSION_GIT_PATH", "" ]))
+                (Repos.gitExecutable (Map.ofList [ "YESSION_BIN_GIT", "" ]))
                 "git"
                 "a blank one is unset, not an executable of empty string"
             Expect.equal
@@ -171,8 +171,8 @@ let private pureTests =
             let message = Repos.unusableGit "/usr/bin/git" "exit 2: xcode-select: error: unable to read data link"
             Expect.isTrue (message.Contains "/usr/bin/git") "which git could not run"
             Expect.isTrue (message.Contains "inside the sandbox") "where it could not run"
-            Expect.isTrue (message.Contains "YESSION_GIT_PATH") "how to name a working one"
-            Expect.isTrue (message.Contains "YESSION_SANDBOX_READ_PATHS") "how to let it read what it needs"
+            Expect.isTrue (message.Contains "YESSION_BIN_GIT") "how to name a working one"
+            Expect.isTrue (message.Contains "YESSION_SESSION_READ") "how to let it read what it needs"
             Expect.isTrue (message.Contains "xcode-select") "and what it actually said, kept"
 
         testCase "capped output states its elision" <| fun () ->
@@ -432,7 +432,7 @@ let private srtTests =
             | Ok _ -> failwith "a verb ran with a git that does not exist"
             | Error reason ->
                 Expect.isTrue (reason.Contains "cannot run inside the sandbox") "the sandbox is named as the place"
-                Expect.isTrue (reason.Contains "YESSION_GIT_PATH") "and the knob that fixes it"
+                Expect.isTrue (reason.Contains "YESSION_BIN_GIT") "and the knob that fixes it"
         }
 
         // The complement, and the fault the case above was written blind to: a git that CAN

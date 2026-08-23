@@ -410,7 +410,7 @@ let tests =
         // command really runs in the session's sandbox.
         //
         // `Srt` because of that last clause, and it is not a formality: the product's default
-        // work sandbox IS srt (`SessionMain.fs`, `YESSION_WORK_SANDBOX`), so on a box that
+        // work sandbox IS srt (`SessionMain.fs`, `YESSION_SESSION_WORK_BACKEND`), so on a box that
         // cannot host one the command never runs, the block never reaches `ok`, and this waits
         // out its timeout — thirty seconds to report, in effect, "this machine is not a
         // machine this test can run on", which is precisely what a capability is for. It cost
@@ -1720,7 +1720,7 @@ let private startMountedHost () : unit =
     psi.ArgumentList.Add "localhost"
     psi.UseShellExecute <- false
     psi.RedirectStandardOutput <- true
-    psi.EnvironmentVariables.["YESSION_MANAGER_PORT"] <- string MOUNT_MANAGER_PORT
+    psi.EnvironmentVariables.["YESSION_PORT"] <- string MOUNT_MANAGER_PORT
     psi.EnvironmentVariables.["YESSION_DEFAULT_SESSION"] <- MOUNT_SESSION
     psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- mountDataDir
     psi.EnvironmentVariables.["YESSION_MANAGER_URL"] <- sprintf "http://127.0.0.1:%d" MOUNT_MANAGER_PORT
@@ -2279,7 +2279,7 @@ let private startFrontedHost () : unit =
     psi.ArgumentList.Add "localhost"
     psi.UseShellExecute <- false
     psi.RedirectStandardOutput <- true
-    psi.EnvironmentVariables.["YESSION_MANAGER_PORT"] <- string FRONT_MANAGER_PORT
+    psi.EnvironmentVariables.["YESSION_PORT"] <- string FRONT_MANAGER_PORT
     psi.EnvironmentVariables.["YESSION_DEFAULT_SESSION"] <- FRONT_SESSION
     psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- frontDataDir
     psi.EnvironmentVariables.["YESSION_MANAGER_URL"] <- sprintf "http://127.0.0.1:%d" FRONT_PORT

@@ -41,7 +41,7 @@ type LaunchActivity =
 /// How long a session may go unused before the Manager stops it, as configured.
 module IdleWindow =
 
-    /// Parse `YESSION_SESSION_IDLE_TIMEOUT`. Unset (or blank) is `None` — reaping off, the
+    /// Parse `YESSION_IDLE_TIMEOUT`. Unset (or blank) is `None` — reaping off, the
     /// default, because stopping a session the operator did not ask to have stopped is not
     /// a behaviour to acquire by upgrading.
     ///

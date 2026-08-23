@@ -193,15 +193,15 @@ let sdkFailureReason (raw: string) : string =
     let said = raw.Trim ()
     if said.StartsWith prefix then said.Substring(prefix.Length).Trim () else said
 
-/// Some sandboxes disallow the SDK's own vendored executable; `YESSION_CLAUDE_PATH`
+/// Some sandboxes disallow the SDK's own vendored executable; `YESSION_BIN_CLAUDE`
 /// points the SDK at a system Claude Code install instead. Empty = SDK default.
-let private claudePath () = Interop.envOr "YESSION_CLAUDE_PATH" ""
+let private claudePath () = Interop.envOr "YESSION_BIN_CLAUDE" ""
 
-/// Where the CLI process runs (`YESSION_AGENT_SANDBOX`): host or srt, never docker.
+/// Where the CLI process runs (`YESSION_SESSION_AGENT_BACKEND`): host or srt, never docker.
 /// SessionMain parses this at boot and fails the session on anything else, so by the
 /// time a turn runs the value is known good — this reads it back, it does not re-decide.
 let private agentBackend () =
-    match SandboxBackend.parseAgent (Interop.envOr "YESSION_AGENT_SANDBOX" "host") with
+    match SandboxBackend.parseAgent (Interop.envOr "YESSION_SESSION_AGENT_BACKEND" "host") with
     | Ok backend -> backend
     | Error e -> failwithf "agent sandbox: %s" e
 

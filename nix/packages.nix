@@ -248,14 +248,14 @@ let
   # business depending on the host's incidental tools. macOS confines with Seatbelt, which ships
   # with the OS and needs none of them — hence Linux only.
   #
-  # `YESSION_GIT_PATH` below is the same argument and NOT Linux-only, because macOS is
+  # `YESSION_BIN_GIT` below is the same argument and NOT Linux-only, because macOS is
   # where PATH's git is worst: `/usr/bin/git` there is a shim that resolves a developer
   # directory before it is git, through files a scoped sandbox denies.
   srtToolFlags = lib.optionalString pkgs.stdenv.isLinux ''
     \
-        --set-default YESSION_BWRAP_PATH ${pkgs.bubblewrap}/bin/bwrap \
-        --set-default YESSION_SOCAT_PATH ${pkgs.socat}/bin/socat \
-        --set-default YESSION_RIPGREP_PATH ${pkgs.ripgrep}/bin/rg'';
+        --set-default YESSION_BIN_BWRAP ${pkgs.bubblewrap}/bin/bwrap \
+        --set-default YESSION_BIN_SOCAT ${pkgs.socat}/bin/socat \
+        --set-default YESSION_BIN_RIPGREP ${pkgs.ripgrep}/bin/rg'';
 
   # nix — the installable: the two wrapped Node bins over tasks.fsx's shims, the runtime
   # node_modules, and the Nix node-datachannel addon, with the agent pointed at claude-code.
@@ -274,16 +274,16 @@ let
       cp ${node-datachannel}/build/Release/node_datachannel.node \
          "$out/libexec/yession/node_modules/node-datachannel/build/Release/node_datachannel.node"
 
-      # tasks.fsx's yession-manager shim sets YESSION_SESSION_MAIN and spawns `node session.js`,
-      # which inherits YESSION_CLAUDE_PATH from this wrapper.
+      # tasks.fsx's yession-manager shim sets YESSION_SPAWN_MAIN and spawns `node session.js`,
+      # which inherits YESSION_BIN_CLAUDE from this wrapper.
       makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession-session" \
         --add-flags "$out/libexec/yession/bin/yession-session.js" \
-        --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude \
-        --set-default YESSION_GIT_PATH ${pkgs.git}/bin/git ${srtToolFlags}
+        --set-default YESSION_BIN_CLAUDE ${claude-code}/bin/claude \
+        --set-default YESSION_BIN_GIT ${pkgs.git}/bin/git ${srtToolFlags}
       makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession-manager" \
         --add-flags "$out/libexec/yession/bin/yession-manager.js" \
-        --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude \
-        --set-default YESSION_GIT_PATH ${pkgs.git}/bin/git ${srtToolFlags}
+        --set-default YESSION_BIN_CLAUDE ${claude-code}/bin/claude \
+        --set-default YESSION_BIN_GIT ${pkgs.git}/bin/git ${srtToolFlags}
       runHook postInstall
     '';
     dontStrip = true;

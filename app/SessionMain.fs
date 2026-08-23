@@ -45,7 +45,7 @@ let private dataDir = Fs.absolute launch.DataDir
 let private controlChannel = launch.Control |> Option.map (fun c -> c.Url, c.Secret)
 
 // The session-owned WorkSandbox (the sandbox seam): the backend comes from
-// `YESSION_WORK_SANDBOX`, parsed fail-closed at boot — a typo refuses the start rather
+// `YESSION_SESSION_WORK_BACKEND`, parsed fail-closed at boot — a typo refuses the start rather
 // than silently dropping isolation.
 //
 // The default is `srt`: agent-issued commands are confined unless an operator says
@@ -53,18 +53,18 @@ let private controlChannel = launch.Control |> Option.map (fun c -> c.Url, c.Sec
 // deployment that never read the documentation ran them unconfined. `host` is still
 // there, and still honest about what it is — it just has to be asked for now.
 let private workBackend =
-    match SandboxBackend.parse (Interop.envOr "YESSION_WORK_SANDBOX" "srt") with
+    match SandboxBackend.parse (Interop.envOr "YESSION_SESSION_WORK_BACKEND" "srt") with
     | Ok backend -> backend
     | Error e -> failwith e
 
-// The AgentSandbox backend (`YESSION_AGENT_SANDBOX`): where the agent CLI process
+// The AgentSandbox backend (`YESSION_SESSION_AGENT_BACKEND`): where the agent CLI process
 // runs — host or srt, never docker (a work-sandbox-only backend). Both tiers go through
 // the SDK's `spawnClaudeCodeProcess` seam with an allowlisted env and a scratch HOME
 // (Agent.fs); srt adds the OS-level confinement around it. Defaults to `srt` for the
 // same reason the WorkSandbox does. Parsed HERE, at boot, so a bad value fails the
 // session at start rather than mid-turn. Fail closed, never a silent fallback.
 let private agentBackend =
-    match SandboxBackend.parseAgent (Interop.envOr "YESSION_AGENT_SANDBOX" "srt") with
+    match SandboxBackend.parseAgent (Interop.envOr "YESSION_SESSION_AGENT_BACKEND" "srt") with
     | Ok backend -> backend
     | Error e -> failwithf "agent sandbox: %s" e
 
@@ -252,7 +252,7 @@ let private subscribeMcp =
     launch.Control
     |> Option.map (fun c -> fun handler -> ControlClient.subscribeMcp c.Url c.Secret handler)
 
-/// A built-in diagnostic runner (`YESSION_AGENT=diagnostic`): exercises the session's
+/// A built-in diagnostic runner (`YESSION_SESSION_AGENT=diagnostic`): exercises the session's
 /// command capability end to end — open a terminal, queue, drain, run, read the output back —
 /// without model credentials. The verify suite drives it across real process boundaries; it doubles
 /// as a field smoke test.
@@ -275,7 +275,7 @@ let private diagnosticAgent : RunAgent =
                 | other -> return AgentFailed (sprintf "diagnostic command failed: %A" other, None)
         }
 
-/// A built-in probe (`YESSION_AGENT=usage-probe`, Plan 04): completes a turn with fixed,
+/// A built-in probe (`YESSION_SESSION_AGENT=usage-probe`, Plan 04): completes a turn with fixed,
 /// non-zero usage and no credentials, so the cross-process telemetry e2e can assert the
 /// counts reach the Manager collector over the real spawn + OTLP path.
 let private usageProbeAgent : RunAgent =
@@ -535,7 +535,7 @@ let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent
             | Error reason -> return fail reason
         }
 
-/// A built-in probe (`YESSION_AGENT=credential-probe`): completes immediately, naming
+/// A built-in probe (`YESSION_SESSION_AGENT=credential-probe`): completes immediately, naming
 /// the env var the dispatcher resolved (or `env` for the ambient fallback) — the
 /// deterministic cross-process proof that per-actor credential dispatch worked, same
 /// convention as `diagnostic`/`usage-probe`.
@@ -568,7 +568,7 @@ let private connectedSomewhere () =
             | SessionScope _ | UserScope _ | LocalScope -> true))
 
 let private runAgent () : RunAgent option =
-    match Interop.envOr "YESSION_AGENT" "" with
+    match Interop.envOr "YESSION_SESSION_AGENT" "" with
     | "diagnostic" -> Some diagnosticAgent
     | "usage-probe" -> Some usageProbeAgent
     | "credential-probe" ->

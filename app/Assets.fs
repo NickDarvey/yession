@@ -4,7 +4,7 @@ module Yession.Host.Assets
 // process is running. Both bins use it — the Session Process for the client shell, the Manager
 // for its own page — and neither one names a single asset.
 //
-// That ignorance is the point. A session may be upgraded on its own (`YESSION_SESSION_BIN`
+// That ignorance is the point. A session may be upgraded on its own (`YESSION_SPAWN_BIN`
 // points at a floating install, Plan 11) and can then bring a typeface, a stylesheet, an image
 // that the Manager beside it has never heard of. Nothing here has to learn about it: the
 // directory the build left is the whole contract, and the route (`SessionRoute.Asset`) names a

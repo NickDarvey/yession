@@ -367,7 +367,7 @@ Capabilities:
 - `Srt` — OS-level confinement: bubblewrap + socat on Linux, Seatbelt on macOS. Probed by
   RUNNING it, not by looking for it — installed is not the same as permitted. This container
   cannot create the nested user namespace the strict profile needs, so the suites run here
-  only under `YESSION_SANDBOX_NESTED=weak check Srt`; unset, `check Srt` refuses to start.
+  only under `YESSION_NESTED_SANDBOX=weak check Srt`; unset, `check Srt` refuses to start.
 
   **`Srt` is not only the escape probes.** The default work sandbox IS srt, so every suite
   that runs a real command needs it — including the browser case that types one into a
@@ -378,7 +378,7 @@ Capabilities:
   `Srt`.
 
   **When to set the variable, and when it is a lie.** Set it to give a suite a sandbox to
-  RUN in — `YESSION_SANDBOX_NESTED=weak check Browser Ports Native Srt` is how this container
+  RUN in — `YESSION_NESTED_SANDBOX=weak check Browser Ports Native Srt` is how this container
   runs the whole PR tier, and what is under test there (a composer binding, a command really
   having run) is untouched by profile strength. Do NOT set it to turn a red run green when
   the CONFINEMENT is the thing under test: `weak` is srt's `enableWeakerNestedSandbox`, so a
