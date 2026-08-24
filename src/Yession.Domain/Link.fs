@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Link
+
+open Yession.Domain
 
 open System
 

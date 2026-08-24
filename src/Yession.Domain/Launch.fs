@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Link
+
+open Yession.Domain
 
 /// Session launch vocabulary (Step 10). The Session Manager owns process launch: a
 /// Session Process is started by the Manager, never directly, establishing the authority

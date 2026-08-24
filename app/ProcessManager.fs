@@ -13,6 +13,7 @@ module Yession.Host.ProcessManager
 
 open System
 open Yession.Domain
+open Yession.Domain.Link
 open Yession.Domain.Tools
 open Yession.Domain.Access
 open Yession.Manager

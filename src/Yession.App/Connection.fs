@@ -1,6 +1,7 @@
 namespace Yession.App
 
 open Yession.Domain
+open Yession.Domain.Link
 open Yession.Domain.Terminals
 
 /// Drives the client side of the session transport over a connected `FrameChannel`:

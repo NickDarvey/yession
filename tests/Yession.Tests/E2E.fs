@@ -11,6 +11,7 @@ module Yession.Tests.E2E
 open System
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Link
 open Yession.SessionProcess
 open Yession.Host
 

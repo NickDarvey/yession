@@ -3,6 +3,7 @@ module Yession.Tests.SessionProcess
 open System
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Link
 open Yession.SessionProcess
 
 let private expect =
