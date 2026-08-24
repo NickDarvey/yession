@@ -210,6 +210,9 @@ let actorLabel (actor: ActorRef) : string =
     // acting as itself. "the system" is what the actor is called in the log; it is not what
     // a person reading "no Claude account connected for …" needs to be told.
     | ActorRef.System -> "this deployment"
+    // Reached only if a fold ever asked for something needing a connection. It has none of
+    // its own — see `CredentialOwner.ofActor` — so the sentence names the file, not a party.
+    | ActorRef.Configured repo -> sprintf "%s's %s" (RepoRef.value repo) ConfigFile.FileName
 
 // --- the browser-facing /claude* routes -----------------------------------------------
 // Thin proxies over the Manager's broker, gated by the same cookie identity as /me.

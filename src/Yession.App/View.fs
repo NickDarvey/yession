@@ -197,6 +197,7 @@ module View =
         | ActorRef.Agent -> Dom.Text.agent
         | ActorRef.SessionProcess -> Dom.Text.sessionProcess
         | ActorRef.System -> Dom.Text.system
+        | ActorRef.Configured repo -> RepoRef.value repo
 
     /// The same actor, said to a person.
     ///
@@ -209,7 +210,8 @@ module View =
     let private authorName (model: ClientModel) (actor: ActorRef) : string =
         match actor with
         | PeerRef peer -> ClientModel.nameOf peer model
-        | UserRef _ | ActorRef.Agent | ActorRef.SessionProcess | ActorRef.System -> authorLabel actor
+        | UserRef _ | ActorRef.Agent | ActorRef.SessionProcess | ActorRef.System | ActorRef.Configured _ ->
+            authorLabel actor
 
     /// The mechanism behind a notice, folded away under one word.
     ///
@@ -261,6 +263,9 @@ module View =
         | PeerRef p -> Style.humanAvatar (PeerId.value p)
         | ActorRef.Agent -> Style.agentAvatar
         | ActorRef.SessionProcess | ActorRef.System -> Style.humanAvatar "session"
+        // A repo's file is not a person and not the agent. Its own avatar, seeded by the
+        // repo, so two repos configuring one session are told apart on sight.
+        | ActorRef.Configured repo -> Style.humanAvatar (RepoRef.value repo)
 
     // --- Sidebar ------------------------------------------------------------------------
 

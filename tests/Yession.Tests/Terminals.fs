@@ -1489,7 +1489,8 @@ let private codecTests =
                   ActorRef.SessionProcess
                   ActorRef.System
                   PeerRef ada
-                  UserRef (UserId.create "https://issuer/sub:with:colons" |> expect) ]
+                  UserRef (UserId.create "https://issuer/sub:with:colons" |> expect)
+                  ActorRef.Configured (RepoRef.create "octo/hello" |> expect) ]
             for actor in actors do
                 Expect.equal (ActorRef.ofToken (ActorRef.token actor)) (Some actor) "round-trips"
             Expect.equal (ActorRef.ofToken "nonsense") None "an unreadable token is skipped, never guessed"

@@ -218,6 +218,7 @@ let private promptOf (context: AgentContextPack) : string =
         | ActorRef.Agent -> "agent"
         | ActorRef.SessionProcess -> "session-process"
         | ActorRef.System -> "system"
+        | ActorRef.Configured repo -> RepoRef.value repo
     let transcript =
         context.Conversation
         |> List.filter (fun item -> item.Status = Complete)

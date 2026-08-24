@@ -89,6 +89,10 @@ module Codec =
         { Encode = UserId.value >> Encode.string
           Decode = viaSmartCtor UserId.create Decode.string }
 
+    let repoRef : Codec<RepoRef> =
+        { Encode = RepoRef.value >> Encode.string
+          Decode = viaSmartCtor RepoRef.create Decode.string }
+
     let actor : Codec<ActorRef> =
         { Encode =
             (fun a ->
@@ -97,7 +101,9 @@ module Codec =
                 | PeerRef p -> Encode.object [ "kind", Encode.string "peer"; "peerId", peerId.Encode p ]
                 | Agent -> Encode.object [ "kind", Encode.string "agent" ]
                 | SessionProcess -> Encode.object [ "kind", Encode.string "sessionProcess" ]
-                | System -> Encode.object [ "kind", Encode.string "system" ])
+                | System -> Encode.object [ "kind", Encode.string "system" ]
+                | Configured repo ->
+                    Encode.object [ "kind", Encode.string "configured"; "repo", repoRef.Encode repo ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (fun kind ->
@@ -107,6 +113,7 @@ module Codec =
                 | "agent" -> Decode.succeed Agent
                 | "sessionProcess" -> Decode.succeed SessionProcess
                 | "system" -> Decode.succeed System
+                | "configured" -> Decode.field "repo" repoRef.Decode |> Decode.map Configured
                 | other -> Decode.fail (sprintf "Unknown actor kind: %s" other)) }
 
     let terminalId : Codec<TerminalId> =
@@ -898,10 +905,6 @@ module Codec =
                 { TerminalTranscriptTruncated.TerminalId = get.Required.Field "terminalId" terminalId.Decode
                   TerminalTranscriptTruncated.BlockId = get.Required.Field "blockId" (Decode.option blockId.Decode)
                   TerminalTranscriptTruncated.DroppedBytes = get.Required.Field "droppedBytes" Decode.int }) }
-
-    let repoRef : Codec<RepoRef> =
-        { Encode = RepoRef.value >> Encode.string
-          Decode = viaSmartCtor RepoRef.create Decode.string }
 
     let private repoAdded : Codec<RepoAdded> =
         { Encode =

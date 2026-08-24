@@ -657,6 +657,94 @@ let private configTests =
             Expect.equal dev.Read [ "~/.cache/npm" ] "the paths it asks to read"
             Expect.equal dev.Forward [ "github" ] "the credentials by name"
 
+        // A file is authored by whoever can push to the repo, so a path it writes is that
+        // author naming a place on somebody else's machine. Refused where it is WRITTEN,
+        // because that is where the person who can fix it is standing.
+        testCase "a workdir that leaves the checkout is refused, and says which way" <| fun () ->
+            let refusal workdir =
+                match ConfigFile.parse (sprintf """{ "version": 1, "sandboxes": { "dev": { "workdir": "%s" } } }""" workdir) with
+                | Ok _ -> failwithf "expected a refusal for '%s'" workdir
+                | Error e -> e
+            Expect.isTrue ((refusal "/etc").Contains "absolute") "an absolute path names another machine's tree"
+            Expect.isTrue ((refusal "../elsewhere").Contains "climbs out") "and a relative one can mean the same thing"
+            Expect.isTrue ((refusal "app/../../elsewhere").Contains "climbs out") "wherever the segment sits"
+
+        // `HostPath` exists and the SESSION uses it — that is how the repos directory reaches
+        // a container. A source a repo could name is arbitrary access to the machine running
+        // the session, which is the authority the reserved prefix already refuses.
+        testCase "a volume may not name a host path" <| fun () ->
+            let volume source =
+                ConfigFile.parse (
+                    sprintf
+                        """{ "version": 1, "sandboxes": { "dev": { "container": { "volumes": [ { "source": "%s", "target": "/w" } ] } } } }"""
+                        source)
+            match volume "/var/run/docker.sock" with
+            | Ok _ -> failwith "expected a refusal"
+            | Error e ->
+                Expect.isTrue (e.Contains "host path") "it says what the source is"
+                Expect.isTrue (e.Contains "workspace") "and what a file may say instead"
+            let mountsOf file =
+                (file |> expect).Sandboxes
+                |> Map.find (sandboxName "dev")
+                |> fun decl -> (decl.Container |> Option.get).Mounts |> List.map (fun m -> m.Source)
+            Expect.equal (mountsOf (volume "workspace")) [ SessionWorkspace ] "its own checkout, by name"
+            Expect.equal (mountsOf (volume "cache")) [ NamedVolume "cache" ] "or a volume the session owns"
+
+        // The file's whole claim: it says nothing a command could not be told. So what a
+        // declaration becomes is the ask itself, with the one thing a file cannot know —
+        // where the session put the checkout — filled in.
+        testCase "a declaration becomes the ask, against this session's checkout" <| fun () ->
+            let decl =
+                (ConfigFile.parse """
+                    { "version": 1,
+                      "sandboxes": {
+                        "dev": {
+                          "container": { "image": "node:24" },
+                          "workdir": "./app",
+                          "env": { "NODE_ENV": "development" },
+                          "net": [ "registry.npmjs.org" ],
+                          "read": [ "/opt/cache" ],
+                          "forward": [ "github" ] } } }"""
+                 |> expect).Sandboxes
+                |> Map.find (sandboxName "dev")
+            let request = SandboxDecl.toRequest "/data/repos/octo/hello" decl
+            Expect.equal request.Spec.WorkingDirectory (Some "/data/repos/octo/hello/app") "the workdir is under the checkout"
+            Expect.equal request.Spec.Net [ "registry.npmjs.org" ] "the egress it asks for"
+            Expect.equal request.Spec.Read [ "/opt/cache" ] "the paths it asks to read"
+            Expect.equal request.Forward [ "github" ] "the credentials by name"
+            Expect.equal
+                request.Spec.Runtime
+                (Container { ContainerSpec.defaults with Image = Some { Name = "node"; Tag = Some "24" } })
+                "and the container it named"
+
+        testCase "the checkout itself is a workdir, however it is written" <| fun () ->
+            for written in [ "."; "./"; "app/.." ] do
+                let decl = { SandboxDecl.empty with WorkingDirectory = Some written }
+                Expect.equal
+                    (SandboxDecl.toRequest "/data/repos/octo/hello" decl).Spec.WorkingDirectory
+                    (Some "/data/repos/octo/hello")
+                    (sprintf "'%s' is the checkout" written)
+
+        // The downstream half of the workdir rule. The decoder refuses a climbing path where
+        // a person can fix it; this is what a declaration arriving some other way still
+        // cannot do, because the arithmetic here has no answer above the checkout: climbing
+        // is CLAMPED there, so `../../etc` names the same directory `etc` does.
+        testCase "no declaration can name a directory above its checkout" <| fun () ->
+            let resolved written =
+                (SandboxDecl.toRequest "/data/repos/octo/hello" { SandboxDecl.empty with WorkingDirectory = Some written })
+                    .Spec.WorkingDirectory
+            Expect.equal (resolved "../..") (Some "/data/repos/octo/hello") "climbing runs out at the checkout"
+            Expect.equal (resolved "../../etc") (Some "/data/repos/octo/hello/etc") "and what follows lands inside it"
+            Expect.equal (resolved "a/../../../etc") (Some "/data/repos/octo/hello/etc") "however far it climbed first"
+
+        // Saying nothing is not asking to be confined — what nothing means is the backend's
+        // answer, and `forBackend` is where the two authors meet.
+        testCase "a declaration with no container asks for no container, not for confinement" <| fun () ->
+            Expect.equal
+                (SandboxDecl.toRequest "/checkout" SandboxDecl.empty)
+                SandboxRequest.defaults
+                "an empty declaration is the ask that names nothing in particular"
+
         testCase "a sandbox cannot ask for a process without a container to run it in" <| fun () ->
             // The point of the runtime union. `cmd` is not a sandbox key at all — it lives
             // inside `container`, so "a confined sandbox with a process" is not a state the

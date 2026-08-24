@@ -58,6 +58,52 @@ module SandboxDecl =
           Read = []
           Forward = [] }
 
+    /// What a declaration ASKS the session for, given where this repo's checkout is.
+    ///
+    /// A rename rather than a translation, and that is the design: the file is a
+    /// serialization of a vocabulary `start_work_sandbox` already spoke, so there is no
+    /// second policy engine here and nothing this can express that a command could not.
+    ///
+    /// The checkout is the one thing a file cannot know — a path in it is relative to a
+    /// directory the SESSION chose — so it is supplied. `workdir` is already guaranteed to
+    /// be inside the checkout by the decoder, which is where a path a person can fix is
+    /// refused; joining is all that is left.
+    ///
+    /// `Container = None` becomes `Confinement`, and that is not the file saying "confine
+    /// me". It is the file saying nothing, and what nothing means is the BACKEND's answer:
+    /// docker starts its defaults, srt and host confine. `Sandboxes.forBackend` is where the
+    /// two authors meet.
+    let toRequest (checkout: string) (decl: SandboxDecl) : SandboxRequest =
+        // Resolved rather than concatenated, and CLAMPED at the checkout. The decoder
+        // already refuses a path that climbs out — that is the upstream fix, made where a
+        // person can correct their file — and this is the downstream guard: a declaration
+        // reaching here some other way still cannot name a directory above the checkout,
+        // because there is no arithmetic here that could produce one.
+        let under (dir: string) =
+            let resolved =
+                dir.Split ([| '/'; '\\' |])
+                |> Array.fold
+                    (fun acc segment ->
+                        match segment with
+                        | "" | "." -> acc
+                        | ".." -> (match acc with [] -> [] | _ :: rest -> rest)
+                        | segment -> segment :: acc)
+                    []
+                |> List.rev
+            match resolved with
+            | [] -> checkout.TrimEnd '/'
+            | segments -> checkout.TrimEnd '/' + "/" + String.concat "/" segments
+        { Spec =
+            { WorkingDirectory = decl.WorkingDirectory |> Option.map under
+              EnvironmentVariables = decl.EnvironmentVariables
+              Net = decl.Net
+              Read = decl.Read
+              Runtime =
+                match decl.Container with
+                | Some container -> Container container
+                | None -> Confinement }
+          Forward = decl.Forward }
+
 /// One repo's whole file.
 type ConfigFile =
     { /// Refused if it is not a version this build speaks. A file from the future says so
@@ -149,9 +195,49 @@ module ConfigFile =
                   { ContextPath = get.Required.Field "context" Decode.string
                     DockerfilePath = get.Optional.Field "dockerfile" Decode.string }) ]
 
+    /// A path INSIDE the checkout, and the only kind of path a file may write.
+    ///
+    /// A `yession.yaml` is authored by whoever can push to the repo, so an absolute path is
+    /// that author naming a place on somebody else's machine, and a `..` segment is the same
+    /// thing spelled relatively. Both are refused where they are WRITTEN — the person who
+    /// can fix it is standing here — rather than resolved later against a checkout, which is
+    /// how `workdir: /etc` becomes a sandbox that starts in /etc.
+    let private inCheckout (what: string) : Decoder<string> =
+        Decode.string
+        |> Decode.andThen (fun raw ->
+            let path = raw.Trim ()
+            let segments = path.Split ([| '/'; '\\' |]) |> List.ofArray
+            if path = "" then Decode.fail (sprintf "%s cannot be blank" what)
+            elif path.StartsWith "/" || path.StartsWith "\\" then
+                Decode.fail (sprintf "%s must be inside the checkout, and '%s' is absolute" what path)
+            elif segments |> List.contains ".." then
+                Decode.fail (sprintf "%s must be inside the checkout, and '%s' climbs out of it" what path)
+            else Decode.succeed path)
+
+    /// What a file may mount, and it is deliberately not a host path.
+    ///
+    /// `HostPath` exists and the SESSION uses it — that is how the repos directory reaches a
+    /// container — but a source a repo could name is arbitrary read/write access to the
+    /// machine running the session, which is the same authority `YESSION_BIN_*` carries and
+    /// is refused for the same reason. A file gets its own checkout (`workspace`) and named
+    /// volumes, which are the session's to create and nobody else's to reach into.
+    let private mountSource : Decoder<MountSource> =
+        Decode.string
+        |> Decode.andThen (fun raw ->
+            match raw.Trim () with
+            | "workspace" -> Decode.succeed SessionWorkspace
+            | source when source.StartsWith "/" || source.StartsWith "." || source.Contains "/" ->
+                Decode.fail (
+                    sprintf
+                        "'%s' is a host path, and a %s may not name one — say 'workspace', or a named volume"
+                        source
+                        FileName)
+            | "" -> Decode.fail "a volume needs a source"
+            | name -> Decode.succeed (NamedVolume name))
+
     let private mount : Decoder<ContainerMount> =
         Decode.object (fun get ->
-            { Source = get.Required.Field "source" Decode.string |> HostPath
+            { Source = get.Required.Field "source" mountSource
               Target = get.Required.Field "target" Decode.string
               Mode =
                 match get.Optional.Field "mode" Decode.string with
@@ -178,7 +264,7 @@ module ConfigFile =
         |> Decode.andThen (fun () ->
             Decode.object (fun get ->
                 { Container = get.Optional.Field "container" container
-                  WorkingDirectory = get.Optional.Field "workdir" Decode.string
+                  WorkingDirectory = get.Optional.Field "workdir" (inCheckout "workdir")
                   EnvironmentVariables =
                     get.Optional.Field "env" environment |> Option.defaultValue Map.empty
                   Net = get.Optional.Field "net" stringList |> Option.defaultValue []
