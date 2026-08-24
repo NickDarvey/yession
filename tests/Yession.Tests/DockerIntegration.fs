@@ -150,7 +150,7 @@ let tests =
                 do! first.Dispose ()
                 // A fresh sandbox under the SAME name re-attaches the same volume.
                 let createSandbox = Sandboxes.forBackend DockerBackend name alpineSpec |> expect
-                match! createSandbox (Sandboxes.policyFor DockerBackend Map.empty Map.empty None None) with
+                match! createSandbox ((Sandboxes.policyFor DockerBackend Map.empty Map.empty None None EnvironmentSpec.defaults |> expect)) with
                 | Error reason -> failwithf "recreate failed: %s" reason
                 | Ok second ->
                     let! r2, out, _ = runInSandbox second "cat" [ "/workspace/marker" ] Map.empty None
