@@ -21,6 +21,7 @@ module Yession.Host.WorkSandboxes
 
 open System
 open Yession.Domain
+open Yession.Domain.Agent
 open Yession.Domain.Tools
 open Yession.SessionProcess
 

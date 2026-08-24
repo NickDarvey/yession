@@ -2,6 +2,7 @@ namespace Yession.SessionProcess
 
 open System
 open Yession.Domain
+open Yession.Domain.Agent
 
 /// The gate for structured commands (Plan 15, stage 3b; Plan 23).
 ///

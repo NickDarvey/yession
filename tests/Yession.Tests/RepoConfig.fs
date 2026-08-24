@@ -11,6 +11,7 @@ module Yession.Tests.RepoConfig
 open Fable.Core
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Agent
 open Yession.Host
 
 let private expect = function Ok v -> v | Error e -> failwithf "%A" e

@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Agent
+
+open Yession.Domain
 
 // The session's own tools, as a registry (Plan 16, part A).
 //

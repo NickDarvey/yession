@@ -7,6 +7,7 @@ module Yession.Host.Host
 open System
 open Yjs
 open Yession.Domain
+open Yession.Domain.Agent
 open Yession.Domain.Link
 open Yession.Domain.Terminals
 open Yession.Domain.Collab
