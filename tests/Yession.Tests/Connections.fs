@@ -9,6 +9,7 @@ open System
 open Fable.Core
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Chat
 open Yession.Manager
 
 #if FABLE_COMPILER

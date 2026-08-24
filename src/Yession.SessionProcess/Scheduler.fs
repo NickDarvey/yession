@@ -1,6 +1,7 @@
 namespace Yession.SessionProcess
 
 open Yession.Domain
+open Yession.Domain.Chat
 
 /// The queue-drain scheduler (Phase 3): the Session Process is the single consumer of
 /// the shared message queue, and the drain here is the linearization point of

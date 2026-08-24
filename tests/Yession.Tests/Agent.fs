@@ -15,6 +15,7 @@ open Fable.Pyxpecto
 open Yjs
 open Ylmish
 open Yession.Domain
+open Yession.Domain.Chat
 open Yession.SessionProcess
 open Yession.App
 open Yession.Host

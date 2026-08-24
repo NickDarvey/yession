@@ -3,6 +3,7 @@ module Yession.Tests.Domain
 open System
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Chat
 
 let private expect =
     function

@@ -1,6 +1,8 @@
-namespace Yession.Domain
+namespace Yession.Domain.Chat
 
 open System
+
+open Yession.Domain
 
 /// The chat as a PERSON reads it (Plan 14, stage 1): what was said and what was run, in the
 /// order it happened.

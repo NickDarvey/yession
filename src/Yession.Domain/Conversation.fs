@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Chat
+
+open Yession.Domain
 
 /// The conversation is a *projection* of the event log — never read from Yjs/draft state.
 /// The projection type and its fold live in the shared Domain library because both the
