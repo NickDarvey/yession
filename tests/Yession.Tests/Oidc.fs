@@ -23,6 +23,7 @@ open Fable.Core
 open Fable.Core.JsInterop
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Access
 open Yession.Oidc
 open Yession.Host
 open Yession.Tests.Support

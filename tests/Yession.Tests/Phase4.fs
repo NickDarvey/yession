@@ -10,6 +10,7 @@ open System
 open Fable.Core
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Access
 open Yession.Domain.Chat
 open Yession.Manager
 open Yession.Oidc

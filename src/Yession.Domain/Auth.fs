@@ -1,5 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Access
 
+open Yession.Domain
 open System
 
 /// Pure HTTP authorization primitives: cookie and form parsing for the session's

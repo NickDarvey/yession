@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Access
+
+open Yession.Domain
 
 /// The ABAC vocabulary (Plan 06): authorization decisions as one pure, total,
 /// default-deny function over attributes of the subject, the action, and the resource.
