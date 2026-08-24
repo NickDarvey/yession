@@ -178,10 +178,11 @@ let policyFor
 
 /// A one-line description of the backend + spec for the start-requested event.
 let summaryFor (backend: SandboxBackend) (spec: EnvironmentSpec) : string =
-    match backend, spec.Image with
-    | DockerBackend, Some image ->
+    match spec.Runtime with
+    | Container { Image = Some image } ->
         sprintf "docker:%s%s" image.Name (image.Tag |> Option.map ((+) ":") |> Option.defaultValue "")
-    | _ -> SandboxBackend.describe backend
+    | Container _
+    | Confinement -> SandboxBackend.describe backend
 
 [<Emit("Object.entries(process.env).filter(([, v]) => typeof v === 'string')")>]
 let private ambientEntries () : (string * string) array = jsNative
@@ -445,9 +446,9 @@ module DockerSandbox =
     [<Emit("$0.readdirSync($1)")>]
     let private readdirSync (fs: obj) (dir: string) : string array = jsNative
 
-    /// Resolve `spec.Image` (default `alpine:3`) to a `name:tag` string.
-    let private imageRef (spec: EnvironmentSpec) : string =
-        match spec.Image with
+    /// Resolve the container's image (default `alpine:3`) to a `name:tag` string.
+    let private imageRef (container: ContainerSpec) : string =
+        match container.Image with
         | Some i -> i.Name + (i.Tag |> Option.map ((+) ":") |> Option.defaultValue "")
         | None -> "alpine:3"
 
@@ -481,7 +482,7 @@ module DockerSandbox =
             return arr.Length
         }
 
-    let create (name: string) (spec: EnvironmentSpec) : CreateSandbox =
+    let create (name: string) (spec: EnvironmentSpec) (container: ContainerSpec) : CreateSandbox =
         fun policy ->
             async {
                 try
@@ -489,7 +490,7 @@ module DockerSandbox =
                     // Resolve the image: build it from the context, or pull the named image.
                     let! imageResult =
                         async {
-                            match spec.Build with
+                            match container.Build with
                             | Some build ->
                                 let tag = "yession-build-" + name.ToLower ()
                                 let src = readdirSync nodeFs build.ContextPath
@@ -503,7 +504,7 @@ module DockerSandbox =
                                 let! drained = drainProgress client stream
                                 return drained |> Result.map (fun () -> tag)
                             | None ->
-                                let image = imageRef spec
+                                let image = imageRef container
                                 // Pull only when the image is absent locally — matches
                                 // `docker run`, and avoids re-hitting the registry (and its
                                 // transient failures) on every container start.
@@ -529,11 +530,11 @@ module DockerSandbox =
                             |> Option.defaultValue "/workspace"
                         // Always attach the sandbox's named workspace volume, unless an
                         // explicit mount already claims the workspace path.
-                        let hasWorkspaceMount = spec.Mounts |> List.exists (fun m -> m.Target = workspaceTarget)
+                        let hasWorkspaceMount = container.Mounts |> List.exists (fun m -> m.Target = workspaceTarget)
                         let workspaceMounts =
                             if hasWorkspaceMount then []
                             else [ createObj [ "Type", box "volume"; "Source", box name; "Target", box workspaceTarget; "ReadOnly", box false ] ]
-                        let mounts = workspaceMounts @ (spec.Mounts |> List.map (mountObj name))
+                        let mounts = workspaceMounts @ (container.Mounts |> List.map (mountObj name))
                         let env =
                             policy.Env |> Map.toList |> List.map (fun (k, v) -> sprintf "%s=%s" k v) |> List.toArray
                         // The named volume persists across container restarts by design;
@@ -555,7 +556,7 @@ module DockerSandbox =
                                       // container up for `exec` to reach.
                                       "Cmd",
                                       box (
-                                          match spec.Command with
+                                          match container.Command with
                                           | Some command -> [| "sh"; "-c"; command |]
                                           | None -> [| "tail"; "-f"; "/dev/null" |])
                                       "HostConfig",
@@ -1420,18 +1421,23 @@ module AgentSandbox =
 /// at boot — fail closed, never a silent fallback to a weaker backend.
 let forBackend (backend: SandboxBackend) (name: string) (spec: EnvironmentSpec) : Result<CreateSandbox, string> =
     let ambient = ambientEnv ()
-    match backend, spec.Command with
-    // A container has a `Cmd` to replace; a host or srt sandbox is a confinement around
-    // spawns with no process of its own. Refused rather than ignored, because a sandbox
-    // that silently did not run what it was asked to run is worse than one that says so —
-    // the same stance `check` takes on a capability this box cannot host.
-    | (HostBackend | SrtBackend), Some command ->
+    match backend, spec.Runtime with
+    // The one question the union cannot settle: whether this BACKEND hosts containers. The
+    // backend is the operator's and the spec is partly the repo's, so they are authored by
+    // different people and meet only here. Refused rather than ignored — a sandbox that
+    // silently did not run what it was asked to run is worse than one that says so.
+    | (HostBackend | SrtBackend), Container container ->
         Error (
             sprintf
-                "this session's work sandbox is %s, which has no process of its own to run '%s' as — a `cmd` needs the docker backend"
+                "this session's work sandbox is %s, which runs no container%s — a container needs the docker backend"
                 (SandboxBackend.describe backend)
-                command)
-    | HostBackend, None -> Ok (HostSandbox.create ())
-    | DockerBackend, _ -> Ok (DockerSandbox.create name spec)
-    | SrtBackend, None ->
+                (match container.Command with
+                 | Some command -> sprintf " and so has nothing to run '%s' as" command
+                 | None -> ""))
+    | HostBackend, Confinement -> Ok (HostSandbox.create ())
+    // Docker always IS a container; a spec that asked for nothing in particular gets the
+    // defaults rather than a second, container-less docker path.
+    | DockerBackend, Container container -> Ok (DockerSandbox.create name spec container)
+    | DockerBackend, Confinement -> Ok (DockerSandbox.create name spec ContainerSpec.defaults)
+    | SrtBackend, Confinement ->
         SrtSandbox.toolsFrom ambient |> Result.map SrtSandbox.create

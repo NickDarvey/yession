@@ -139,13 +139,18 @@ let private makeSandboxes
         // The docker backend cannot share a host path by policy, so the repos dir rides
         // the spec as a bind mount at /repos — beside the named workspace volume, not
         // replacing it. Host-family backends share it by write path below.
+        // The runtime union makes this branch structural rather than incidental: only the
+        // docker arm can name a mount, because only it has a container to mount into.
         match workBackend with
         | DockerBackend ->
             { EnvironmentSpec.defaults with
-                Mounts =
-                    [ { Source = HostPath reposDir
-                        Target = Sandboxes.reposVisibleAt workBackend reposDir
-                        Mode = ReadWrite } ] }
+                Runtime =
+                    Container
+                        { ContainerSpec.defaults with
+                            Mounts =
+                                [ { Source = HostPath reposDir
+                                    Target = Sandboxes.reposVisibleAt workBackend reposDir
+                                    Mode = ReadWrite } ] } }
         | HostBackend
         | SrtBackend -> EnvironmentSpec.defaults
     let sharedRepos =

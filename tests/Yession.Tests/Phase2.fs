@@ -212,14 +212,22 @@ let private sandboxPolicyTests =
             // host or srt sandbox is a confinement around spawns, so the ask is refused
             // rather than ignored — a sandbox that silently did not run what it was asked
             // to run is worse than one that says so.
-            let withCommand = { EnvironmentSpec.defaults with Command = Some "postgres -c fsync=off" }
-            Expect.isError (Sandboxes.forBackend HostBackend "s" withCommand) "the host backend has no process to replace"
-            Expect.isError (Sandboxes.forBackend SrtBackend "s" withCommand) "nor does srt"
-            Expect.isOk (Sandboxes.forBackend DockerBackend "s" withCommand) "docker does"
+            // `Confinement` cannot CARRY a command — that is the union's job, and no test can
+            // exercise a state the type has no representation for. What is left to check is
+            // the question the union cannot settle: whether this backend hosts a container.
+            let asContainer =
+                { EnvironmentSpec.defaults with
+                    Runtime = Container { ContainerSpec.defaults with Command = Some "postgres -c fsync=off" } }
+            Expect.isError (Sandboxes.forBackend HostBackend "s" asContainer) "the host backend runs no container"
+            Expect.isError (Sandboxes.forBackend SrtBackend "s" asContainer) "nor does srt"
+            Expect.isOk (Sandboxes.forBackend DockerBackend "s" asContainer) "docker does"
 
         testCase "the refusal says what was asked for and what would host it" <| fun () ->
             // A refusal nobody can act on gets worked around instead of fixed.
-            match Sandboxes.forBackend HostBackend "s" { EnvironmentSpec.defaults with Command = Some "npm start" } with
+            let asContainer =
+                { EnvironmentSpec.defaults with
+                    Runtime = Container { ContainerSpec.defaults with Command = Some "npm start" } }
+            match Sandboxes.forBackend HostBackend "s" asContainer with
             | Ok _ -> failwith "expected a refusal"
             | Error e ->
                 Expect.isTrue (e.Contains "npm start") "it quotes the command"
@@ -228,6 +236,8 @@ let private sandboxPolicyTests =
         testCase "a sandbox with no command is unaffected on every backend" <| fun () ->
             // The guard above must not have cost the ordinary sandbox anything.
             Expect.isOk (Sandboxes.forBackend HostBackend "s" EnvironmentSpec.defaults) "host still works"
+            // Docker always IS a container: a spec that asked for nothing gets the defaults
+            // rather than a second, container-less docker path.
             Expect.isOk (Sandboxes.forBackend DockerBackend "s" EnvironmentSpec.defaults) "so does docker"
 
         testCase "egress: only a confined backend carries an allowlist, and it is opt-in" <| fun () ->
@@ -992,7 +1002,7 @@ let private acceptanceE2eTests =
         Tag.needs "Docker adapter smoke" [ Tag.Docker ] (fun () ->
             testCaseAsync "real container create/spawn/dispose" (async {
                 let name = SessionId.value (SessionId.mint ())
-                let spec = { EnvironmentSpec.defaults with Image = Some { Name = "alpine"; Tag = Some "3" } }
+                let spec = { EnvironmentSpec.defaults with Runtime = Container { ContainerSpec.defaults with Image = Some { Name = "alpine"; Tag = Some "3" } } }
                 let createSandbox = Sandboxes.forBackend DockerBackend name spec |> expect
                 match! createSandbox (Sandboxes.policyFor DockerBackend Map.empty Map.empty None None) with
                 | Error reason -> failwithf "docker sandbox failed: %s" reason

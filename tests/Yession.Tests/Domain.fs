@@ -623,21 +623,37 @@ let private configTests =
                     { "version": 1,
                       "sandboxes": {
                         "dev": {
-                          "image": "node:24",
+                          "container": { "image": "node:24", "cmd": "npm start" },
                           "workdir": "./app",
                           "env": { "NODE_ENV": "development" },
-                          "cmd": "npm start",
                           "net": [ "registry.npmjs.org" ],
                           "read": [ "~/.cache/npm" ],
                           "forward": [ "github" ] } } }"""
                 |> expect
             let dev = file.Sandboxes |> Map.find (sandboxName "dev")
-            Expect.equal dev.Image (Some { Name = "node"; Tag = Some "24" }) "the image splits on its tag"
+            let container = dev.Container |> Option.get
+            Expect.equal container.Image (Some { Name = "node"; Tag = Some "24" }) "the image splits on its tag"
             Expect.equal dev.WorkingDirectory (Some "./app") "the workdir is the repo's own"
-            Expect.equal dev.Command (Some "npm start") "the sandbox's process"
+            Expect.equal container.Command (Some "npm start") "the sandbox's process"
             Expect.equal dev.Net [ "registry.npmjs.org" ] "the egress it asks for"
             Expect.equal dev.Read [ "~/.cache/npm" ] "the paths it asks to read"
             Expect.equal dev.Forward [ "github" ] "the credentials by name"
+
+        testCase "a sandbox cannot ask for a process without a container to run it in" <| fun () ->
+            // The point of the runtime union. `cmd` is not a sandbox key at all — it lives
+            // inside `container`, so "a confined sandbox with a process" is not a state the
+            // file can express and not one any decoder has to refuse.
+            match ConfigFile.parse """{ "version": 1, "sandboxes": { "dev": { "cmd": "npm start" } } }""" with
+            | Ok _ -> failwith "expected a refusal"
+            | Error e ->
+                Expect.isTrue (e.Contains "cmd") "it names the key that has no home here"
+                Expect.isTrue (e.Contains "container") "and lists the one that does"
+
+        testCase "a sandbox with no container block asks for no container" <| fun () ->
+            // `None` is the repo saying nothing, not the repo asking to be confined — what
+            // that means is the backend's answer, not this file's.
+            let file = ConfigFile.parse """{ "version": 1, "sandboxes": { "dev": { "net": [ "a.example" ] } } }""" |> expect
+            Expect.equal (file.Sandboxes |> Map.find (sandboxName "dev")).Container None "nothing was asked for"
 
         testCase "a secret is named, never carried" <| fun () ->
             // The whole reason `env` has two forms. A file that could hold a value would be
@@ -682,7 +698,7 @@ let private configTests =
             // A typo that decodes to "nothing was asked for" reads as configuration and
             // behaves as none.
             Expect.isError
-                (ConfigFile.parse """{ "version": 1, "sandboxes": { "dev": { "imagge": "node:24" } } }""")
+                (ConfigFile.parse """{ "version": 1, "sandboxes": { "dev": { "workdirr": "./app" } } }""")
                 "a misspelled key fails the file"
 
         testCase "an unknown top-level key is refused too" <| fun () ->
