@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Collab
+
+open Yession.Domain
 
 // The Ylmish sync boundary (Step 05, extended by Phase 3's message queue).
 // `SyncedSessionState` is the only state that crosses it: the codec below names exactly

@@ -11,6 +11,7 @@ module Yession.Host.DocStore
 open Fable.Core
 open Node.Api
 open Yession.Domain
+open Yession.Domain.Collab
 
 // The plain reads/writes go through the maintained Fable.Node `fs` binding.
 let private existsSync (path: string) : bool = fs.existsSync (U2.Case1 path)

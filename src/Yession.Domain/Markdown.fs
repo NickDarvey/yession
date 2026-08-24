@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Collab
+
+open Yession.Domain
 
 open Fable.Core
 open Yjs

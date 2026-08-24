@@ -3,6 +3,7 @@ namespace Yession.App
 open Fable.Core
 open Yjs
 open Yession.Domain
+open Yession.Domain.Collab
 
 /// The draft-slot publication rule: a peer's slot is in the synced state IFF that peer's body
 /// has content.

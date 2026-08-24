@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Collab
+
+open Yession.Domain
 
 // Rich-text bodies. A draft/queue body is a structured ProseMirror document held as a Yjs
 // `XmlFragment`. It is a top-level named root on the doc, keyed by `BodyKey`, NOT nested

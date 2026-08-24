@@ -1,6 +1,7 @@
 namespace Yession.SessionProcess
 
 open Yession.Domain
+open Yession.Domain.Collab
 
 /// Handling of `SessionCommand` requests on the Session Process. Commands are how
 /// clients ask for durable facts the CRDT cannot express: that is the agent-turn

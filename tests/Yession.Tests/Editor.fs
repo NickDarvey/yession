@@ -14,6 +14,7 @@ open Fable.Pyxpecto
 open Yjs
 open Ylmish.Codec
 open Yession.Domain
+open Yession.Domain.Collab
 open Yession.App
 
 /// A fresh, integrated root `Y.XmlFragment` on its own doc.
