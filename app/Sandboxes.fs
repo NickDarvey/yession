@@ -89,16 +89,16 @@ module SessionLayout =
     /// `workspace` path, so nothing about an existing session changes; a named one gets
     /// its own, because two sandboxes exist precisely so that what happens in one does
     /// not happen in the other.
-    let workspaceFor (dataDir: string) (sandbox: SandboxName) : string =
-        if sandbox = SandboxName.defaultName then sprintf "%s/workspace" dataDir
-        else sprintf "%s/sandboxes/%s/workspace" dataDir (SandboxName.value sandbox)
+    let workspaceFor (dataDir: string) (sandbox: SandboxRef) : string =
+        if sandbox = SandboxRef.defaultRef then sprintf "%s/workspace" dataDir
+        else sprintf "%s/sandboxes/%s/workspace" dataDir (SandboxRef.slug sandbox)
 
     /// The session's repos directory, INSIDE the workspace a terminal opens in. One
     /// directory for the whole session — the git verbs clone into it, every work sandbox
     /// reads and builds it — so a NAMED sandbox reaches it at this same absolute path,
     /// carried as a write path rather than as a child of its own workspace.
     let reposDir (dataDir: string) : string =
-        sprintf "%s/repos" (workspaceFor dataDir SandboxName.defaultName)
+        sprintf "%s/repos" (workspaceFor dataDir SandboxRef.defaultRef)
 
     /// The agent CLI's per-session scratch HOME. The CLI writes `~/.claude` state, which
     /// lives — and dies — with the session's data directory rather than the real HOME.
@@ -129,7 +129,7 @@ module SessionLayout =
         let legacy = legacyReposDir dataDir
         let current = reposDir dataDir
         if legacy <> current && Fs.exists legacy && not (Fs.exists current) then
-            Fs.ensureDir (workspaceFor dataDir SandboxName.defaultName)
+            Fs.ensureDir (workspaceFor dataDir SandboxRef.defaultRef)
             Fs.rename legacy current
         Fs.ensureDir current
         current
