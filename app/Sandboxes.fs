@@ -197,6 +197,26 @@ let underCeiling (what: string) (knob: string) (ceiling: string list option) (as
                      | [] -> "empty"
                      | allowed -> String.concat ", " allowed))
 
+/// A leading `~/` made absolute against the session's own home.
+///
+/// A repo's file cannot write an absolute read path and should not try: the home directory
+/// belongs to whoever runs the session, and `~/.nuget/packages` is the only way a file can
+/// name the cache its build actually uses. Without this the tilde reached bubblewrap
+/// verbatim — a path that exists nowhere, so the bind was silently useless and a build
+/// re-downloaded everything inside a sandbox that had been told it could read the cache.
+///
+/// Applied to the CEILING as well as the ask, because a comparison between the two is only
+/// meaningful once both are in one form — and an operator writing `~` means by it exactly
+/// what a repo does.
+let expandHome (ambient: Map<string, string>) (path: string) : string =
+    match ambient |> Map.tryFind "HOME" with
+    | Some home when path = "~" -> home
+    | Some home when path.StartsWith "~/" -> home.TrimEnd '/' + path.Substring 1
+    // No HOME is a session whose own environment could not say where home is. The tilde
+    // stays as written rather than resolved against something invented — and the ceiling
+    // comparison still holds, because both sides are unexpanded together.
+    | _ -> path
+
 let policyFor
     (backend: SandboxBackend)
     (ambient: Map<string, string>)
@@ -231,7 +251,13 @@ let policyFor
     match underCeiling "reach" "YESSION_SESSION_WORK_NET" ceiling spec.Net with
     | Error e -> Error e
     | Ok net ->
-        match underCeiling "read" "YESSION_SESSION_READ" readCeiling spec.Read with
+        match
+            underCeiling
+                "read"
+                "YESSION_SESSION_READ"
+                (readCeiling |> Option.map (List.map (expandHome ambient)))
+                (spec.Read |> List.map (expandHome ambient))
+        with
         | Error e -> Error e
         | Ok read ->
             Ok

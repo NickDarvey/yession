@@ -312,6 +312,30 @@ let private sandboxPolicyTests =
                 Expect.isTrue (e.Contains "/etc/shadow") "it names the path"
                 Expect.isTrue (e.Contains "YESSION_SESSION_READ") "and which knob would allow it"
 
+        // Found by writing this repo's own `yession.yaml` (Plan 27, part 4), which is what
+        // that exercise is for. A file cannot write an absolute read path — the home
+        // directory belongs to whoever runs the session — so `~/.nuget/packages` is the only
+        // way it can name the cache its build uses, and the tilde used to reach bubblewrap
+        // verbatim: a bind to a path that exists nowhere, silently useless, in a sandbox
+        // that had been told it could read the cache.
+        testCase "a read path under the session's home is resolved before it reaches a sandbox" <| fun () ->
+            let ambient =
+                Map.ofList [ "HOME", "/home/dev"; "YESSION_SESSION_READ", "~/.nuget/packages" ]
+            let policy asked =
+                Sandboxes.policyFor
+                    SrtBackend ambient Map.empty None None { EnvironmentSpec.defaults with Read = asked }
+            Expect.equal
+                ((policy [ "~/.nuget/packages" ] |> expect).ReadPaths)
+                [ "/home/dev/.nuget/packages" ]
+                "the sandbox is given a path that exists"
+            // The ceiling is one statement, so the two sides have to be compared in one
+            // form: a repo writing what the operator wrote must not be refused for spelling
+            // it the same way, and the absolute form must not be a way around the tilde.
+            Expect.equal
+                ((policy [ "/home/dev/.nuget/packages" ] |> expect).ReadPaths)
+                [ "/home/dev/.nuget/packages" ]
+                "however either side spelled it"
+
         testCase "the srt config denies every read, and the policy's paths are the holes in it" <| fun () ->
             // Denying only the operator's home left everything nobody thought to name —
             // another session's data directory, a checkout this session was never given —

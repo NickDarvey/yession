@@ -27,6 +27,9 @@ let private mkdtemp (fs: obj) (os: obj) : string = jsNative
 [<Emit("$0.mkdirSync($1, { recursive: true })")>]
 let private mkdirp (fs: obj) (path: string) : unit = jsNative
 
+[<Emit("$0.readFileSync($1, 'utf8')")>]
+let private readFile (fs: obj) (path: string) : string = jsNative
+
 [<Emit("$0.writeFileSync($1, $2)")>]
 let private writeFile (fs: obj) (path: string) (text: string) : unit = jsNative
 
@@ -83,6 +86,22 @@ let tests =
                 "the image survived the round trip"
             Expect.equal dev.Net [ "registry.npmjs.org" ] "so did the egress it asks for"
             Expect.equal dev.Forward [ "github" ] "and the credential names"
+
+        // Yession's own `yession.yaml`, decoded by the real thing. It is the acceptance test
+        // for the schema: if this repo cannot say what a session working on it needs, the
+        // schema is wrong — and a plausible-looking sample in a doc would never find out.
+        testCase "the file this repo carries is one this build can read" <| fun () ->
+            let r = repo "trinketworks/yession"
+            let dir = mkdtemp nodeFs nodeOs
+            mkdirp nodeFs (sprintf "%s/%s" dir (RepoRef.relativePath r))
+            writeFile nodeFs (RepoConfig.pathIn dir r) (readFile nodeFs "yession.yaml")
+            let file = RepoConfig.read dir r |> expect |> Option.get
+            let dev = file.Sandboxes |> Map.find (SandboxName.create "dev" |> expect)
+            let gate = file.Sandboxes |> Map.find (SandboxName.create "gate" |> expect)
+            Expect.equal dev.Container None "this repo's work sandbox is srt, so it declares no container"
+            Expect.isTrue (dev.Net |> List.contains "cache.nixos.org") "it can reach the cache devenv pulls from"
+            Expect.equal dev.Forward [ "github" ] "and forwards the credential `git push` needs"
+            Expect.equal gate.Net dev.Net "the anchor gave the gate the same reach"
 
         testCase "a repo with no file asks for nothing, and that is not an error" <| fun () ->
             // The ordinary case. Most repos will never carry one.
