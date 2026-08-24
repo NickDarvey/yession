@@ -409,7 +409,10 @@ module AgentTools =
     let private startWorkSandbox (capabilities: AgentCapabilities) (raw: string) (forward: string list) : Async<string> =
         withSandbox raw (fun name ->
             async {
-                match! capabilities.StartWorkSandbox name forward with
+                // The tool's vocabulary is a name and some credentials; everything else a
+                // sandbox can be is the file's to say, so the ask is the defaults with the
+                // forwarding filled in.
+                match! capabilities.StartWorkSandbox name { SandboxRequest.defaults with Forward = forward } with
                 | Ok outcome -> return renderCommandOutcome outcome
                 | Error e -> return sprintf "could not start the sandbox: %s" e
             })

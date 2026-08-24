@@ -179,8 +179,7 @@ let policyFor
 /// A one-line description of the backend + spec for the start-requested event.
 let summaryFor (backend: SandboxBackend) (spec: EnvironmentSpec) : string =
     match spec.Runtime with
-    | Container { Image = Some image } ->
-        sprintf "docker:%s%s" image.Name (image.Tag |> Option.map ((+) ":") |> Option.defaultValue "")
+    | Container { Image = Some image } -> sprintf "docker:%s" (ContainerImage.render image)
     | Container _
     | Confinement -> SandboxBackend.describe backend
 

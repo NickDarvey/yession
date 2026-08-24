@@ -419,10 +419,15 @@ type DeleteSessionSecret = SecretName -> Async<Result<bool, string>>
 /// converges instead of accumulating. The same name with DIFFERENT forwarding is refused,
 /// naming the difference — recreating would kill whatever is running inside it.
 ///
-/// `forward` is a list of credential NAMES. Each resolves for the turn human (Plan 08
-/// precedence) into that sandbox's environment; the value goes nowhere else, and the
-/// event records which names and whose, never what.
-type StartWorkSandbox = SandboxRef -> string list -> Async<Result<CommandOutcome, string>>
+/// The request's `Forward` is a list of credential NAMES. Each resolves for the turn human
+/// (Plan 08 precedence) into that sandbox's environment; the value goes nowhere else, and
+/// the event records which names and whose, never what.
+///
+/// A whole `SandboxRequest` rather than a name and a list, because the same verb is what
+/// `yession.yaml` folds into and a file says more about a sandbox than a tool call does.
+/// One shape means the declarative and the interactive route cannot diverge — which was
+/// the point of making every mutating command ensure-shaped in the first place.
+type StartWorkSandbox = SandboxRef -> SandboxRequest -> Async<Result<CommandOutcome, string>>
 
 /// Stop one, taking whatever is running in it down. The way to change a sandbox's
 /// forwarding, and stated as such wherever the change is refused.

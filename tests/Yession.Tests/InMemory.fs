@@ -212,7 +212,7 @@ let tests =
                     WorkSandboxes.create
                         { Backend = "scripted"
                           Credentials = []
-                          Create = fun name _ -> Ok (environmentNamed (SandboxRef.render name))
+                          Create = fun name _ _ -> Ok (environmentNamed (SandboxRef.render name))
                           Log = log
                           Clock = fun () -> System.DateTimeOffset (2026, 1, 1, 0, 0, 0, System.TimeSpan.Zero) }
                     |> expect
@@ -220,7 +220,7 @@ let tests =
 
                 let caller : WorkSandboxes.SandboxCaller = { Actor = ActorRef.Agent; Credential = ActorRef.Agent }
                 let test = SandboxRef.parse "test" |> expect
-                let! started = host.Sandboxes.Ensure caller test []
+                let! started = host.Sandboxes.Ensure caller test SandboxRequest.defaults
                 Expect.isTrue (Result.isOk started) "the sandbox starts"
 
                 match! host.TerminalCommands.Execute { CommandRequest.ofCommand "echo hi" with Target = Some (InSandbox test) } agentActing with
