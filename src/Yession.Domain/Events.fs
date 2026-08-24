@@ -127,7 +127,7 @@ type SessionEvent =
     | McpServerAvailable of McpServerNoted
     | McpServerUnavailable of McpServerNoted
 
-and SessionCreated =
+and [<RequireQualifiedAccess>] SessionCreated =
     { SessionId : SessionId }
 
 and PeerJoined =
@@ -210,7 +210,7 @@ and AgentMessageCompleted =
       MessageId : MessageId
       Body : string }
 
-and AgentTurnFailed =
+and [<RequireQualifiedAccess>] AgentTurnFailed =
     { AgentTurnId : AgentTurnId
       Reason : string }
 
@@ -218,7 +218,7 @@ and AgentTurnInterrupted =
     { AgentTurnId : AgentTurnId
       RequestedBy : PeerId }
 
-and EnvironmentNeedIdentified =
+and [<RequireQualifiedAccess>] EnvironmentNeedIdentified =
     { Reason : string
       AgentTurnId : AgentTurnId option }
 
@@ -234,10 +234,10 @@ and EnvironmentStartFailed =
     { EnvironmentId : string
       Reason : string }
 
-and EnvironmentStopRequested =
+and [<RequireQualifiedAccess>] EnvironmentStopRequested =
     { EnvironmentId : string }
 
-and EnvironmentStopped =
+and [<RequireQualifiedAccess>] EnvironmentStopped =
     { EnvironmentId : string }
 
 and CommandRequested =

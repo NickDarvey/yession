@@ -134,6 +134,7 @@ module App =
     /// is deleted — a replacement, never an addition beside it. An insecure context is
     /// explicitly not a trigger: a store only that deployment exercises is the spare that rots
     /// unverified, and its real remedy is one flag on the operator's side.
+    [<RequireQualifiedAccess>]
     type HistoryCache =
         { /// Every address kept, in NO promised order — a bag, not a queue. The Cache API's
           /// `put` of an address already held deletes and re-appends it, so an answer two tabs
@@ -161,6 +162,7 @@ module App =
     /// line cannot — the file is an asciicast and a private index field in it would stop it
     /// being one — so the seq is kept BESIDE the bytes, taken from what the client asked for
     /// rather than parsed back out of the address it was given.
+    [<RequireQualifiedAccess>]
     type TranscriptCache =
         { /// Every address kept, in NO promised order — see `HistoryCache.Stored`. The line an
           /// answer starts on is what a walk goes by, and it rides beside the bytes.

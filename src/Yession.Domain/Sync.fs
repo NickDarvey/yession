@@ -15,6 +15,7 @@ open Ylmish.Codec
 /// codegen (the model is small and Adaptify would add a build step). Drafts and queue
 /// entries are keyed by their app-minted ids so concurrent — even offline — creation is
 /// safe: different keys never conflict.
+[<RequireQualifiedAccess>]
 type AdaptiveSyncedState =
     { Drafts : cmap<string, DraftState>
       Queue : cmap<string, QueuedMessage>

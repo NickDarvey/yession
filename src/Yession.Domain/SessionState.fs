@@ -92,6 +92,7 @@ module BodyKey =
 type SharedBrief = { Body : string }
 
 /// Collaborative state synced via Ylmish.
+[<RequireQualifiedAccess>]
 type SyncedSessionState =
     { /// Keyed by author, and that key is the invariant: one draft per client is
       /// unrepresentable-otherwise, and two peers drafting across a partition cannot collide

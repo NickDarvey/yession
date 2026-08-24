@@ -207,6 +207,7 @@ type ReposConfig =
 /// agent: the AGENT is the acting party the event records, while the CREDENTIAL is the
 /// turn human's (Plan 08 — no borrowing across actors, and an agent has no scope of
 /// its own). At the panel the two are the same person.
+[<RequireQualifiedAccess>]
 type RepoCaller =
     { Actor : ActorRef
       Credential : ActorRef }

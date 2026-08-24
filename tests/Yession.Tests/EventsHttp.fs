@@ -167,10 +167,11 @@ let private endpointTests =
 let private storeOf (entries: (string * string) list) =
     let kept = ResizeArray entries
     // Type-qualified: `Read` is a field name several records in the domain share, and an
-    // unqualified one would resolve to whichever was declared last.
-    { App.Stored = fun () -> async.Return (kept |> Seq.map fst |> List.ofSeq)
-      App.Read = fun url -> async.Return (kept |> Seq.tryPick (fun (u, body) -> if u = url then Some body else None))
-      App.Write = fun url body -> async { kept.Add (url, body) } } : App.HistoryCache
+    // unqualified one would resolve to whichever was declared last. `HistoryCache` carries
+    // `RequireQualifiedAccess`, so the record TYPE has to be named, not just its module.
+    { App.HistoryCache.Stored = fun () -> async.Return (kept |> Seq.map fst |> List.ofSeq)
+      App.HistoryCache.Read = fun url -> async.Return (kept |> Seq.tryPick (fun (u, body) -> if u = url then Some body else None))
+      App.HistoryCache.Write = fun url body -> async { kept.Add (url, body) } }
 
 /// One kept answer: the JSONL the server served for offsets [first, last].
 let private answerOf (first: int64) (count: int) =
