@@ -310,7 +310,7 @@ let private layoutTests =
 
         testCase "a clone lands inside the workspace a terminal starts in" <| fun () ->
             let dataDir = "/data/sessions/AAZ"
-            let workspace = Sandboxes.SessionLayout.workspaceFor dataDir SandboxName.defaultName
+            let workspace = Sandboxes.SessionLayout.workspaceFor dataDir SandboxRef.defaultRef
             let repos = Sandboxes.SessionLayout.reposDir dataDir
             Expect.isTrue
                 (repos.StartsWith (workspace + "/"))
@@ -321,10 +321,10 @@ let private layoutTests =
         // keep apart.
         testCase "a named sandbox works somewhere the default one does not" <| fun () ->
             let dataDir = "/data/sessions/AAZ"
-            let named = SandboxName.create "review" |> expect
+            let named = SandboxRef.create SessionOwned (SandboxName.create "review" |> expect)
             Expect.notEqual
                 (Sandboxes.SessionLayout.workspaceFor dataDir named)
-                (Sandboxes.SessionLayout.workspaceFor dataDir SandboxName.defaultName)
+                (Sandboxes.SessionLayout.workspaceFor dataDir SandboxRef.defaultRef)
                 "what happens in one sandbox does not happen in the other"
 
         // A data directory outlives its process, which is what makes a checkout survive a

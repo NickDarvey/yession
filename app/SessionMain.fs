@@ -119,7 +119,7 @@ let private reposDir = Sandboxes.SessionLayout.prepareReposDir dataDir
 /// Module level because two things need it and they are not near each other: the sandboxes
 /// themselves, and the path a repo verb ANSWERS with — which is relative to the terminal's
 /// working directory or it is not relative to anything.
-let private workspaceFor (sandbox: SandboxName) =
+let private workspaceFor (sandbox: SandboxRef) =
     match workBackend with
     | HostBackend
     | SrtBackend -> Some (Sandboxes.SessionLayout.workspaceFor dataDir sandbox)
@@ -158,14 +158,17 @@ let private makeSandboxes
         | HostBackend
         | SrtBackend -> Some reposDir
         | DockerBackend -> None
-    // The backend's own container/volume namespace has to differ per sandbox too, or two
-    // named sandboxes under docker would fight over one container name.
-    let backendNameFor (sandbox: SandboxName) =
-        if sandbox = SandboxName.defaultName then name
-        else sprintf "%s-%s" name (SandboxName.value sandbox)
     fun log ->
+        // The registry still names sandboxes by `SandboxName` — scoping it is the next step —
+        // so this lifts to the session-owned ref at the boundary. Behaviour is identical:
+        // a session-owned slug IS the bare name.
         let create (sandbox: SandboxName) (credentialEnv: Map<string, string>) =
-            match Sandboxes.forBackend workBackend (backendNameFor sandbox) workSpec with
+            let sandbox = SandboxRef.create SessionOwned sandbox
+            // The backend's own container/volume namespace has to differ per sandbox, or two
+            // of them under docker would fight over one container name — and now that a repo
+            // can declare its own, two REPOS' same-named sandboxes would too. The rule lives
+            // on `SandboxRef`, where a cheap test reaches it; this composition only asks.
+            match Sandboxes.forBackend workBackend (SandboxRef.objectName sessionId sandbox) workSpec with
             | Error e -> Error e
             | Ok createSandbox ->
                 let workspace = workspaceFor sandbox
@@ -188,7 +191,7 @@ let private makeSandboxes
                                     return Ok { policy with Env = Sandboxes.mergeEnv policy.Env credentialEnv }
                             })
                         (Sandboxes.summaryFor workBackend workSpec)
-                        (sprintf "env-%s" (backendNameFor sandbox)))
+                        (sprintf "env-%s" (SandboxRef.objectName sessionId sandbox)))
         match WorkSandboxes.create
                 { Backend = SandboxBackend.describe workBackend
                   // The credentials this session knows how to forward. GitHub is the one
@@ -602,7 +605,7 @@ Async.StartImmediate (
                       // against the same root. The absolute path stays the sandbox's.
                       VisibleAt =
                         SandboxPath.reachedFrom
-                            (workspaceFor SandboxName.defaultName)
+                            (workspaceFor SandboxRef.defaultRef)
                             (Sandboxes.reposVisibleAt workBackend reposDir)
                       ExtraReadPaths = []
                       Git = Repos.gitExecutable (Sandboxes.ambientEnv ())

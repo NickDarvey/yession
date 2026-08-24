@@ -437,6 +437,50 @@ module SandboxRef =
         | SessionOwned -> SandboxName.value name
         | RepoOwned repo -> sprintf "%s:%s" (RepoRef.value repo) (SandboxName.value name)
 
+    /// A 28-bit hash of a string, as seven lowercase hex characters.
+    ///
+    /// Pure shift-and-add integer arithmetic, for `Base32Crockford`'s reason: it has to
+    /// compute the SAME value under .NET and Fable, and a multiply would differ the moment an
+    /// intermediate left JavaScript's exactly-representable range. Both runtimes shift as
+    /// 32-bit signed, and the mask keeps the result non-negative and inside 28 bits.
+    let private hex7 (raw: string) : string =
+        let mutable h = 17
+        for c in raw do
+            h <- ((h <<< 5) - h + int c) &&& 0xFFFFFFF
+        let digits = "0123456789abcdef"
+        String (Array.init 7 (fun i -> digits.[(h >>> ((6 - i) * 4)) &&& 0xF]))
+
+    /// What identifies this sandbox WITHIN its session, in a charset a Docker object name
+    /// and a directory both accept.
+    ///
+    /// The scope cannot be spelled out here: `owner/repo` carries a `/`, and `SandboxName`'s
+    /// charset is narrow exactly because these two consumers are. Slugifying it would be
+    /// worse than a hash rather than better — `a/b-c` and `a-b/c` both flatten to `a-b-c`,
+    /// and two repos quietly sharing one container is the failure this segment exists to
+    /// prevent.
+    ///
+    /// So a repo's sandboxes carry a hash of the scope. It is 28 bits, which is a bound worth
+    /// stating rather than a guarantee: two DIFFERENT repos declaring the SAME sandbox name
+    /// could collide, at roughly one in 268 million. The readable answer to "which repo is
+    /// this" is the `work_sandboxes` query, which carries the scope itself; this is the part
+    /// that has to survive being a container name.
+    let slug (ref: SandboxRef) : string =
+        match scope ref with
+        | SessionOwned -> SandboxName.value (name ref)
+        | RepoOwned repo -> sprintf "%s-%s" (SandboxName.value (name ref)) (hex7 (RepoRef.value repo))
+
+    /// The name this sandbox's BACKEND objects take — a container, a volume, a docker label.
+    ///
+    /// Lives here, beside the type, rather than in the composition root that used to compute
+    /// it: a rule about what a `SandboxRef` may be called is a property of `SandboxRef`, and
+    /// one a cheap test should be able to reach without building a session.
+    ///
+    /// The session's own `default` keeps the bare session id it has always had, so nothing
+    /// about an existing session moves.
+    let objectName (session: SessionId) (ref: SandboxRef) : string =
+        if ref = defaultRef then SessionId.value session
+        else sprintf "%s-%s" (SessionId.value session) (slug ref)
+
     /// Read one back. Total by returning a `Result`: this parses agent input.
     let parse (raw: string) : Result<SandboxRef, string> =
         let trimmed = (defaultArg (Option.ofObj raw) "").Trim()

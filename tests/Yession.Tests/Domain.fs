@@ -781,6 +781,51 @@ let private configTests =
             for r in refs do
                 Expect.equal (SandboxRef.parse (SandboxRef.render r)) (Ok r) (sprintf "%s round-trips" (SandboxRef.render r))
 
+        testCase "the session's own default keeps the bare session id it has always had" <| fun () ->
+            // The whole behaviour-preservation claim of moving this derivation out of the
+            // composition root. If this moves, every existing session's container, volume and
+            // workspace moves with it.
+            let session = SessionId.create "S0PZABC" |> expect
+            Expect.equal (SandboxRef.objectName session SandboxRef.defaultRef) "S0PZABC"
+                "the default sandbox's objects are named by the session, exactly as before"
+
+        testCase "a session's named sandbox is the session id and the name" <| fun () ->
+            let session = SessionId.create "S0PZABC" |> expect
+            let review = SandboxRef.create SessionOwned (sandboxName "review")
+            Expect.equal (SandboxRef.objectName session review) "S0PZABC-review" "unchanged too"
+
+        testCase "two repos' same-named sandboxes name different objects" <| fun () ->
+            // The reason this derivation exists at all. Two repos both declaring `dev` must
+            // not end up sharing one container.
+            let session = SessionId.create "S0PZABC" |> expect
+            let mine = SandboxRef.inScope (repo "octo/hello") (sandboxName "dev")
+            let theirs = SandboxRef.inScope (repo "octo/other") (sandboxName "dev")
+            Expect.notEqual (SandboxRef.objectName session mine) (SandboxRef.objectName session theirs)
+                "one container each"
+
+        testCase "a repo's sandbox does not collide with a session's of the same name" <| fun () ->
+            let session = SessionId.create "S0PZABC" |> expect
+            Expect.notEqual
+                (SandboxRef.objectName session (SandboxRef.create SessionOwned (sandboxName "dev")))
+                (SandboxRef.objectName session (SandboxRef.inScope (repo "octo/hello") (sandboxName "dev")))
+                "the scope is part of what names the object"
+
+        testCase "the slug survives being a container name and a directory" <| fun () ->
+            // `SandboxName`'s charset is narrow because these two consumers are; a slug that
+            // carried the scope literally would put a '/' through both.
+            let slug = SandboxRef.slug (SandboxRef.inScope (repo "octo/hello") (sandboxName "dev"))
+            let safe c =
+                (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c = '-' || c = '_'
+            Expect.isTrue (String.forall safe slug) (sprintf "'%s' is nameable" slug)
+
+        testCase "the derived name is stable across calls" <| fun () ->
+            // It names a container that outlives the process that made it, so a name that
+            // varied would orphan the previous one on every boot.
+            let session = SessionId.create "S0PZABC" |> expect
+            let ref = SandboxRef.inScope (repo "octo/hello") (sandboxName "dev")
+            Expect.equal (SandboxRef.objectName session ref) (SandboxRef.objectName session ref)
+                "the same ref names the same object"
+
         testCase "a sandbox nobody could name is refused rather than parsed" <| fun () ->
             Expect.isError (SandboxRef.parse "octo/hello:dev:extra") "two colons name nothing"
             Expect.isError (SandboxRef.parse "not-a-repo:dev") "the scope has to be an owner/repo"
