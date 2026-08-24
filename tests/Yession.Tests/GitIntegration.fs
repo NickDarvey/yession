@@ -19,6 +19,7 @@ open Fable.Core
 open Fable.Core.JsInterop
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Sandboxes
 open Yession.Domain.Tools
 open Yession.Domain.Chat
 open Yession.Oidc

@@ -1,6 +1,7 @@
 namespace Yession.Domain.Agent
 
 open Yession.Domain
+open Yession.Domain.Sandboxes
 
 open Yession.Domain.Chat
 open Yession.Domain.Terminals

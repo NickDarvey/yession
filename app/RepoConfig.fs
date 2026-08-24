@@ -14,6 +14,7 @@ module Yession.Host.RepoConfig
 
 open Fable.Core
 open Yession.Domain
+open Yession.Domain.Sandboxes
 
 [<Import("parseDocument", "yaml")>]
 let private parseDocument (text: string) (options: obj) : obj = jsNative

@@ -13,6 +13,7 @@ open Fable.Core.JsInterop
 open Fable.Pyxpecto
 open Fable.OpenTelemetry
 open Yession.Domain
+open Yession.Domain.Sandboxes
 open Yession.Domain.Access
 open Yession.Host
 

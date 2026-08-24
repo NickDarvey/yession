@@ -1,6 +1,7 @@
 namespace Yession.Domain.Agent
 
 open Yession.Domain
+open Yession.Domain.Sandboxes
 
 // The session's own tools, as a registry (Plan 16, part A).
 //

@@ -1,6 +1,7 @@
 namespace Yession.Domain.Terminals
 
 open Yession.Domain
+open Yession.Domain.Sandboxes
 
 // Where a terminal's bytes come from (Plan 16, part D).
 //

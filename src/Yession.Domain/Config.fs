@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Sandboxes
+
+open Yession.Domain
 
 // What a repo asks a session for (`yession.yaml`, Plan 27).
 //

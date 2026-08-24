@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Sandboxes
+
+open Yession.Domain
 
 /// The sandbox seam: one confined place a session runs processes. A session owns two
 /// sibling sandboxes — the AgentSandbox hosting the agent CLI and the WorkSandbox

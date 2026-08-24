@@ -2,6 +2,7 @@ namespace Yession.SessionProcess
 
 open System
 open Yession.Domain
+open Yession.Domain.Sandboxes
 open Yession.Domain.Agent
 
 /// The session's lazily-started WorkSandbox (Step 12, reworked over the sandbox seam).

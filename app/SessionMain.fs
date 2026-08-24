@@ -9,6 +9,7 @@ module Yession.Host.SessionMain
 
 open Fable.Core
 open Yession.Domain
+open Yession.Domain.Sandboxes
 open Yession.Domain.Agent
 open Yession.Domain.Link
 open Yession.Domain.Tools
