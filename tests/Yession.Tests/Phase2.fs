@@ -253,6 +253,65 @@ let private sandboxPolicyTests =
                 (Some [])
                 "and none where none were configured — srt has no unrestricted mode, so it fails closed"
 
+        // The rule a repo-authored file rests on (Plan 27). A `yession.yaml` is written by
+        // whoever can push to the repo, which is not whoever runs the host, so the
+        // operator's list is a ceiling and the only direction a file may move it is down.
+        testCase "a sandbox may narrow the operator's egress, and gets it whole by saying nothing" <| fun () ->
+            let ambient = Map.ofList [ "YESSION_SESSION_WORK_NET", "api.example.com, cdn.example.com" ]
+            let policy asked =
+                Sandboxes.policyFor
+                    SrtBackend ambient Map.empty None None { EnvironmentSpec.defaults with Net = asked }
+            Expect.equal
+                ((policy [] |> expect).AllowedDomains)
+                (Some [ "api.example.com"; "cdn.example.com" ])
+                "a sandbox that named nothing reaches what the operator allows"
+            Expect.equal
+                ((policy [ "api.example.com" ] |> expect).AllowedDomains)
+                (Some [ "api.example.com" ])
+                "and one that named less reaches less, at once"
+
+        testCase "a sandbox asking past the ceiling is refused, naming what it asked for" <| fun () ->
+            let ambient = Map.ofList [ "YESSION_SESSION_WORK_NET", "api.example.com" ]
+            match
+                Sandboxes.policyFor
+                    SrtBackend ambient Map.empty None None
+                    { EnvironmentSpec.defaults with Net = [ "api.example.com"; "evil.example.com" ] }
+                with
+            | Ok _ -> failwith "expected a refusal"
+            | Error e ->
+                Expect.isTrue (e.Contains "evil.example.com") "it names what exceeded the ceiling"
+                Expect.isFalse (e.Contains "asks to reach api.example.com, evil") "and not the part that did not"
+                Expect.isTrue (e.Contains "YESSION_SESSION_WORK_NET") "and which knob would allow it"
+
+        // The unconfining backends restrict this axis not at all, so an ask is satisfied
+        // there by everything. Refusing would be a refusal on behalf of a rule that is not
+        // being enforced.
+        testCase "a backend that confines no egress grants the ask whole" <| fun () ->
+            for backend in [ HostBackend; DockerBackend ] do
+                let policy =
+                    Sandboxes.policyFor
+                        backend Map.empty Map.empty None None
+                        { EnvironmentSpec.defaults with Net = [ "anything.example.com" ] }
+                Expect.equal ((policy |> expect).AllowedDomains) None (sprintf "%A stays unrestricted" backend)
+
+        // The read axis is the same rule read off the other variable — and it is the reason
+        // `configuredReadPaths` sits beside `egressFor` instead of inside the one backend
+        // that enforces it.
+        testCase "an extra read path is allowed only where the operator named it" <| fun () ->
+            let ambient = Map.ofList [ "YESSION_SESSION_READ", "/opt/toolchain" ]
+            let policy asked =
+                Sandboxes.policyFor
+                    SrtBackend ambient Map.empty None None { EnvironmentSpec.defaults with Read = asked }
+            Expect.equal
+                ((policy [ "/opt/toolchain" ] |> expect).ReadPaths)
+                [ "/opt/toolchain" ]
+                "a path the operator named lands"
+            match policy [ "/etc/shadow" ] with
+            | Ok _ -> failwith "expected a refusal"
+            | Error e ->
+                Expect.isTrue (e.Contains "/etc/shadow") "it names the path"
+                Expect.isTrue (e.Contains "YESSION_SESSION_READ") "and which knob would allow it"
+
         testCase "the srt config denies every read, and the policy's paths are the holes in it" <| fun () ->
             // Denying only the operator's home left everything nobody thought to name —
             // another session's data directory, a checkout this session was never given —
@@ -441,12 +500,14 @@ let private sandboxPolicyTests =
         testCase "policy assembly: spec variables win over the baseline; docker takes no baseline" <| fun () ->
             let ambient = Map.ofList [ "PATH", "/usr/bin"; "HOME", "/home/u" ]
             let resolved = Map.ofList [ "HOME", "/workspace-home"; "TOKEN", "t" ]
-            let host = Sandboxes.policyFor HostBackend ambient resolved (Some "/ws") (Some "/repos")
+            let host =
+                Sandboxes.policyFor HostBackend ambient resolved (Some "/ws") (Some "/repos") EnvironmentSpec.defaults
+                |> expect
             Expect.equal (Map.tryFind "HOME" host.Env) (Some "/workspace-home") "the spec's variable wins"
             Expect.equal (Map.tryFind "PATH" host.Env) (Some "/usr/bin") "the baseline fills the rest"
             Expect.equal host.WorkingDirectory (Some "/ws") "the workspace is the default cwd"
             Expect.equal host.WritePaths [ "/ws"; "/repos" ] "the repos dir is a write path of its own (Plan 14)"
-            let docker = Sandboxes.policyFor DockerBackend ambient resolved None None
+            let docker = Sandboxes.policyFor DockerBackend ambient resolved None None EnvironmentSpec.defaults |> expect
             Expect.equal (Map.tryFind "PATH" docker.Env) None "a docker image supplies its own base env"
             Expect.equal (Map.tryFind "TOKEN" docker.Env) (Some "t") "only the spec's variables inject"
 
@@ -1004,7 +1065,7 @@ let private acceptanceE2eTests =
                 let name = SessionId.value (SessionId.mint ())
                 let spec = { EnvironmentSpec.defaults with Runtime = Container { ContainerSpec.defaults with Image = Some { Name = "alpine"; Tag = Some "3" } } }
                 let createSandbox = Sandboxes.forBackend DockerBackend name spec |> expect
-                match! createSandbox (Sandboxes.policyFor DockerBackend Map.empty Map.empty None None) with
+                match! createSandbox ((Sandboxes.policyFor DockerBackend Map.empty Map.empty None None EnvironmentSpec.defaults |> expect)) with
                 | Error reason -> failwithf "docker sandbox failed: %s" reason
                 | Ok sandbox ->
                     let! run, out, _ = runInSandbox sandbox "echo" [ "hello-from-docker" ] Map.empty None

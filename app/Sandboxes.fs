@@ -62,19 +62,33 @@ let resolveVariables
 /// Empty where the operator named none, and deliberately so: what hosts an agent's
 /// commands legitimately need is not something this code can guess, and egress is the
 /// side to fail closed on.
+/// One operator statement, comma- or space-separated. Absent and empty are the same list,
+/// which is what makes an unset variable and a blank one impossible to tell apart on
+/// purpose: neither says anything.
+let private listFrom (raw: string option) : string list =
+    raw
+    |> Option.defaultValue ""
+    |> fun raw -> raw.Split ([| ','; ' '; '\t'; '\n' |])
+    |> Array.map (fun entry -> entry.Trim ())
+    |> Array.filter (fun entry -> entry <> "")
+    |> List.ofArray
+
 let egressFor (backend: SandboxBackend) (ambient: Map<string, string>) : string list option =
     match backend with
     | HostBackend
     | DockerBackend -> None
-    | SrtBackend ->
-        ambient
-        |> Map.tryFind "YESSION_SESSION_WORK_NET"
-        |> Option.defaultValue ""
-        |> fun raw -> raw.Split ([| ','; ' '; '\t'; '\n' |])
-        |> Array.map (fun domain -> domain.Trim ())
-        |> Array.filter (fun domain -> domain <> "")
-        |> List.ofArray
-        |> Some
+    | SrtBackend -> ambient |> Map.tryFind "YESSION_SESSION_WORK_NET" |> listFrom |> Some
+
+/// The operator's extra read paths. It ADDS to the platform list rather than replacing it
+/// — unlike `YESSION_SESSION_*_NET`, which replaces — because a deployment naming its
+/// unusual toolchain still needs libc.
+///
+/// Beside `egressFor` rather than down in `SrtSandbox`, which is the only backend that
+/// enforces it: these are two readings of the same operator statement — what this session's
+/// sandboxes may reach, and what they may see — and `policyFor` reconciles a spec against
+/// both. A rule with a sibling somewhere else is a rule one of whose halves has moved.
+let configuredReadPaths (ambient: Map<string, string>) : string list =
+    ambient |> Map.tryFind "YESSION_SESSION_READ" |> listFrom
 
 /// Where a session's workspaces and its checkouts sit under its data directory.
 ///
@@ -150,6 +164,39 @@ let reposVisibleAt (backend: SandboxBackend) (hostReposDir: string) : string =
     | SrtBackend -> hostReposDir
     | DockerBackend -> "/repos"
 
+/// Reconcile what a sandbox asks to reach with what the operator allows.
+///
+/// The operator's list is a CEILING and this is the only place the two authors meet: the
+/// backend and the env are the operator's, the spec is partly the repo's, and a repo that
+/// could widen its own reach would make the ceiling a suggestion. So narrowing lands at
+/// once, and an ask that exceeds it is REFUSED, naming what exceeded — never granted, and
+/// never quietly dropped either. AGENTS.md's stance on a capability a run cannot host, said
+/// about configuration: asking for it requires it.
+///
+/// `None` is a ceiling that does not exist — the unconfining backends, which restrict this
+/// axis not at all. An ask is satisfied there by everything, so it is granted whole; a
+/// sandbox that may reach the internet may reach `registry.npmjs.org`.
+///
+/// The refusal is already the sentence a human would approve, which is what a real
+/// classifier turns this into later: nothing here has to be undone for that.
+let underCeiling (what: string) (knob: string) (ceiling: string list option) (asked: string list) : Result<string list, string> =
+    match ceiling, asked with
+    | _, [] -> Ok []
+    | None, asked -> Ok asked
+    | Some ceiling, asked ->
+        match asked |> List.filter (fun one -> not (List.contains one ceiling)) with
+        | [] -> Ok asked
+        | over ->
+            Error (
+                sprintf
+                    "this sandbox asks to %s %s, which this session does not allow — %s is %s"
+                    what
+                    (String.concat ", " over)
+                    knob
+                    (match ceiling with
+                     | [] -> "empty"
+                     | allowed -> String.concat ", " allowed))
+
 let policyFor
     (backend: SandboxBackend)
     (ambient: Map<string, string>)
@@ -163,18 +210,40 @@ let policyFor
     // checkout. The docker backend carries it as a bind mount on the spec instead
     // (`SessionMain`), so it is None there.
     (reposDir: string option)
-    : SandboxPolicy =
+    // What this sandbox ASKED to reach. Reconciled here, and only here, because here is
+    // where the operator's ambient environment and the (partly repo-authored) spec are both
+    // in hand — a caller that reconciled first would be a second copy of the ceiling rule.
+    (spec: EnvironmentSpec)
+    : Result<SandboxPolicy, string> =
     let env =
         match backend with
         | HostBackend
         | SrtBackend -> mergeEnv (hostBaseline ambient) resolved
         | DockerBackend -> resolved
-    { ReadPaths = []
-      WritePaths = (workspace |> Option.toList) @ (reposDir |> Option.toList)
-      AllowedDomains = egressFor backend ambient
-      Env = env
-      WorkingDirectory = workspace
-      Filesystem = Confined }
+    let ceiling = egressFor backend ambient
+    // The read ceiling is the operator's extra paths. The PLATFORM list is allowed back
+    // regardless (`runtimeReadPaths`), so this bounds only what a sandbox can ask to add.
+    let readCeiling =
+        match backend with
+        | HostBackend
+        | DockerBackend -> None
+        | SrtBackend -> Some (configuredReadPaths ambient)
+    match underCeiling "reach" "YESSION_SESSION_WORK_NET" ceiling spec.Net with
+    | Error e -> Error e
+    | Ok net ->
+        match underCeiling "read" "YESSION_SESSION_READ" readCeiling spec.Read with
+        | Error e -> Error e
+        | Ok read ->
+            Ok
+                { ReadPaths = read
+                  WritePaths = (workspace |> Option.toList) @ (reposDir |> Option.toList)
+                  // A sandbox that named nothing gets the operator's list, which is what
+                  // every sandbox has had until now.
+                  AllowedDomains =
+                    ceiling |> Option.map (fun allowed -> match net with [] -> allowed | asked -> asked)
+                  Env = env
+                  WorkingDirectory = workspace
+                  Filesystem = Confined }
 
 /// A one-line description of the backend + spec for the start-requested event.
 let summaryFor (backend: SandboxBackend) (spec: EnvironmentSpec) : string =
@@ -202,7 +271,7 @@ let preparePolicy
         async {
             match! resolveVariables resolveSecret spec.EnvironmentVariables with
             | Error e -> return Error e
-            | Ok resolved -> return Ok (policyFor backend (ambientEnv ()) resolved workspace reposDir)
+            | Ok resolved -> return policyFor backend (ambientEnv ()) resolved workspace reposDir spec
         }
 
 // --- A buffered one-shot: settle once, deliver to every (even late) awaiter --------------
@@ -859,18 +928,6 @@ module SrtSandbox =
         candidate
         |> Option.filter (fun prefix ->
             prefix.Split '/' |> Array.filter (fun segment -> segment <> "") |> Array.length >= 2)
-
-    /// The operator's extra read paths, comma- or space-separated. It ADDS to the platform
-    /// list rather than replacing it — unlike `YESSION_*_DOMAINS`, which replaces — because
-    /// a deployment naming its unusual toolchain still needs libc.
-    let configuredReadPaths (ambient: Map<string, string>) : string list =
-        ambient
-        |> Map.tryFind "YESSION_SESSION_READ"
-        |> Option.defaultValue ""
-        |> fun raw -> raw.Split ([| ','; ' '; '\t'; '\n' |])
-        |> Array.map (fun path -> path.Trim ())
-        |> Array.filter (fun path -> path <> "")
-        |> List.ofArray
 
     /// What a confined sandbox may read beyond the paths its own policy names. `installed`
     /// is what is already running on this host — the interpreter, srt's own files — read
