@@ -204,12 +204,16 @@ let dispatch (services: CommandServices) : CommandDispatch =
                     match SandboxRef.parse name with
                     | Error e -> return Error (sprintf "not a sandbox: %s" e)
                     | Ok name ->
-                        match! (services.Sandboxes ()).Ensure (sandboxCaller invocation) name forward with
+                        // The gated args are strings, so what an agent can ask for through
+                        // this door is a name and some credential names — everything else a
+                        // sandbox can be is `yession.yaml`'s to say.
+                        let request = { SandboxRequest.defaults with Forward = forward }
+                        match! (services.Sandboxes ()).Ensure (sandboxCaller invocation) name request with
                         | Error e -> return Error e
                         | Ok entry ->
                             services.Invalidate WorkSandboxes.queryName
                             let forwarding =
-                                match entry.Forwarded with
+                                match entry.Request.Forward with
                                 | [] -> "nothing forwarded into it"
                                 | names -> "forwarding " + String.concat ", " names
                             return
@@ -321,13 +325,13 @@ let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCap
               Authority = Authority.agentFor turnActor }
     { capabilities with
         StartWorkSandbox =
-          fun name forward ->
+          fun name request ->
             let summary =
-                match WorkSandboxes.normaliseForward forward with
+                match WorkSandboxes.normaliseForward request.Forward with
                 | [] -> sprintf "start_work_sandbox %s" (SandboxRef.render name)
                 | names ->
                     sprintf "start_work_sandbox %s forwarding %s" (SandboxRef.render name) (String.concat ", " names)
-            gated startWorkSandboxTool (SandboxRef.render name :: forward) summary
+            gated startWorkSandboxTool (SandboxRef.render name :: request.Forward) summary
         StopWorkSandbox =
           fun name ->
             gated

@@ -71,14 +71,14 @@ let createFull
                     |> Option.map (fun make ->
                         let createSandbox = make request.SessionId
                         fun log ->
-                            let create (name: SandboxRef) (extraEnv: Map<string, string>) =
+                            let create (name: SandboxRef) (spec: EnvironmentSpec) (extraEnv: Map<string, string>) =
                                 let prepare =
                                     Sandboxes.preparePolicy
                                         HostBackend
                                         (fun secret -> async { return Error (sprintf "no secrets channel for '%s'" (SecretName.value secret)) })
                                         None
                                         None
-                                        EnvironmentSpec.defaults
+                                        spec
                                 Ok (
                                     SessionEnvironment.create
                                         log
@@ -89,7 +89,7 @@ let createFull
                                                 | Error e -> return Error e
                                                 | Ok policy -> return Ok { policy with Env = Sandboxes.mergeEnv policy.Env extraEnv }
                                             })
-                                        (Sandboxes.summaryFor HostBackend EnvironmentSpec.defaults)
+                                        (Sandboxes.summaryFor HostBackend spec)
                                         (sprintf "env-%s-%s" (SessionId.value request.SessionId) (SandboxRef.render name)))
                             match WorkSandboxes.create
                                     { Backend = SandboxBackend.describe HostBackend

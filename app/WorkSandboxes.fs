@@ -51,9 +51,16 @@ type RunningSandbox =
       /// different sandboxes that happen to share a name.
       Ref : SandboxRef
       Backend : string
-      /// The credential names forwarded into it, normalised (trimmed, deduped, sorted) so
-      /// that "is this the same configuration" is a comparison rather than a judgement.
-      Forwarded : string list
+      /// What it was STARTED with, normalised — not what the composition then built around
+      /// it. The session adds things of its own (the repos mount under docker), and a
+      /// second ask that matched the request exactly would be refused for a difference the
+      /// asker never asked for.
+      ///
+      /// Carrying the whole request rather than the forwarding alone is what lets "is this
+      /// the same sandbox" be an equality instead of a judgement — which matters because
+      /// the wrong answer either kills somebody's build or hands back a sandbox configured
+      /// as something else.
+      Request : SandboxRequest
       /// Who asked for it. `None` for `default`, which nobody asked for.
       StartedBy : ActorRef option
       StartedAt : DateTimeOffset option
@@ -63,17 +70,18 @@ type WorkSandboxesConfig =
     { /// How the backend describes itself, for the event and the query.
       Backend : string
       Credentials : CredentialSource list
-      /// Build the environment for a name, with the resolved credentials as extra policy
-      /// env. Synchronous and fallible: whether this backend can host another sandbox is
-      /// known without starting one.
-      Create : SandboxRef -> Map<string, string> -> Result<SessionEnvironment.SessionEnvironment, string>
+      /// Build the environment for a sandbox: the spec it was asked to be, plus the
+      /// resolved credentials as extra policy env. Synchronous and fallible — whether this
+      /// backend can host what was asked for (a container under srt, say) is known without
+      /// starting anything.
+      Create : SandboxRef -> EnvironmentSpec -> Map<string, string> -> Result<SessionEnvironment.SessionEnvironment, string>
       Log : EventLog<SessionEvent>
       Clock : unit -> DateTimeOffset }
 
 type WorkSandboxes =
     { /// Get-or-create by name. Idempotent when the configuration matches; a legible
       /// error when it does not.
-      Ensure : SandboxCaller -> SandboxRef -> string list -> Async<Result<RunningSandbox, string>>
+      Ensure : SandboxCaller -> SandboxRef -> SandboxRequest -> Async<Result<RunningSandbox, string>>
       Stop : SandboxCaller -> SandboxRef -> Async<Result<unit, string>>
       /// The environment a terminal runs in. Total, because a terminal has to be told no
       /// in the same shape it is told anything else — an unknown name resolves to an
@@ -94,6 +102,10 @@ let normaliseForward (names: string list) : string list =
     |> List.distinct
     |> List.sort
 
+/// The same, over a whole request — the form the registry stores and compares.
+let normalise (request: SandboxRequest) : SandboxRequest =
+    { request with Forward = normaliseForward request.Forward }
+
 /// An environment for a name the session does not have. Refuses in the same shape a real
 /// one does, naming what is wrong rather than the generic "no environment".
 let private missing (name: SandboxRef) : SessionEnvironment.SessionEnvironment =
@@ -111,7 +123,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
     // `default` exists from boot, because it is the sandbox every session has always had:
     // a terminal opened without naming one lands here, and nothing about a pre-Plan-15
     // session changes. It is created eagerly and started lazily, exactly as before.
-    config.Create SandboxRef.defaultRef Map.empty
+    config.Create SandboxRef.defaultRef SandboxRequest.defaults.Spec Map.empty
     |> Result.map (fun defaultEnvironment ->
 
     // Keyed by the ref itself: it is a structural value, so a lookup is an equality rather
@@ -120,7 +132,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
         [ SandboxRef.defaultRef,
           { Ref = SandboxRef.defaultRef
             Backend = config.Backend
-            Forwarded = []
+            Request = SandboxRequest.defaults
             StartedBy = None
             StartedAt = None
             Environment = defaultEnvironment } ]
@@ -170,11 +182,11 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
             | None -> return Ok resolved
         }
 
-    let ensure (caller: SandboxCaller) (name: SandboxRef) (forward: string list) : Async<Result<RunningSandbox, string>> =
+    let ensure (caller: SandboxCaller) (name: SandboxRef) (request: SandboxRequest) : Async<Result<RunningSandbox, string>> =
         async {
-            let wanted = normaliseForward forward
+            let wanted = normalise request
             match find name with
-            | Some existing when existing.Forwarded = wanted ->
+            | Some existing when existing.Request = wanted ->
                 // The idempotent case. Make sure it is actually up (the environment is
                 // lazy, and a stopped one recreates here), and record NOTHING — a second
                 // ask changed nothing, so the timeline should not claim it did.
@@ -182,19 +194,21 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                 | EnvironmentUnavailable reason -> return Error reason
                 | EnvironmentAvailable -> return Ok existing
             | Some existing ->
-                let render names = match names with [] -> "nothing" | some -> String.concat ", " some
+                // Say what differs, never recreate. `differences` is total over unequal
+                // requests, so this branch always has something to say — which is why the
+                // idempotence above is an equality on the same value rather than a second,
+                // looser rule that could disagree with it.
                 return
                     Error (
                         sprintf
-                            "sandbox '%s' is already running and forwards %s, not %s — stop_work_sandbox it first if you want to change that (anything running in it dies with it)"
+                            "sandbox '%s' is already running and %s — stop_work_sandbox it first if you want to change that (anything running in it dies with it)"
                             (SandboxRef.render name)
-                            (render existing.Forwarded)
-                            (render wanted))
+                            (SandboxRequest.differences existing.Request wanted |> String.concat "; "))
             | None ->
-                match! resolveForward caller.Credential wanted with
+                match! resolveForward caller.Credential wanted.Forward with
                 | Error e -> return Error e
                 | Ok credentialEnv ->
-                    match config.Create name credentialEnv with
+                    match config.Create name wanted.Spec credentialEnv with
                     | Error e -> return Error e
                     | Ok environment ->
                         match! environment.Ensure None (sprintf "sandbox '%s' was started" (SandboxRef.render name)) with
@@ -204,7 +218,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                             let entry =
                                 { Ref = name
                                   Backend = config.Backend
-                                  Forwarded = wanted
+                                  Request = wanted
                                   StartedBy = Some caller.Actor
                                   StartedAt = Some startedAt
                                   Environment = environment }
@@ -216,8 +230,9 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                                         { MessageId = mintMessageId ()
                                           Sandbox = name
                                           Backend = config.Backend
-                                          Forwarded = wanted
-                                          CredentialOwner = (if List.isEmpty wanted then None else Some caller.Credential)
+                                          Forwarded = wanted.Forward
+                                          CredentialOwner =
+                                            (if List.isEmpty wanted.Forward then None else Some caller.Credential)
                                           Actor = caller.Actor })
                             return Ok entry
         }
@@ -239,7 +254,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                         entries
                         |> List.map (fun (key, existing) ->
                             if key = name then
-                                key, { existing with Forwarded = []; StartedBy = None; StartedAt = None }
+                                key, { existing with Request = SandboxRequest.defaults; StartedBy = None; StartedAt = None }
                             else key, existing)
                 else
                     entries <- entries |> List.filter (fun (key, _) -> key <> name)
@@ -276,7 +291,7 @@ let singleton (backend: string) (environment: SessionEnvironment.SessionEnvironm
     let entry =
         { Ref = SandboxRef.defaultRef
           Backend = backend
-          Forwarded = []
+          Request = SandboxRequest.defaults
           StartedBy = None
           StartedAt = None
           Environment = environment }
@@ -312,7 +327,7 @@ let unavailable : WorkSandboxes =
     let entry =
         { Ref = SandboxRef.defaultRef
           Backend = "none"
-          Forwarded = []
+          Request = SandboxRequest.defaults
           StartedBy = None
           StartedAt = None
           Environment = SessionEnvironment.unavailable }
@@ -333,13 +348,19 @@ let private queryDef : QueryDef =
     { Name = queryName
       Title = "work sandboxes"
       Description =
-        "The sandboxes commands can run in, each with the backend confining it, whether it \
-         is up, and which credentials were forwarded into it and by whom. Read from the \
-         processes themselves."
+        "The sandboxes commands can run in, each with the backend confining it, what it \
+         runs, whether it is up, and which credentials were forwarded into it and by whom. \
+         Read from the processes themselves."
       Shape =
         Rows
             [ QueryColumn.create "name" "name"
+              // `name` is the ADDRESS — what you type at a verb — and `declared_by` is the
+              // attribution. The repo appears in both, and that is not a spare: the
+              // address answers "how do I reach this", the attribution answers "who asked
+              // for it", and only the second is a reason to look at what it runs.
+              QueryColumn.create "declared_by" "declared by"
               QueryColumn.create "backend" "backend"
+              QueryColumn.create "runs" "runs"
               QueryColumn.create "state" "state"
               QueryColumn.create "forwarding" "forwarding"
               QueryColumn.create "started_by" "started by"
@@ -362,14 +383,19 @@ let query (current: unit -> WorkSandboxes) : Queries.QueryRegistration =
                         (current ()).Listed ()
                         |> List.map (fun entry ->
                             [ "name", CellText (SandboxRef.render entry.Ref)
+                              "declared_by",
+                              (match SandboxRef.scope entry.Ref with
+                               | RepoOwned repo -> CellText (RepoRef.value repo)
+                               | SessionOwned -> CellAbsent)
                               "backend", CellText entry.Backend
+                              "runs", CellText (SandboxRuntime.describe entry.Request.Spec.Runtime)
                               "state",
                               CellText (
                                   match entry.Environment.CurrentRef () with
                                   | Some ref -> "running (" + ref + ")"
                                   | None -> "not started")
                               "forwarding",
-                              (match entry.Forwarded with
+                              (match entry.Request.Forward with
                                | [] -> CellText "nothing"
                                | names -> CellText (String.concat ", " names))
                               "started_by",

@@ -849,11 +849,114 @@ let private configTests =
             Expect.isError (SandboxRef.parse "not-a-repo:dev") "the scope has to be an owner/repo"
     ]
 
+// -----------------------------------------------------------------------------
+// What "the same sandbox" means (Plan 27, step 5b). The registry hands back a running
+// sandbox when the ask matches and refuses when it does not, so this comparison decides
+// between two bad outcomes: killing somebody's build, or handing back a sandbox that is
+// not what was asked for. It is pure, so it is pinned here rather than through a registry.
+// -----------------------------------------------------------------------------
+
+/// Every way one ask can differ from the default, one per field the comparison looks at.
+/// A list rather than separate cases because the property under test is about ALL of them
+/// at once: whichever field moved, the refusal has something to say.
+let private variants : (string * SandboxRequest) list =
+    [ "forwarding", { SandboxRequest.defaults with Forward = [ "github" ] }
+      "workdir",
+        { SandboxRequest.defaults with
+            Spec = { EnvironmentSpec.defaults with WorkingDirectory = Some "/somewhere" } }
+      "environment",
+        { SandboxRequest.defaults with
+            Spec =
+                { EnvironmentSpec.defaults with
+                    EnvironmentVariables = Map.ofList [ "NODE_ENV", PlainValue "development" ] } }
+      "runtime", { SandboxRequest.defaults with Spec = EnvironmentSpec.container }
+      "image",
+        { SandboxRequest.defaults with
+            Spec =
+                { EnvironmentSpec.defaults with
+                    Runtime = Container { ContainerSpec.defaults with Image = Some { Name = "node"; Tag = Some "24" } } } }
+      "command",
+        { SandboxRequest.defaults with
+            Spec =
+                { EnvironmentSpec.defaults with
+                    Runtime = Container { ContainerSpec.defaults with Command = Some "postgres" } } }
+      "mounts",
+        { SandboxRequest.defaults with
+            Spec =
+                { EnvironmentSpec.defaults with
+                    Runtime =
+                        Container
+                            { ContainerSpec.defaults with
+                                Mounts = [ { Source = SessionWorkspace; Target = "/work"; Mode = ReadWrite } ] } } }
+      // The one no clause looks at, and the reason there is a backstop: two builds of the
+      // same context differing only in which Dockerfile they use describe identically.
+      "dockerfile",
+        { SandboxRequest.defaults with
+            Spec =
+                { EnvironmentSpec.defaults with
+                    Runtime =
+                        Container
+                            { ContainerSpec.defaults with
+                                Build = Some { ContextPath = "."; DockerfilePath = Some "Dockerfile.ci" } } } } ]
+
+let private sandboxRequestTests =
+    testList "the same sandbox, or a different one (Plan 27)" [
+
+        testCase "an ask that matches has nothing to say about itself" <| fun () ->
+            for name, variant in ("default", SandboxRequest.defaults) :: variants do
+                Expect.equal
+                    (SandboxRequest.differences variant variant)
+                    []
+                    (sprintf "'%s' against itself is the idempotent case" name)
+
+        // THE property, and the reason `differences` is a function rather than a sentence
+        // assembled at the refusal: whenever the registry declines to hand a sandbox back,
+        // it must be able to say why. A clause list that could come back empty would make
+        // the refusal claim a difference and then name none of it.
+        testCase "whatever moved, the refusal has a clause for it" <| fun () ->
+            for name, variant in variants do
+                Expect.isNonEmpty
+                    (SandboxRequest.differences SandboxRequest.defaults variant)
+                    (sprintf "a '%s' difference is describable" name)
+                Expect.isNonEmpty
+                    (SandboxRequest.differences variant SandboxRequest.defaults)
+                    (sprintf "and so is a '%s' difference the other way round" name)
+
+        // The backstop, on the case that reaches it: two asks that describe the same way and
+        // still are not the same ask. It says less, and that is the point — a refusal that
+        // said nothing here would let the registry treat them as one sandbox.
+        testCase "a difference no clause looks at is still a difference" <| fun () ->
+            let buildOf dockerfile =
+                { SandboxRequest.defaults with
+                    Spec =
+                        { EnvironmentSpec.defaults with
+                            Runtime =
+                                Container
+                                    { ContainerSpec.defaults with
+                                        Build = Some { ContextPath = "."; DockerfilePath = Some dockerfile } } } }
+            Expect.isNonEmpty
+                (SandboxRequest.differences (buildOf "Dockerfile") (buildOf "Dockerfile.ci"))
+                "two builds of one context are not interchangeable"
+
+        // Names, never values. The registry's refusal reaches the model and the timeline,
+        // and an environment variable's value is the one thing neither may carry.
+        testCase "a differing environment is described by name, never by value" <| fun () ->
+            let secret =
+                { SandboxRequest.defaults with
+                    Spec =
+                        { EnvironmentSpec.defaults with
+                            EnvironmentVariables = Map.ofList [ "DATABASE_URL", PlainValue "postgres://hunter2" ] } }
+            let said = SandboxRequest.differences SandboxRequest.defaults secret |> String.concat "; "
+            Expect.isTrue (said.Contains "DATABASE_URL") "it names the variable"
+            Expect.isFalse (said.Contains "hunter2") "and not what is in it"
+    ]
+
 let tests =
     testList "Domain" [
         identityTests
         launchTests
         configTests
+        sandboxRequestTests
         modelTests
         authorityTests
         envelopeSerializationTests
