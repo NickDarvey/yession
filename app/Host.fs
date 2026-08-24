@@ -199,7 +199,7 @@ let startFull
         // append. The Process is the log's only writer, so this is complete and ordered by
         // construction — and it is what `execute_command`'s wait observes, which is why the
         // wait holds no state of its own.
-        let mutable terminalProjection = TerminalProjection.empty
+        let mutable terminalProjection = Projection.empty
         // Anything that could change a waiting command's outcome: an appended event, a doc
         // update. One signal for both, because a waiter does not care which happened — it
         // re-reads and decides.
@@ -225,7 +225,7 @@ let startFull
                         async {
                             recordAttribution event
                             let! appended = inner.Append actor event
-                            terminalProjection <- TerminalProjection.applyEvent terminalProjection event
+                            terminalProjection <- Projection.applyEvent terminalProjection event
                             broadcastEventsAvailable appended.Offset
                             notifyChanged ()
                             return appended
@@ -243,7 +243,7 @@ let startFull
             replayed.Events |> List.choose (fun e -> TerminalQueueDrain.consumedOf e.Event) |> Set.ofList
         let replayedTerminals =
             replayed.Events
-            |> List.fold (fun proj e -> TerminalProjection.applyEvent proj e.Event) TerminalProjection.empty
+            |> List.fold (fun proj e -> Projection.applyEvent proj e.Event) Projection.empty
         terminalProjection <- replayedTerminals
         // Where a shell opened in each sandbox starts (Plan 25), from the same replay — which
         // is what makes a restarted session open its next terminal where the last one started.
@@ -313,8 +313,8 @@ let startFull
                             TerminalSnapshot (
                                 terminal,
                                 { Seq = 0
-                                  Cols = TerminalSize.default'.Cols
-                                  Rows = TerminalSize.default'.Rows
+                                  Cols = Size.default'.Cols
+                                  Rows = Size.default'.Rows
                                   Screen = "" })))))
 
         let terminals =
@@ -347,7 +347,7 @@ let startFull
                 // The gate on every block (Plan 23). The bypass until an AI-driven
                 // classifier exists; this root supplies it and computes nothing.
                 Classifier.approveAll
-                (replayedTerminals |> TerminalProjection.openTerminals |> List.map (fun t -> t.TerminalId))
+                (replayedTerminals |> Projection.openTerminals |> List.map (fun t -> t.TerminalId))
                 replayedProfiles
 
         // The agent's ONE execution path (Plan 13, stage 3b). It queues a command where
@@ -489,7 +489,7 @@ let startFull
                         let busy = terminals.Busy ()
                         return
                             Ok
-                                (TerminalProjection.openTerminals terminalProjection
+                                (Projection.openTerminals terminalProjection
                                  |> List.map (fun view ->
                                      { Terminal = view.TerminalId
                                        Name = view.Title

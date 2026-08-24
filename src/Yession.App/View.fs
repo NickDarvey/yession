@@ -468,7 +468,7 @@ module View =
         // that, rather than inventing a title or going quiet.
         let terminalWords () =
             ClientModel.terminalOfFocus field model
-            |> Option.bind (fun terminal -> TerminalProjection.tryFind terminal model.Terminals)
+            |> Option.bind (fun terminal -> Projection.tryFind terminal model.Terminals)
             |> Option.map (fun view -> Dom.Text.inTerminal view.Title)
             |> Option.defaultValue Dom.Text.atSomeTerminal
         match field with
@@ -1320,7 +1320,7 @@ module View =
 
     /// The chat: what was said and what was run, in the order it happened (Plan 14, stage 1).
     ///
-    /// Terminal items are resolved against `TerminalProjection` at render time rather than
+    /// Terminal items are resolved against `Projection` at render time rather than
     /// copied into the timeline, which is what makes a running chip mutate in place as its
     /// block finishes — the timeline holds where it goes, the projection holds what it says.
     let private chat (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
@@ -1378,13 +1378,13 @@ module View =
         // chat noisiest exactly when it is busiest, and would put everything a command
         // printed one glance from anyone in the session rather than one tap.
         let blockOf (terminalId: TerminalId) (blockId: BlockId) =
-            TerminalProjection.tryFind terminalId model.Terminals
+            Projection.tryFind terminalId model.Terminals
             |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
         // No author of its own: WHO ran it is the group's author line above it (`group`
         // below), the same answer a message gets. Takes the block already RESOLVED, because
         // the grouping fold needs the block's authority before it can place the chip — a
         // chip whose block a page boundary withheld never becomes an entry at all.
-        let blockChip (terminalId: TerminalId) (block: TerminalBlock) =
+        let blockChip (terminalId: TerminalId) (block: Block) =
             let blockId = block.BlockId
             html $"""
                 <button type="button" class="{Style.chatChip}"
@@ -1449,7 +1449,7 @@ module View =
         // lines ARE block chips — same element, same click, same hooks — so a chip does not
         // change what it is by being grouped, and nothing here has to be kept in step with
         // the ungrouped case.
-        let taskCard (turn: AgentTurnId) (blocks: (TerminalId * TerminalBlock) list) =
+        let taskCard (turn: AgentTurnId) (blocks: (TerminalId * Block) list) =
             let lines =
                 blocks
                 |> List.map (fun (terminalId, block) -> (terminalId, block), TaskCard.stateOf block.Status)
@@ -1613,7 +1613,7 @@ module View =
     /// block, free to drift from the first. What it prints over an EMPTY one is the whole
     /// difference between a command still running, one that printed nothing, and one that
     /// never ran at all — three facts a bare blank would flatten into one.
-    let private terminalBlockOutput (feed: TerminalFeed) (block: TerminalBlock) : TemplateResult =
+    let private terminalBlockOutput (feed: TerminalFeed) (block: Block) : TemplateResult =
         // A running block's output runs to whatever has arrived; a finished one is bounded
         // by the range its completion event recorded — which is what makes a reload show
         // exactly the same block as the live view did.
@@ -1644,7 +1644,7 @@ module View =
                  data-pane-replay="{PaneTab.key tab}"></div>"""
 
     /// One block: the command that ran, then everything it printed.
-    let private terminalBlockView (model: ClientModel) (feed: TerminalFeed) (block: TerminalBlock) : TemplateResult =
+    let private terminalBlockView (model: ClientModel) (feed: TerminalFeed) (block: Block) : TemplateResult =
         let body = terminalBlockOutput feed block
         // A command that ran and exited 0 says so by being followed by its output and
         // nothing else — which is what every terminal anyone has used does. `✓ 0` beside
@@ -1731,7 +1731,7 @@ module View =
         // the controls, because a screen reader hearing "Delete" eleven times learns
         // nothing about which one it is on.
         let what =
-            TerminalProjection.tryFind entry.Terminal model.Terminals
+            Projection.tryFind entry.Terminal model.Terminals
             |> Option.map (fun view -> view.Title)
             |> Option.defaultValue (TerminalId.value entry.Terminal)
         let subject =
@@ -1868,9 +1868,9 @@ module View =
     let private terminalComposer (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) (terminal: TerminalId) : TemplateResult =
         let mine = model.Peer.PeerId
         let lease =
-            TerminalProjection.tryFind terminal model.Terminals |> Option.bind (fun view -> view.Lease)
+            Projection.tryFind terminal model.Terminals |> Option.bind (fun view -> view.Lease)
         let integrationLost =
-            TerminalProjection.tryFind terminal model.Terminals
+            Projection.tryFind terminal model.Terminals
             |> Option.map (fun view -> view.IntegrationLost)
             |> Option.defaultValue false
         let editors (author: PeerId) =
@@ -2106,7 +2106,7 @@ module View =
     /// must not be a second rendering of a block, free to drift from the first.
     let private paneBlockView (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) (terminalId: TerminalId) (blockId: BlockId) : TemplateResult =
         let found =
-            TerminalProjection.tryFind terminalId model.Terminals
+            Projection.tryFind terminalId model.Terminals
             |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
         match found with
         | None ->
@@ -2128,7 +2128,7 @@ module View =
             // Watching from here is still one press away: this moves them, and the toggle
             // below is then the same toggle, at the command they were sent to.
             let showInTerminal =
-                if List.isEmpty (TerminalProjection.tryFind terminalId model.Terminals
+                if List.isEmpty (Projection.tryFind terminalId model.Terminals
                                  |> Option.map (fun v -> v.Blocks)
                                  |> Option.defaultValue []) then Lit.nothing
                 else
@@ -2220,7 +2220,7 @@ module View =
     /// The terminal LIST (Plan 20, stage 0): every terminal the session has ever had, and
     /// every verb one of them affords.
     ///
-    /// The verbs are rendered from `TerminalAffordances` and from nothing else — a row wears
+    /// The verbs are rendered from `Affordances` and from nothing else — a row wears
     /// exactly the controls its terminal's state allows, and a control that does not apply is
     /// ABSENT rather than disabled. That is the same rule the pane's own controls already
     /// followed by hand in three places; here it is one fold, which is what lets a test assert
@@ -2234,7 +2234,7 @@ module View =
         let row (view: TerminalView) =
             let id = TerminalId.value view.TerminalId
             let affords = ClientModel.affordances view model
-            let running = TerminalProjection.runningBlock view |> Option.isSome
+            let running = Projection.runningBlock view |> Option.isSome
             let state =
                 if not view.IsOpen then
                     if affords.CanReplay then
@@ -2364,11 +2364,11 @@ module View =
         let tabLabel (tab: PaneTab) =
             match tab with
             | TerminalTab id ->
-                TerminalProjection.tryFind id model.Terminals
+                Projection.tryFind id model.Terminals
                 |> Option.map (fun v -> v.Title)
                 |> Option.defaultValue (TerminalId.value id)
             | BlockTab (terminalId, blockId) ->
-                TerminalProjection.tryFind terminalId model.Terminals
+                Projection.tryFind terminalId model.Terminals
                 |> Option.bind (fun v -> v.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
                 |> Option.map (fun b -> b.Command)
                 |> Option.defaultValue (BlockId.value blockId)
@@ -2418,7 +2418,7 @@ module View =
             let pinnedAttr = if not pinnable then "" elif pinned then "true" else "false"
             match tab with
             | TerminalTab id ->
-                match TerminalProjection.tryFind id model.Terminals with
+                match Projection.tryFind id model.Terminals with
                 | Some view -> terminalTabButton activate pinMark pinnedAttr hint view
                 | None -> Lit.nothing
             | BlockTab _ | StretchTab _ -> readonlyTabButton activate pinMark pinnedAttr hint tab
@@ -2537,7 +2537,7 @@ module View =
                 let inner =
                     match tab with
                     | TerminalTab id ->
-                        match TerminalProjection.tryFind id model.Terminals with
+                        match Projection.tryFind id model.Terminals with
                         | Some view -> terminalBody view
                         | None -> Lit.nothing
                     | BlockTab (terminalId, blockId) -> paneBlockView actions dispatch model terminalId blockId
@@ -2555,7 +2555,7 @@ module View =
         let properties =
             match selected with
             | Some (TerminalTab id) ->
-                match TerminalProjection.tryFind id model.Terminals with
+                match Projection.tryFind id model.Terminals with
                 | None -> Lit.nothing
                 | Some view ->
                     // Taking the keyboard changes what this terminal IS, not what the next

@@ -66,7 +66,7 @@ type ControlCaller =
 
 /// A secrets-route failure: a policy Deny (403, with the policy's reason) or a store
 /// failure (500). Distinct so the route arms stay thin and policy-free — only the
-/// Manager can build a verified AuthzSubject, so authorization happens in its handlers.
+/// Manager can build a verified Subject, so authorization happens in its handlers.
 type SecretsError =
     | SecretsDenied of reason: string
     | SecretsFailed of reason: string

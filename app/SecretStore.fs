@@ -211,7 +211,7 @@ module SecretResolution =
                 let users = usersOf sessionId
                 let peers = peersOf sessionId
                 let local = localOf sessionId
-                let subject : AuthzSubject = { Session = Some sessionId; Users = users; Peers = peers; Local = local }
+                let subject : Subject = { Session = Some sessionId; Users = users; Peers = peers; Local = local }
                 let rec walk scopes =
                     async {
                         match scopes with
@@ -326,12 +326,12 @@ module Audit =
 
     // Render the inner case name only, so existing secrets log lines keep their wording
     // now that connection actions deny through the same record.
-    let private actionLabel (action: AuthzAction) : string =
+    let private actionLabel (action: Action) : string =
         match action with
         | SecretAction a -> sprintf "%A" a
         | ConnectionAction a -> sprintf "%A" a
 
-    let authzDeny (sessionId: SessionId) (action: AuthzAction) (resource: AuthzResource) (reason: string) : Record =
+    let authzDeny (sessionId: SessionId) (action: Action) (resource: Resource) (reason: string) : Record =
         let resourceAttrs =
             match resource with
             | SecretResource id ->

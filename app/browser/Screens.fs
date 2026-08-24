@@ -184,7 +184,7 @@ let create (dispatch: ClientMsg -> unit) (report: TerminalId -> int -> int -> un
     /// scrolls rather than reshaping everyone else's terminal.
     let measureSizes (model: ClientModel) =
         let mine = ActorRef.PeerRef model.Peer.PeerId
-        for terminal in TerminalProjection.openTerminals model.Terminals do
+        for terminal in Projection.openTerminals model.Terminals do
             let key = TerminalId.value terminal.TerminalId
             match measure key with
             | None -> ()
@@ -253,7 +253,7 @@ let create (dispatch: ClientMsg -> unit) (report: TerminalId -> int -> int -> un
             // as a model change like any other. One edge, both routes.
             let mine = ActorRef.PeerRef model.Peer.PeerId
             let showing = ClientModel.selectedTerminal model
-            for terminal in TerminalProjection.openTerminals model.Terminals do
+            for terminal in Projection.openTerminals model.Terminals do
                 let key = TerminalId.value terminal.TerminalId
                 let isMine = terminal.Lease = Some mine
                 let was = match held.TryGetValue key with | true, v -> v | _ -> false
@@ -263,7 +263,7 @@ let create (dispatch: ClientMsg -> unit) (report: TerminalId -> int -> int -> un
                 // would otherwise find whichever live screen happened to be on it instead.
                 if isMine && not was && showing = Some terminal.TerminalId then
                     PaneShell.toTerminalScreen ()
-            for terminal in TerminalProjection.openTerminals model.Terminals do
+            for terminal in Projection.openTerminals model.Terminals do
                 let key = TerminalId.value terminal.TerminalId
                 match live.TryGetValue key with
                 // No snapshot yet: nothing to fold onto. The Process sends one when a peer
@@ -289,7 +289,7 @@ let create (dispatch: ClientMsg -> unit) (report: TerminalId -> int -> int -> un
                             | TranscriptResize ->
                                 // A record nobody here wrote, so a payload this cannot read is
                                 // one to skip rather than to fail on.
-                                match TerminalSize.parse record.Data with
+                                match Size.parse record.Data with
                                 | Some size -> entry.Emulator.Resize size.Cols size.Rows
                                 | None -> ()
                             | _ -> entry.Emulator.Write record.Data
@@ -297,7 +297,7 @@ let create (dispatch: ClientMsg -> unit) (report: TerminalId -> int -> int -> un
                         publish terminal.TerminalId entry
             // A terminal that closed keeps neither a screen nor an emulator.
             let open' =
-                TerminalProjection.openTerminals model.Terminals
+                Projection.openTerminals model.Terminals
                 |> List.map (fun t -> TerminalId.value t.TerminalId)
                 |> Set.ofList
             for stale in

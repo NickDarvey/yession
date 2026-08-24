@@ -13,17 +13,17 @@ open Yession.Domain
 open Yession.Domain.Terminals
 
 let private compiled (pattern: string) =
-    match TerminalPattern.compile pattern with
+    match Pattern.compile pattern with
     | Ok compiled -> compiled
     | Error reason -> failwithf "expected %s to compile, got: %s" pattern reason
 
 let private matches (pattern: string) (text: string) =
-    match TerminalPattern.matches (compiled pattern) text with
+    match Pattern.matches (compiled pattern) text with
     | Ok answer -> answer
     | Error fault -> failwithf "the matcher would not answer: %s" fault
 
 let private refusal (pattern: string) =
-    match TerminalPattern.compile pattern with
+    match Pattern.compile pattern with
     | Ok _ -> failwithf "expected %s to be refused" pattern
     | Error reason -> reason
 
@@ -114,7 +114,7 @@ let tests =
         // somebody to check their board instead of this file.
         testCase "a matcher that runs past its budget says so, rather than answering wrongly" <| fun () ->
             let program = compiled "abc"
-            match TerminalPattern.matchesWithin 2 program "abc" with
+            match Pattern.matchesWithin 2 program "abc" with
             | Ok answer -> failwithf "expected the budget to stop it, got %b" answer
             | Error fault ->
                 Expect.stringContains fault "linear" "it names the property that was broken"
@@ -123,13 +123,13 @@ let tests =
         testCase "a budget the simulation can live within answers normally" <| fun () ->
             // The other half: a guard that fired early would turn every honest match into a
             // fault, and the case above could not tell the difference.
-            match TerminalPattern.matchesWithin 100000 (compiled "abc") "xxabcxx" with
+            match Pattern.matchesWithin 100000 (compiled "abc") "xxabcxx" with
             | Ok answer -> Expect.isTrue answer "found, well inside the budget"
             | Error fault -> failwithf "the budget stopped an ordinary match: %s" fault
 
         testCase "a pattern longer than the cap is refused rather than run" <| fun () ->
             // Linear in the pattern as well as the input, so the bound is what keeps the work
             // per character something a person can reason about.
-            let huge = String.replicate (TerminalPattern.MaxLength + 1) "a"
+            let huge = String.replicate (Pattern.MaxLength + 1) "a"
             Expect.stringContains (refusal huge) "longer than" "and says so"
     ]

@@ -278,7 +278,7 @@ let private clock () = DateTimeOffset.UtcNow
 let private sweepIntervalMsFor (timeout: TimeSpan) : int =
     int (max 5000.0 (min 60000.0 (timeout.TotalMilliseconds / 4.0)))
 
-/// The secrets handlers (Plan 06): the ONLY place a verified AuthzSubject is built, so
+/// The secrets handlers (Plan 06): the ONLY place a verified Subject is built, so
 /// the route arms stay policy-free. Every deny is logged (subject/action/scope — never
 /// values); every permitted call goes straight to the store. `resolve` is the same
 /// precedence walk env injection always used (session scope, then bound users' scopes,
@@ -290,7 +290,7 @@ let secretsApiFor
     (resolve: SecretStore.ResolveSecret)
     (store: SecretStore.SecretStore)
     : Control.SecretsApi =
-    let authorize (caller: Control.ControlCaller) (action: SecretAction) (resource: AuthzResource) =
+    let authorize (caller: Control.ControlCaller) (action: SecretAction) (resource: Resource) =
         let request =
             { Subject = { Session = Some caller.SessionId; Users = caller.Users; Peers = caller.Peers; Local = caller.Local }
               Action = SecretAction action
@@ -349,7 +349,7 @@ let secretsApiFor
             } }
 
 /// The connection-broker handlers (Plan 08): same discipline as `secretsApiFor` — the
-/// verified AuthzSubject is built here and nowhere else, every deny audited, every
+/// verified Subject is built here and nowhere else, every deny audited, every
 /// permitted call delegated to the broker. `Status` needs no policy check: its targets
 /// are DERIVED from the caller's own bound scopes, so it can only ever list what the
 /// caller could read. Module-level so the authorization matrix is testable over a bare

@@ -550,7 +550,7 @@ let private wakeTests =
                   blockCompleted "b2" ]
             Expect.isTrue (AgentWake.due page) "one wake"
             Expect.equal
-                (TerminalDigest.window page |> Set.count)
+                (Digest.window page |> Set.count)
                 2
                 "and the turn it starts is told about both"
     ]

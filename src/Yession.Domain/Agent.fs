@@ -36,7 +36,7 @@ type AgentContextPack =
       /// said, so folding blocks into `Conversation` would make the chat log a place
       /// where machine output accumulates. The agent needs both; the conversation stays
       /// a conversation.
-      Terminals      : TerminalBlockDigest list
+      Terminals      : BlockDigest list
       /// Which model to run this turn on, when the session has picked one. `None` means
       /// "whatever the provider would have chosen", which is the honest default: no
       /// deployment here knows a provider's current pick, and inventing a fixed id would
@@ -261,10 +261,10 @@ type WriteTerminal = TerminalId -> string -> Async<Result<string, string>>
 type TerminalMatch =
     /// Exactly these characters. The honest minimum, and what "wait for `login: `" wants.
     | MatchLiteral of string
-    /// A pattern over the subset `TerminalPattern` accepts — compiled at the boundary, so a
+    /// A pattern over the subset `Pattern` accepts — compiled at the boundary, so a
     /// pattern outside the subset is an answer to the tool call rather than a surprise in the
     /// middle of a wait.
-    | MatchPattern of pattern: TerminalPattern * source: string
+    | MatchPattern of pattern: Pattern * source: string
 
 module TerminalMatch =
 
@@ -277,7 +277,7 @@ module TerminalMatch =
     let isMet (target: TerminalMatch) (text: string) : Result<bool, string> =
         match target with
         | MatchLiteral literal -> Ok (text.Contains literal)
-        | MatchPattern (compiled, _) -> TerminalPattern.matches compiled text
+        | MatchPattern (compiled, _) -> Pattern.matches compiled text
 
     /// How to name it when saying it never arrived.
     let describe (target: TerminalMatch) : string =
@@ -601,7 +601,7 @@ type RunAgent = AgentContextPack -> AgentCapabilities -> AgentAbortSignal -> (Ag
 ///
 /// It carries NO payload, and that is what makes it cheap: an agent turn's context is built
 /// from a page read before the turn appends its own `AgentTurnStarted`, so
-/// `TerminalDigest.window` already reports every block that started or completed since the
+/// `Digest.window` already reports every block that started or completed since the
 /// previous turn. The wake decides WHEN a turn runs; the digest is what it then reads.
 ///
 /// There is deliberately no way to cancel a pending wake. The debt is DERIVED from the log

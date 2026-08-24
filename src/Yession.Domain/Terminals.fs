@@ -22,17 +22,17 @@ open Yession.Domain
 /// looking at the same screen, so a viewer with a smaller viewport scrolls rather than
 /// shrinking everyone else's — resizing the terminal down to its smallest viewer is tmux's
 /// worst inheritance and the reason a shared session there is unusable on a phone.
-type TerminalSize = { Cols : int; Rows : int }
+type Size = { Cols : int; Rows : int }
 
-module TerminalSize =
+module Size =
 
     /// 80x24: what every terminal has defaulted to since the VT100, and what the transcript
     /// header records when one opens.
-    let default' : TerminalSize = { Cols = 80; Rows = 24 }
+    let default' : Size = { Cols = 80; Rows = 24 }
 
     /// Sizes a terminal can actually be. A zero or negative dimension is not a small
     /// terminal, it is a broken one — and it reaches us from a doc any peer can write.
-    let isValid (size: TerminalSize) : bool = size.Cols > 0 && size.Rows > 0
+    let isValid (size: Size) : bool = size.Cols > 0 && size.Rows > 0
 
     /// How a size is written into a transcript, and read back out of one — `"120x40"`, the
     /// asciicast `"r"` record's payload.
@@ -42,12 +42,12 @@ module TerminalSize =
     /// reshape the emulator composing that terminal's screen. A `sprintf` on one side and a
     /// regex on the other is one format in two places, and the side that drifts is the side
     /// nothing round-trips.
-    let format (size: TerminalSize) : string = sprintf "%dx%d" size.Cols size.Rows
+    let format (size: Size) : string = sprintf "%dx%d" size.Cols size.Rows
 
     /// `None` for anything that is not two positive integers around one `x`. A transcript is
     /// replayed by clients that did not write it, and a record that cannot be read is a record
     /// to skip — never a reason to stop reading the rest.
-    let parse (text: string) : TerminalSize option =
+    let parse (text: string) : Size option =
         match text.Split 'x' with
         | [| cols; rows |] ->
             match System.Int32.TryParse cols, System.Int32.TryParse rows with
@@ -63,13 +63,13 @@ module TerminalSize =
 /// command and its outcome, not a process. A refusal shown in line with the commands that
 /// did run reads as *"agent: `rm -rf /` — rejected by nick"*; without it the entry simply
 /// vanishes from every screen, which is indistinguishable from a bug.
-type TerminalBlockStatus =
+type BlockStatus =
     | BlockRunning
     | BlockFinished of CommandResult
     | BlockRejected of by: ActorRef * reason: string option
 
 /// One executed command and the transcript range it produced.
-type TerminalBlock =
+type Block =
     { BlockId : BlockId
       /// The queue entry this block came from, when it came through a composer (Plan 13,
       /// stage 3b). Projected rather than dropped because it is the handle the agent is given:
@@ -90,7 +90,7 @@ type TerminalBlock =
       FromSeq : int
       /// One past its last transcript line; `None` while it is still running.
       ToSeq : int option
-      Status : TerminalBlockStatus }
+      Status : BlockStatus }
 
 /// One terminal, as the UI knows it.
 type TerminalView =
@@ -119,7 +119,7 @@ type TerminalView =
       /// the surface says so — a stall with a name beats a stall.
       IntegrationLost : bool
       /// Blocks in the order they ran.
-      Blocks : TerminalBlock list
+      Blocks : Block list
       /// Output this terminal produced that the transcript did not keep. Non-zero means
       /// the record has a stated gap.
       DroppedBytes : int }
@@ -140,7 +140,7 @@ type TerminalView =
 ///
 /// Absent verbs are ABSENT, never disabled: a control that mostly refuses teaches people not
 /// to press it, and this list's controls have to work the time somebody needs them.
-type TerminalAffordances =
+type Affordances =
     { /// End the process. Open terminals only — a "close" on a closed one either does
       /// nothing or reports an error, and both are worse than not being there.
       CanKill : bool
@@ -183,13 +183,13 @@ type TerminalAffordances =
       /// Watching is not typing. This is what a reader gets; the keyboard stays the lease's.
       ScreenIsTheRead : bool }
 
-module TerminalAffordances =
+module Affordances =
 
     /// `recorded` is whether this READER holds anything of the terminal's recording. The one
     /// input that is not a fact about the terminal, and it cannot be: a recording lives in
     /// the transcript store, so no fold over the event log can answer it — which is exactly
     /// why it is a named parameter rather than something this module reaches for.
-    let ofView (recorded: bool) (view: TerminalView) : TerminalAffordances =
+    let ofView (recorded: bool) (view: TerminalView) : Affordances =
         { CanKill = view.IsOpen
           CanRewind = view.IsOpen && recorded
           CanReplay = not view.IsOpen && recorded
@@ -208,21 +208,21 @@ module TerminalAffordances =
           ScreenIsTheRead = view.IsOpen && Option.isNone view.Sandbox && List.isEmpty view.Blocks }
 
 /// Every terminal this session has had, in the order they were opened.
-type TerminalProjection = { Terminals : TerminalView list }
+type Projection = { Terminals : TerminalView list }
 
-module TerminalProjection =
+module Projection =
 
-    let empty : TerminalProjection = { Terminals = [] }
+    let empty : Projection = { Terminals = [] }
 
-    let private updateTerminal (id: TerminalId) (f: TerminalView -> TerminalView) (proj: TerminalProjection) =
+    let private updateTerminal (id: TerminalId) (f: TerminalView -> TerminalView) (proj: Projection) =
         { Terminals = proj.Terminals |> List.map (fun t -> if t.TerminalId = id then f t else t) }
 
-    let private updateBlock (id: BlockId) (f: TerminalBlock -> TerminalBlock) (view: TerminalView) =
+    let private updateBlock (id: BlockId) (f: Block -> Block) (view: TerminalView) =
         { view with Blocks = view.Blocks |> List.map (fun b -> if b.BlockId = id then f b else b) }
 
     /// Fold one event into the projection. Only terminal events matter; everything else
     /// passes through, so this composes with the other folds over the same page.
-    let applyEvent (proj: TerminalProjection) (event: SessionEvent) : TerminalProjection =
+    let applyEvent (proj: Projection) (event: SessionEvent) : Projection =
         match event with
         | SessionEvent.TerminalOpened e ->
             // Re-opening an id that already exists is not a second terminal: ids are minted
@@ -310,17 +310,17 @@ module TerminalProjection =
             proj |> updateTerminal e.TerminalId (fun t -> { t with DroppedBytes = t.DroppedBytes + e.DroppedBytes })
         | _ -> proj
 
-    let tryFind (id: TerminalId) (proj: TerminalProjection) : TerminalView option =
+    let tryFind (id: TerminalId) (proj: Projection) : TerminalView option =
         proj.Terminals |> List.tryFind (fun t -> t.TerminalId = id)
 
     /// The terminals still open, in open order — what the panel lists.
-    let openTerminals (proj: TerminalProjection) : TerminalView list =
+    let openTerminals (proj: Projection) : TerminalView list =
         proj.Terminals |> List.filter (fun t -> t.IsOpen)
 
     /// The block currently running in a terminal, if any. At most one: the drain runs a
     /// terminal's queue one command at a time, which is what makes a shell's working
     /// directory and environment mean anything from one command to the next.
-    let runningBlock (view: TerminalView) : TerminalBlock option =
+    let runningBlock (view: TerminalView) : Block option =
         view.Blocks |> List.tryFind (fun b -> b.Status = BlockRunning)
 
 /// What the emulator's alt-screen state proposes doing about the lease (Plan 13, stage 2e).
@@ -330,14 +330,14 @@ module TerminalProjection =
 /// is the person who now needs to type into it. This is the whole policy, deliberately one
 /// pure function over the emulator's state so that shipping it, tuning it, or turning it off
 /// is a one-line change rather than an excavation.
-type TerminalFlip =
+type Flip =
     /// Give the lease to this actor — a block became a TUI and its author needs the keyboard.
     | FlipToLive of ActorRef
     /// The TUI exited and nobody claimed the terminal by hand: back to block mode.
     | FlipToBlock
     | FlipNothing
 
-module TerminalFlip =
+module Flip =
 
     /// `altScreen` is the emulator's current buffer; `holder` the lease as it stands;
     /// `autoHeld` whether that holder got it from a previous `FlipToLive` rather than by
@@ -364,7 +364,7 @@ module TerminalFlip =
         (holder: ActorRef option)
         (autoHeld: bool)
         (runningAuthor: ActorRef option)
-        : TerminalFlip =
+        : Flip =
         match altScreen, holder with
         | true, None ->
             match runningAuthor with
@@ -376,12 +376,12 @@ module TerminalFlip =
 
 /// One block an agent turn is told the outcome of (Plan 13, stage 3a).
 ///
-/// Terminal events fold into `TerminalProjection` and deliberately NOT into the
+/// Terminal events fold into `Projection` and deliberately NOT into the
 /// conversation — a command someone ran is not something someone said. That is right for
 /// the chat log and wrong for the agent, whose context is built from the conversation, so
 /// without this it cannot see the result of anything it queued, on that turn or any later
 /// one. Which is the substantive reason it reaches for a private execution path instead.
-type TerminalBlockDigest =
+type BlockDigest =
     { TerminalId : TerminalId
       /// The terminal's title, so the agent can name the place rather than an opaque id.
       Title : string
@@ -389,7 +389,7 @@ type TerminalBlockDigest =
       /// Who wrote the command — the agent's own, or someone else's it should know ran.
       Author : ActorRef
       Command : string
-      Status : TerminalBlockStatus
+      Status : BlockStatus
       /// The tail of what the block printed, capped. All of it stays in the transcript;
       /// this is the part that fits in a context window.
       OutputTail : string
@@ -399,7 +399,7 @@ type TerminalBlockDigest =
       Elided : int }
 
 /// What an agent turn is told about the terminals since it last ran (Plan 13, stage 3a).
-module TerminalDigest =
+module Digest =
 
     /// Characters of output tail kept per block. The transcript keeps the rest, and a
     /// block's full range travels with it, so nothing here is the only copy.
@@ -433,8 +433,8 @@ module TerminalDigest =
     let build
         (readOutput: TerminalId -> int -> int option -> string)
         (window: Set<string>)
-        (proj: TerminalProjection)
-        : TerminalBlockDigest list =
+        (proj: Projection)
+        : BlockDigest list =
         [ for terminal in proj.Terminals do
             for block in terminal.Blocks do
                 if Set.contains (BlockId.value block.BlockId) window then

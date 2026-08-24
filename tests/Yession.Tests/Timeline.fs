@@ -132,7 +132,7 @@ let private chipTests =
     testList "Block chips" [
         testCase "a chip carries NO status of its own — it is the block's, read live" <| fun () ->
             // What makes a chip mutate in place for free: the timeline holds where it goes,
-            // `TerminalProjection` holds what it currently says. A chip that copied the
+            // `Projection` holds what it currently says. A chip that copied the
             // status in would need its own update path, and would be free to disagree.
             let running =
                 [ at 1L 0.0 (opened terminalA "build")
@@ -141,8 +141,8 @@ let private chipTests =
             let itemsOf events = (TimelineProjection.applyEvents None events TimelineProjection.empty |> fst).TerminalItems
             Expect.equal (itemsOf running) (itemsOf finished) "the timeline entry does not move or change"
             let statusOf events =
-                let proj = events |> List.fold (fun p (e: EventEnvelope<SessionEvent>) -> TerminalProjection.applyEvent p e.Event) TerminalProjection.empty
-                TerminalProjection.tryFind terminalA proj
+                let proj = events |> List.fold (fun p (e: EventEnvelope<SessionEvent>) -> Projection.applyEvent p e.Event) Projection.empty
+                Projection.tryFind terminalA proj
                 |> Option.bind (fun t -> t.Blocks |> List.tryFind (fun b -> b.BlockId = block "1"))
                 |> Option.map (fun b -> b.Status)
             Expect.equal (statusOf running) (Some BlockRunning) "running, at first"
@@ -292,7 +292,7 @@ let private unchangedTests =
         testCase "terminal events still contribute NO conversation items" <| fun () ->
             // The load-bearing property of this whole stage. `ConversationProjection` is what
             // builds the agent's context, and the agent already receives block outcomes
-            // through `TerminalDigest` — folding terminal events in here would double-feed
+            // through `Digest` — folding terminal events in here would double-feed
             // the model and silently change what every turn reads.
             let terminalEvents =
                 [ at 1L 0.0 (opened terminalA "build")
@@ -1322,7 +1322,7 @@ let private pinTests =
                 |> ClientModel.update (TogglePinMsg (TerminalTab terminalA))
             Expect.isFalse (ClientModel.isPinned (TerminalTab terminalA) model) "out of my strip"
             Expect.isTrue
-                (TerminalProjection.tryFind terminalA model.Terminals |> Option.map (fun t -> t.IsOpen) |> Option.defaultValue false)
+                (Projection.tryFind terminalA model.Terminals |> Option.map (fun t -> t.IsOpen) |> Option.defaultValue false)
                 "and still running for everyone"
             Expect.equal
                 (ClientModel.terminalRows model |> List.map (fun t -> TerminalId.value t.TerminalId))
@@ -1448,7 +1448,7 @@ let private cardTests =
 
         testCase "a card carries NO status of its own — the row is the same either way" <| fun () ->
             // What makes a card's lines mutate in place for free, exactly as chips do: the
-            // row holds which blocks and where, `TerminalProjection` holds what they say.
+            // row holds which blocks and where, `Projection` holds what they say.
             let running =
                 [ at 1L 0.0 (turnStarted "a")
                   at 2L 1.0 (opened terminalA "agent 1")
