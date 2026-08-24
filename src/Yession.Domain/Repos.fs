@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Repos
+
+open Yession.Domain
 
 /// The session's repos, projected from events (Plan 14). The agent's git verbs and the
 /// settings panel are two interfaces over one Process-side function; this projection is
