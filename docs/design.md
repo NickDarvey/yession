@@ -244,16 +244,49 @@ read; see [GAPS.md](GAPS.md).
 
 ---
 
-## 4. Naming
+## 4. Repo-local configuration
 
-The repo-local environment config is not implemented in the first two phases, but the
-concept is reserved. The tentative name, in the style of "Ylmish":
+A checkout may carry a `yession.yaml` at its root, and a session folds every one it holds
+into the commands it already has (Plan 27). Undotted, matching the other files a repo means
+people to read.
 
-```text
-.yession.yml
+```yaml
+version: 1
+sandboxes:
+  app:
+    container: { image: node:24 }
+    workdir: ./packages/web
+    env:
+      DATABASE_URL: { secret: db-url }   # a name, never a value
+    net: [ registry.npmjs.org ]
+    read: [ ~/.cache/npm ]
+    forward: [ github ]
 ```
 
-Treat this as tentative until the environment configuration phase.
+Two top-level keys, and one is a version. **The whole file is sandboxes**, because a sandbox
+is the only scope where "two repos both said something" has a total answer: a sandbox is
+named, the name is scoped to its repo, so `config(session) = ⋃ over repos r of { (r, name) ↦
+spec }` is disjoint by construction. There is no precedence rule and nothing shadows
+anything; a clash inside one file is refused where it was written. Anything session-wide has
+no honest tie-break and stays the operator's — see [GAPS.md](GAPS.md).
+
+Three properties make the file safe to read from code a session just cloned:
+
+- **It is a fold, not an executor.** Every mutating command is ensure-shaped, so a
+  declaration is one `start_work_sandbox` through the same gate the agent's goes through.
+  Asking twice changes nothing and records nothing, which is what lets the fold re-run at
+  boot and after every verb that changes a checkout.
+- **The operator's environment is a ceiling, not a default.** Narrowing lands at once; an ask
+  that exceeds the ceiling is refused, naming what exceeded it. A file that says nothing gets
+  the operator's list whole.
+- **The file is authored by whoever can push to the repo**, which is neither the operator nor
+  anybody in the session. So its acts are attributed to `ActorRef.Configured`, it owns no
+  credential of its own, and the schema refuses what a repo may not name: the whole
+  `YESSION_` prefix in `env:`, a host path as a volume source, a `workdir` outside the
+  checkout.
+
+This repository carries its own, which is the schema's acceptance test: what yession
+needs to maintain yession is the measure of whether the file can say anything real.
 
 ---
 

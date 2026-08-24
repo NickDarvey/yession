@@ -19,7 +19,7 @@ answerable without a table.
 |---|---|---|
 | `YESSION_*` | **you**, the operator. Ordinary configuration. | `YESSION_MANAGER_URL`, `YESSION_IDLE_TIMEOUT` |
 | `YESSION_BIN_*` | you, and it names an executable on this host. | `YESSION_BIN_GIT`, `YESSION_BIN_BWRAP` |
-| `YESSION_SESSION_*` | you, as the DEFAULT for every session — the seam a repo's own configuration will later take over per session. | `YESSION_SESSION_WORK_BACKEND`, `YESSION_SESSION_READ` |
+| `YESSION_SESSION_*` | you, as the CEILING for every session — a repo's own `yession.yaml` may narrow it per sandbox, never widen it. | `YESSION_SESSION_WORK_BACKEND`, `YESSION_SESSION_READ` |
 | `YESSION_LAUNCH` | **nobody.** The Manager mints it per launch and the session decodes it. | — |
 
 `YESSION_LAUNCH` carries the launch's control secret, which is custody of that session's

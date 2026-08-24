@@ -521,8 +521,27 @@ Items are roughly ordered by how much they matter.
     dir arrives as a bind mount at `/repos` beside it. A verb still ANSWERS with the right
     path (`reposVisibleAt`), so nothing is unreachable; it is one `cd` the other backends
     no longer need.
-  - **`.yession.yml` is still unconsumed**: the bootstrap files land in the checkout,
-    and nothing reads them into the environment spec yet — that is the follow-up plan.
+  - **A repo's `yession.yaml` is read, and here is what it still cannot say** (Plan 27).
+    The file declares sandboxes and nothing else, because a sandbox is the only scope where
+    "two repos both said something" has a total answer: the keys are (repo, name) pairs, the
+    repos are disjoint, so the union is disjoint by construction. **That is the rule for
+    every future key — a key belongs in `yession.yaml` only if its scope is a sandbox.**
+    What that leaves out, deliberately:
+    - **No inter-sandbox networking.** A `db:` sandbox's process is reachable from inside
+      that sandbox only; a compose-like shared network is a design of its own.
+    - **A `cmd` is docker-only.** It lives inside the `container:` block, so under `srt` or
+      `host` there is nowhere to write one rather than a refusal to explain.
+    - **No per-session ceiling.** The tier-3 operator env is host-wide, so a widening ask is
+      bounded by a human at the command gate rather than by a policy for this session.
+    - **No file watcher.** A `git pull` that changes the file takes effect at the next fold
+      trigger — boot, or `add_repo` / `switch_branch` / `remove_repo`.
+    - **No session-wide keys, and there will not be.** Gates, approvals and MCP servers are
+      session-wide, so two repos disagreeing has no honest tie-break; those stay the
+      operator's. A `repos:` key (this repo needs that one) is recursive, and its fixed point
+      is a design of its own.
+    - **A repo's file is as trusted as its push access.** Mitigated only by the gate and by
+      the schema's own refusals — the reserved `YESSION_` prefix, a host-path volume, a
+      workdir outside the checkout.
 - **The session's imperative API is split, and only half of it is built** (Plan 15): commands
   mutate and belong to the agent alone; queries read and are declared once, reaching the agent
   as generated MCP tools (`readOnlyHint`) and the humans as a generated settings surface fed by

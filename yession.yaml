@@ -1,0 +1,43 @@
+# yession.yaml — what a session working on Yession needs to reach.
+#
+# The TOOLCHAIN is devenv.nix's business (Node 24, .NET 10, bubblewrap, uv, Chromium). This
+# file says only what the sandbox AROUND it may touch, which is the whole division of labour:
+# a repo already declares how to build itself, and repeating that here would be the second
+# live copy AGENTS.md forbids.
+#
+# No `container:` block, and that is not an omission — this repo's work sandbox is srt
+# (YESSION_SESSION_WORK_BACKEND defaults to it), which runs no container. The keys that would
+# go in one have nowhere to be written, which is what the schema is for.
+version: 1
+
+sandboxes:
+  dev: &yession
+    workdir: .
+
+    net:
+      - cache.nixos.org              # the binary cache every `devenv shell` pulls from.
+                                     # NOT yession.cachix.org: CI logs show NARs coming from
+                                     # it, but that substituter is injected by cachix-action
+                                     # and this repo configures none, so a session would only
+                                     # be asking for reach it never uses.
+      - channels.nixos.org           # nixpkgs tarballs (.claude/setup.sh)
+      - nixos.org
+      - github.com                   # git, and the flake / devenv inputs
+      - codeload.github.com
+      - objects.githubusercontent.com
+      - api.nuget.org                # `restore`
+      - registry.npmjs.org           # the off-Nix `npm install --ignore-scripts` fallback
+
+    read:
+      - /nix                         # the store the whole toolchain lives in
+      - ~/.nuget/packages
+      - ~/.cache/nix
+      - ~/.cache/devenv
+      - ~/.local/share/devenv
+
+    forward: [ github ]              # so `git push` works from a terminal
+
+  # `verify` is minutes long. A second sandbox on the same configuration means the gate runs
+  # beside interactive work instead of holding the shell — which is the example Plan 15 stage 2
+  # gave for why named sandboxes exist at all.
+  gate: *yession
