@@ -362,31 +362,33 @@ let private repoCapabilitiesFor
                   // is not something this could be written to omit.
                   Authority = Authority.agentFor turnActor }
         { capabilities with
-            AddRepo =
-              fun repo ->
-                gated addRepoTool [ RepoRef.value repo ] (sprintf "add_repo %s" (RepoRef.value repo))
-            RemoveRepo =
-              fun repo force ->
-                // The cost is in the SUMMARY, because that is the sentence the classifier
-                // reads and a person watching the queue sees BEFORE it happens rather than
-                // after. A removal that would take uncommitted work with it must not look
-                // like one that would not.
-                let summary =
-                    if force then sprintf "remove_repo %s (deleting uncommitted changes)" (RepoRef.value repo)
-                    else sprintf "remove_repo %s" (RepoRef.value repo)
-                gated removeRepoTool [ RepoRef.value repo; (if force then "true" else "false") ] summary
-            SwitchRepoBranch =
-              fun repo branch create ->
-                let summary =
-                    if create then sprintf "switch_branch %s -> new branch %s" (RepoRef.value repo) branch
-                    else sprintf "switch_branch %s -> %s" (RepoRef.value repo) branch
-                gated switchBranchTool [ RepoRef.value repo; branch; (if create then "true" else "false") ] summary
-            // The READS take no gate and no approver: they change nothing, so there is
-            // nothing to approve and nothing to resume.
-            FetchRepo = service.FetchRepo (Repos.agentCaller turnActor)
-            RepoStatus = service.RepoStatus
-            RepoLog = service.RepoLog
-            RepoDiff = service.RepoDiff }
+            Repos =
+              { capabilities.Repos with
+                  Add =
+                    fun repo ->
+                      gated addRepoTool [ RepoRef.value repo ] (sprintf "add_repo %s" (RepoRef.value repo))
+                  Remove =
+                    fun repo force ->
+                      // The cost is in the SUMMARY, because that is the sentence the classifier
+                      // reads and a person watching the queue sees BEFORE it happens rather than
+                      // after. A removal that would take uncommitted work with it must not look
+                      // like one that would not.
+                      let summary =
+                          if force then sprintf "remove_repo %s (deleting uncommitted changes)" (RepoRef.value repo)
+                          else sprintf "remove_repo %s" (RepoRef.value repo)
+                      gated removeRepoTool [ RepoRef.value repo; (if force then "true" else "false") ] summary
+                  SwitchBranch =
+                    fun repo branch create ->
+                      let summary =
+                          if create then sprintf "switch_branch %s -> new branch %s" (RepoRef.value repo) branch
+                          else sprintf "switch_branch %s -> %s" (RepoRef.value repo) branch
+                      gated switchBranchTool [ RepoRef.value repo; branch; (if create then "true" else "false") ] summary
+                  // The READS take no gate and no approver: they change nothing, so there is
+                  // nothing to approve and nothing to resume.
+                  Fetch = service.FetchRepo (Repos.agentCaller turnActor)
+                  Status = service.RepoStatus
+                  Log = service.RepoLog
+                  Diff = service.RepoDiff } }
 
 /// The turn's sandbox commands (Plan 15, stage 2) and the shell profile (Plan 25), bound to
 /// the acting party.
@@ -398,21 +400,23 @@ let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCap
               Summary = summary
               Authority = Authority.agentFor turnActor }
     { capabilities with
-        StartWorkSandbox =
-          fun name decl -> capabilities.RunGated (startWorkSandboxCall (Authority.agentFor turnActor) name decl)
-        StopWorkSandbox =
-          fun name ->
-            gated
-                stopWorkSandboxTool
-                [ SandboxRef.render name ]
-                (sprintf "stop_work_sandbox %s" (SandboxRef.render name))
-        SetShellProfile =
-          fun name cwd ->
-            let summary =
-                match cwd with
-                | Some cwd -> sprintf "set_shell_profile %s -> %s" (SandboxRef.render name) cwd
-                | None -> sprintf "set_shell_profile %s -> wherever the sandbox puts them" (SandboxRef.render name)
-            gated setShellProfileTool [ SandboxRef.render name; defaultArg cwd "" ] summary }
+        Sandboxes =
+          { capabilities.Sandboxes with
+              Start =
+                fun name decl -> capabilities.RunGated (startWorkSandboxCall (Authority.agentFor turnActor) name decl)
+              Stop =
+                fun name ->
+                  gated
+                      stopWorkSandboxTool
+                      [ SandboxRef.render name ]
+                      (sprintf "stop_work_sandbox %s" (SandboxRef.render name))
+              SetShellProfile =
+                fun name cwd ->
+                  let summary =
+                      match cwd with
+                      | Some cwd -> sprintf "set_shell_profile %s -> %s" (SandboxRef.render name) cwd
+                      | None -> sprintf "set_shell_profile %s -> wherever the sandbox puts them" (SandboxRef.render name)
+                  gated setShellProfileTool [ SandboxRef.render name; defaultArg cwd "" ] summary } }
 
 /// Every command verb bound to ONE turn's actor: the acting party on the events is the agent,
 /// the credential is the turn human's (Plan 08). The Host leaves these as denials because

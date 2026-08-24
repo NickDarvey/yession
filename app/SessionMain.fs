@@ -283,7 +283,7 @@ let private diagnosticAgent : RunAgent =
             // peer can see it, drains it and waits for the exit code. That the whole path
             // collapses to this is the point of the merge, and driving the real one across
             // process boundaries is what makes this a smoke test rather than a mock.
-            match! capabilities.ExecuteCommand (CommandRequest.ofCommand "node -e \"console.log('diagnostic-ok')\"") with
+            match! capabilities.Terminals.Execute (CommandRequest.ofCommand "node -e \"console.log('diagnostic-ok')\"") with
             | Error reason -> return AgentFailed (sprintf "diagnostic command failed: %s" reason, None)
             | Ok outcome ->
                 match outcome.Status with
@@ -557,8 +557,10 @@ let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent
             let capabilities = Commands.bindFor commandServices context.TurnActor capabilities
             let capabilities =
                 { capabilities with
-                    Queries = queryRegistry.Definitions
-                    ReadQuery = queryRegistry.Read }
+                    Queries =
+                      { capabilities.Queries with
+                          Declared = queryRegistry.Definitions
+                          Read = queryRegistry.Read } }
             // A dispatch-level failure says nothing of its own: the reason is carried by
             // `AgentFailed`, and the conversation projection gives it an item where the turn
             // stopped. This used to stream the reason as a delta first, back when a turn that

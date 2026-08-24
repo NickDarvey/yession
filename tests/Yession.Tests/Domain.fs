@@ -689,7 +689,7 @@ let private configTests =
                 Expect.isTrue (e.Contains "host path") "it says what the source is"
                 Expect.isTrue (e.Contains "workspace") "and what a file may say instead"
             let mountsOf file =
-                (file |> expect).Sandboxes
+                (file |> expect : ConfigFile).Sandboxes
                 |> Map.find (sandboxName "dev")
                 |> fun decl -> (decl.Container |> Option.get).Mounts |> List.map (fun m -> m.Source)
             Expect.equal (mountsOf (volume "workspace")) [ SessionWorkspace ] "its own checkout, by name"

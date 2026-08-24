@@ -467,54 +467,70 @@ type ReadQuery = QueryName -> Async<Result<QueryValue, string>>
 /// before a command, and opening a terminal already does that — so it had nothing left to do.
 /// Its `reason` argument survives as the agent terminal's TITLE, which is a better answer to
 /// "what is that terminal for" than the tool ever gave.
-type AgentCapabilities =
-    { /// Run a command where the people in this session can see it (Plan 13, stage 3b).
+/// what a turn may do to the session's terminals.
+type TerminalCapabilities =
       /// The agent's ONLY execution path — that is what makes the classifier's gate real.
-      ExecuteCommand : ExecuteCommand
+    { Execute : ExecuteCommand
       /// Resume a handle `ExecuteCommand` yielded.
       CheckPending : CheckPending
       /// Type into a terminal that has no blocks to run a command in (Plan 19), under the
       /// same lease a person types under.
-      WriteTerminal : WriteTerminal
+      Write : WriteTerminal
       /// Read what such a terminal has said. Takes no lease: a reader is not a writer.
-      ReadTerminal : ReadTerminal
+      Read : ReadTerminal
       /// The terminal verbs a person already has (Plan 20, stage 3), so the agent can hold
       /// several things open at once and say what each is for. One implementation, two
       /// surfaces: these and the list's buttons reach the same manager.
-      OpenTerminal : OpenTerminal
-      CloseTerminal : CloseTerminal
-      ListTerminals : ListTerminals
-      RunGated : RunGatedCommand
-      SetSecret : SetSessionSecret
-      ListSecrets : ListSessionSecrets
-      DeleteSecret : DeleteSessionSecret
+      Open : OpenTerminal
+      Close : CloseTerminal
+      List : ListTerminals }
+
+/// what a turn may do to the session's secrets.
+type SecretCapabilities =
+    { Set : SetSessionSecret
+      List : ListSessionSecrets
+      Delete : DeleteSessionSecret }
+
+/// the read-only bootstrap: clone and orient. Commit and push stay behind
+/// `Terminals.Execute`, which is what keeps the one-door invariant intact.
+type RepoCapabilities =
       // The repo verbs (Plan 14): read-only bootstrap — clone and orient. Commit/push
       // stay behind ExecuteCommand, which is what keeps the one-door invariant intact.
-      AddRepo : AddRepo
+    { Add : AddRepo
       /// The one repo verb that destroys something, and the reason `add_repo`'s advice about
       /// an unreadable checkout finally names a tool that exists.
-      RemoveRepo : RemoveRepo
-      SwitchRepoBranch : SwitchRepoBranch
-      FetchRepo : FetchRepo
-      RepoStatus : InspectRepo
-      RepoLog : InspectRepo
-      RepoDiff : InspectRepo
+      Remove : RemoveRepo
+      SwitchBranch : SwitchRepoBranch
+      Fetch : FetchRepo
+      Status : InspectRepo
+      Log : InspectRepo
+      Diff : InspectRepo }
+
+/// which named sandboxes exist, and where a shell opened in one starts.
+/// NOT what runs in them — `Terminals.Execute` is still the one door into a sandbox.
+type SandboxCapabilities =
+      // Named WorkSandboxes (Plan 15, stage 2). Commands, so agent-only: a human asks,
+      // and reads the act-line. `execute_command` is still the one door into a sandbox —
+      // these decide which sandboxes exist, not what runs in them.
+    { Start : StartWorkSandbox
+      Stop : StopWorkSandbox
+      /// Where terminals opened in a sandbox from now on start (Plan 25). A command like
+      /// the two above: it changes what every future terminal does — the people's as much
+      /// as the agent's — which is exactly the kind of act the gate exists for.
+      SetShellProfile : SetShellProfile }
+
+/// the session's read-only queries, and how to answer one.
+type QueryCapabilities =
       /// The session's read-only queries (Plan 15), declared once and surfaced to the
       /// agent as generated MCP tools. Data rather than a thunk: the runner needs the
       /// declarations to BUILD the tools, before any of them is called. `list_repos` used
       /// to sit above as its own capability and is now the `repos` query — one place, and
       /// the humans see the same answer without asking.
-      Queries : QueryDef list
-      ReadQuery : ReadQuery
-      // Named WorkSandboxes (Plan 15, stage 2). Commands, so agent-only: a human asks,
-      // and reads the act-line. `execute_command` is still the one door into a sandbox —
-      // these decide which sandboxes exist, not what runs in them.
-      StartWorkSandbox : StartWorkSandbox
-      StopWorkSandbox : StopWorkSandbox
-      /// Where terminals opened in a sandbox from now on start (Plan 25). A command like
-      /// the two above: it changes what every future terminal does — the people's as much
-      /// as the agent's — which is exactly the kind of act the gate exists for.
-      SetShellProfile : SetShellProfile
+    { Declared : QueryDef list
+      Read : ReadQuery }
+
+/// where a turn's tool calls are recorded, and whose tools it also has.
+type ToolCapabilities =
       /// Where every tool call this turn makes is recorded (Plan 16, part C). ONE seam,
       /// bound to the turn by whoever built these capabilities, and wrapped around the
       /// WHOLE registry rather than around each tool — so a provider added later cannot
@@ -523,7 +539,7 @@ type AgentCapabilities =
       /// It is a capability like the rest for the usual reason: a turn that must not be
       /// recorded is given a log that records nothing, rather than a flag somebody has to
       /// remember to check.
-      RecordToolUse : ToolUseLog
+    { Record : ToolUseLog
       /// The tools of the MCP servers this session was given (Plan 17), one registry per
       /// connected server, ready to merge with the session's own.
       ///
@@ -532,39 +548,61 @@ type AgentCapabilities =
       /// the whole record is resolved per turn: the turn holds a SNAPSHOT, so a set change
       /// mid-turn lands on the next turn and the model's tool list never shifts underneath
       /// it. A server that is down contributes nothing here and fails nothing.
-      ForeignTools : ToolRegistry list }
+      Foreign : ToolRegistry list }
+
+/// Everything the agent is permitted to do this turn, one record per feature.
+///
+/// Grouped rather than flat because the flat form had twenty-five fields whose only
+/// organisation was the comments between them, and a caller building one had no way to
+/// hand a turn the terminals but not the repos except by naming every field of both.
+/// `RunGated` stays at the top because it is not a feature — it is the gate the
+/// feature verbs above answer to.
+type AgentCapabilities =
+    { Terminals : TerminalCapabilities
+      Secrets : SecretCapabilities
+      Repos : RepoCapabilities
+      Sandboxes : SandboxCapabilities
+      Queries : QueryCapabilities
+      Tools : ToolCapabilities
+      RunGated : RunGatedCommand }
 
 module AgentCapabilities =
 
     /// A turn with no environment authority at all (Phase 1 behaviour).
     let none : AgentCapabilities =
-        { ExecuteCommand = fun _ -> async { return Error "no terminal capability" }
-          CheckPending = fun _ -> async { return Error "no terminal capability" }
-          WriteTerminal = fun _ _ -> async { return Error "no terminal capability" }
-          ReadTerminal = fun _ _ _ -> async { return Error "no terminal capability" }
-          OpenTerminal = fun _ _ -> async { return Error "no terminal capability" }
-          CloseTerminal = fun _ -> async { return Error "no terminal capability" }
-          ListTerminals = fun () -> async { return Error "no terminal capability" }
+        { Terminals =
+            { Execute = fun _ -> async { return Error "no terminal capability" }
+              CheckPending = fun _ -> async { return Error "no terminal capability" }
+              Write = fun _ _ -> async { return Error "no terminal capability" }
+              Read = fun _ _ _ -> async { return Error "no terminal capability" }
+              Open = fun _ _ -> async { return Error "no terminal capability" }
+              Close = fun _ -> async { return Error "no terminal capability" }
+              List = fun () -> async { return Error "no terminal capability" } }
+          Secrets =
+            { Set = fun _ _ -> async { return Error "no secrets capability" }
+              List = fun () -> async { return Error "no secrets capability" }
+              Delete = fun _ -> async { return Error "no secrets capability" } }
+          Repos =
+            { Add = fun _ -> async { return Error "no repos capability" }
+              Remove = fun _ _ -> async { return Error "no repos capability" }
+              SwitchBranch = fun _ _ _ -> async { return Error "no repos capability" }
+              Fetch = fun _ -> async { return Error "no repos capability" }
+              Status = fun _ -> async { return Error "no repos capability" }
+              Log = fun _ -> async { return Error "no repos capability" }
+              Diff = fun _ -> async { return Error "no repos capability" } }
+          Sandboxes =
+            { Start = fun _ _ -> async { return Error "no sandbox capability" }
+              Stop = fun _ -> async { return Error "no sandbox capability" }
+              SetShellProfile = fun _ _ -> async { return Error "no terminal capability" } }
+          Queries =
+            { Declared = []
+              Read = fun _ -> async { return Error "no query capability" } }
+          Tools =
+            { Record = ToolUseLog.none
+              Foreign = [] }
           RunGated =
             fun call ->
-                async { return Error (sprintf "no gate to run %s through in this session" call.Tool) }
-          SetSecret = fun _ _ -> async { return Error "no secrets capability" }
-          ListSecrets = fun () -> async { return Error "no secrets capability" }
-          DeleteSecret = fun _ -> async { return Error "no secrets capability" }
-          AddRepo = fun _ -> async { return Error "no repos capability" }
-          RemoveRepo = fun _ _ -> async { return Error "no repos capability" }
-          SwitchRepoBranch = fun _ _ _ -> async { return Error "no repos capability" }
-          FetchRepo = fun _ -> async { return Error "no repos capability" }
-          RepoStatus = fun _ -> async { return Error "no repos capability" }
-          RepoLog = fun _ -> async { return Error "no repos capability" }
-          RepoDiff = fun _ -> async { return Error "no repos capability" }
-          Queries = []
-          ReadQuery = fun _ -> async { return Error "no query capability" }
-          StartWorkSandbox = fun _ _ -> async { return Error "no sandbox capability" }
-          StopWorkSandbox = fun _ -> async { return Error "no sandbox capability" }
-          SetShellProfile = fun _ _ -> async { return Error "no terminal capability" }
-          RecordToolUse = ToolUseLog.none
-          ForeignTools = [] }
+                async { return Error (sprintf "no gate to run %s through in this session" call.Tool) } }
 
 /// The abort seam (Phase 3, Step 17): how an interrupt reaches a running turn. The
 /// Session Process owns the signal; the runner observes it — poll `IsAborted` at

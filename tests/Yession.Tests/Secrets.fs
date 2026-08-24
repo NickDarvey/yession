@@ -794,11 +794,11 @@ let private routeTests =
             async {
                 // What a turn sees when no secrets capability is threaded (Host passes
                 // None): every operation is a legible Error value, never an exception.
-                let! set = AgentCapabilities.none.SetSecret name "v"
+                let! set = AgentCapabilities.none.Secrets.Set name "v"
                 Expect.isError set "set denies"
-                let! listed = AgentCapabilities.none.ListSecrets ()
+                let! listed = AgentCapabilities.none.Secrets.List ()
                 Expect.isError listed "list denies"
-                let! deleted = AgentCapabilities.none.DeleteSecret name
+                let! deleted = AgentCapabilities.none.Secrets.Delete name
                 Expect.isError deleted "delete denies"
             }
 

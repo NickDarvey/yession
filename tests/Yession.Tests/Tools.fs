@@ -99,7 +99,7 @@ let private registryTests =
 // --- the yession namespace ------------------------------------------------------------
 
 let private capabilities (execute: ExecuteCommand) : AgentCapabilities =
-    { AgentCapabilities.none with ExecuteCommand = execute }
+    { AgentCapabilities.none with Terminals = { AgentCapabilities.none.Terminals with Execute = execute } }
 
 let private ran (command: string) : TerminalCommandOutcome =
     { Terminal = TerminalId.create "t1" |> expect
@@ -124,7 +124,7 @@ let private writeOnly (schema: string) : (string * bool) list =
 /// `read_terminal` against a capability that answers with exactly this tail.
 let private readingTerminal (tail: TerminalTail) =
     let registry =
-        AgentTools.registry { AgentCapabilities.none with ReadTerminal = fun _ _ _ -> async { return Ok tail } }
+        AgentTools.registry { AgentCapabilities.none with Terminals = { AgentCapabilities.none.Terminals with Read = fun _ _ _ -> async { return Ok tail } } }
     registry.Invoke (call "yession" "read_terminal" """{"terminal":"t1"}""")
 
 let private sessionTests =
@@ -147,7 +147,7 @@ let private sessionTests =
         // of query tools to keep in step, which is the whole point of Plan 15's registry.
         test "a registered query becomes a read-only tool, without anyone writing one" {
             let registry =
-                AgentTools.registry { AgentCapabilities.none with Queries = [ queryDef "repos" ] }
+                AgentTools.registry { AgentCapabilities.none with Queries = { AgentCapabilities.none.Queries with Declared = [ queryDef "repos" ] } }
             let repos = registry.Tools |> List.find (fun t -> t.Name = "repos")
             Expect.isTrue repos.ReadOnly "a query carries MCP's own readOnlyHint"
             Expect.equal repos.Title (Some "repos") "and the title the settings surface shows"
@@ -164,12 +164,14 @@ let private sessionTests =
                 let registry =
                     AgentTools.registry
                         { AgentCapabilities.none with
-                            RemoveRepo =
-                              fun repo force ->
-                                async {
-                                    seen <- Some (RepoRef.value repo, force)
-                                    return Ok { Status = CommandRan "removed"; Tool = "remove_repo"; Summary = "s"; Handle = None }
-                                } }
+                            Repos =
+                              { AgentCapabilities.none.Repos with
+                                  Remove =
+                                    fun repo force ->
+                                      async {
+                                          seen <- Some (RepoRef.value repo, force)
+                                          return Ok { Status = CommandRan "removed"; Tool = "remove_repo"; Summary = "s"; Handle = None }
+                                      } } }
                 let! _ = registry.Invoke (call "yession" "remove_repo" """{"repo":"octo/hello"}""")
                 Expect.equal seen (Some ("octo/hello", false)) "an unmentioned force is a no"
             }
@@ -180,12 +182,14 @@ let private sessionTests =
                 let registry =
                     AgentTools.registry
                         { AgentCapabilities.none with
-                            RemoveRepo =
-                              fun repo force ->
-                                async {
-                                    seen <- Some (RepoRef.value repo, force)
-                                    return Ok { Status = CommandRan "removed"; Tool = "remove_repo"; Summary = "s"; Handle = None }
-                                } }
+                            Repos =
+                              { AgentCapabilities.none.Repos with
+                                  Remove =
+                                    fun repo force ->
+                                      async {
+                                          seen <- Some (RepoRef.value repo, force)
+                                          return Ok { Status = CommandRan "removed"; Tool = "remove_repo"; Summary = "s"; Handle = None }
+                                      } } }
                 let! _ = registry.Invoke (call "yession" "remove_repo" """{"repo":"octo/hello","force":true}""")
                 Expect.equal seen (Some ("octo/hello", true)) "the second decision reaches the thing that acts on it"
             }
@@ -199,12 +203,14 @@ let private sessionTests =
                 let registry =
                     AgentTools.registry
                         { AgentCapabilities.none with
-                            SetShellProfile =
-                              fun name cwd ->
-                                async {
-                                    seen <- Some (SandboxRef.render name, cwd)
-                                    return Ok { Status = CommandRan "set"; Tool = "set_shell_profile"; Summary = "s"; Handle = None }
-                                } }
+                            Sandboxes =
+                              { AgentCapabilities.none.Sandboxes with
+                                  SetShellProfile =
+                                    fun name cwd ->
+                                      async {
+                                          seen <- Some (SandboxRef.render name, cwd)
+                                          return Ok { Status = CommandRan "set"; Tool = "set_shell_profile"; Summary = "s"; Handle = None }
+                                      } } }
                 let! _ =
                     registry.Invoke (call "yession" "set_shell_profile" """{"cwd":"/repos/octo/hello"}""")
                 Expect.equal seen (Some ("default", Some "/repos/octo/hello")) "the default sandbox, and the path"
@@ -216,12 +222,14 @@ let private sessionTests =
                 let registry =
                     AgentTools.registry
                         { AgentCapabilities.none with
-                            SetShellProfile =
-                              fun name cwd ->
-                                async {
-                                    seen <- Some (SandboxRef.render name, cwd)
-                                    return Ok { Status = CommandRan "cleared"; Tool = "set_shell_profile"; Summary = "s"; Handle = None }
-                                } }
+                            Sandboxes =
+                              { AgentCapabilities.none.Sandboxes with
+                                  SetShellProfile =
+                                    fun name cwd ->
+                                      async {
+                                          seen <- Some (SandboxRef.render name, cwd)
+                                          return Ok { Status = CommandRan "cleared"; Tool = "set_shell_profile"; Summary = "s"; Handle = None }
+                                      } } }
                 let! _ = registry.Invoke (call "yession" "set_shell_profile" """{"sandbox":"test"}""")
                 Expect.equal seen (Some ("test", None)) "an absent directory is the clear, not a missing argument"
             }
@@ -231,16 +239,18 @@ let private sessionTests =
                 let registry =
                     AgentTools.registry
                         { AgentCapabilities.none with
-                            SetShellProfile =
-                              fun _ _ ->
-                                async {
-                                    return
-                                        Ok
-                                            { Status = CommandRefusedBy (PeerRef (PeerId.create "ada" |> expect), Some "not there")
-                                              Tool = "set_shell_profile"
-                                              Summary = "set_shell_profile default -> /gone"
-                                              Handle = None }
-                                } }
+                            Sandboxes =
+                              { AgentCapabilities.none.Sandboxes with
+                                  SetShellProfile =
+                                    fun _ _ ->
+                                      async {
+                                          return
+                                              Ok
+                                                  { Status = CommandRefusedBy (PeerRef (PeerId.create "ada" |> expect), Some "not there")
+                                                    Tool = "set_shell_profile"
+                                                    Summary = "set_shell_profile default -> /gone"
+                                                    Handle = None }
+                                      } } }
                 let! answer = registry.Invoke (call "yession" "set_shell_profile" """{"cwd":"/gone"}""")
                 match answer with
                 | Ok answer -> Expect.isTrue (answer.Text.StartsWith "REFUSED by") "the model reads a decision, not a malfunction"
@@ -375,11 +385,13 @@ let private sessionTests =
                 let registry =
                     AgentTools.registry
                         { AgentCapabilities.none with
-                            ReadTerminal =
-                                fun _ _ _ ->
-                                    async {
-                                        return Error "this terminal runs commands as blocks — what one printed comes back from execute_command"
-                                    } }
+                            Terminals =
+                              { AgentCapabilities.none.Terminals with
+                                  Read =
+                                      fun _ _ _ ->
+                                          async {
+                                              return Error "this terminal runs commands as blocks — what one printed comes back from execute_command"
+                                          } } }
                 let! answer = registry.Invoke (call "yession" "read_terminal" """{"terminal":"t1"}""")
                 match answer with
                 | Ok text -> Expect.stringContains text.Text "execute_command" "it says where to go instead"
