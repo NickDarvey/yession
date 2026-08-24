@@ -40,7 +40,16 @@ type CommandServices =
       Terminals : unit -> SessionTerminals.SessionTerminals
       /// Say a query's answer changed. A command is the only thing that can change one, so
       /// a command is the only thing that has to say so — nothing polls.
-      Invalidate : QueryName -> unit }
+      Invalidate : QueryName -> unit
+      /// Re-read every checkout's `yession.yaml` and ensure what it declares (Plan 27), on
+      /// the authority of whoever ran the verb.
+      ///
+      /// Called by the three verbs that change what checkouts exist or what is in them, and
+      /// by nothing else. It is safe to call whenever one of them succeeds because the fold
+      /// is idempotent — a declaration that is already a running sandbox is an ask that
+      /// changes nothing and records nothing, which is what every mutating command being
+      /// ensure-shaped bought.
+      Refold : ActorRef option -> Async<unit> }
 
 let private encodeArgs (values: string list) : string = Codec.toString Codec.gatedArgs values
 
@@ -48,6 +57,29 @@ let private decodeArgs (raw: string) : string list =
     match Codec.fromString Codec.gatedArgs raw with
     | Ok values -> values
     | Error _ -> []
+
+/// Re-read every checkout's `yession.yaml` once a verb has actually changed what checkouts
+/// exist or what is in them (Plan 27).
+///
+/// On SUCCESS only: a verb that refused changed nothing, so a fold behind a refusal would be
+/// work nobody asked for. And it wraps rather than being written into each body because the
+/// three verbs it applies to have nothing else in common with it — what a fold reads is none
+/// of their business, and the day a fourth verb changes a checkout, this is the one thing it
+/// has to be given.
+let private andRefold
+    (services: CommandServices)
+    (invocation: GatedInvocation)
+    (outcome: Async<Result<'a, string>>)
+    : Async<Result<'a, string>> =
+    async {
+        let! result = outcome
+        match result with
+        // Whoever the verb ran on the authority of. A `forward:` in a file the fold picks up
+        // resolves for THEM, by the same Plan 08 precedence the verb itself used.
+        | Ok _ -> do! services.Refold (Some (Authority.effective invocation.Authority))
+        | Error _ -> ()
+        return result
+    }
 
 /// Invalidate a query once a command has actually changed its answer.
 let private andPublish
@@ -72,6 +104,22 @@ let private switchBranchTool = "switch_branch"
 let private startWorkSandboxTool = "start_work_sandbox"
 let private stopWorkSandboxTool = "stop_work_sandbox"
 let private setShellProfileTool = "set_shell_profile"
+
+/// One `start_work_sandbox` call, built where the dispatch entry that reads it lives.
+///
+/// The encoding is private and stays private: a caller that spelled these arguments itself
+/// would be a second spelling of them, and the two would disagree the first time one
+/// changed. Every route to this verb — the agent's capability below, the fold over
+/// `yession.yaml` — goes through here.
+let startWorkSandboxCall (authority: Authority) (sandbox: SandboxRef) (decl: SandboxDecl) : GatedCall =
+    { Tool = startWorkSandboxTool
+      Args = encodeArgs [ SandboxRef.render sandbox; SandboxDecl.encode decl ]
+      Summary =
+        match WorkSandboxes.normaliseForward decl.Forward with
+        | [] -> sprintf "start_work_sandbox %s" (SandboxRef.render sandbox)
+        | names ->
+            sprintf "start_work_sandbox %s forwarding %s" (SandboxRef.render sandbox) (String.concat ", " names)
+      Authority = authority }
 
 /// How each gated command is actually carried out, by tool name (Plan 15, stage 3b).
 ///
@@ -98,6 +146,7 @@ let dispatch (services: CommandServices) : CommandDispatch =
                     | Error e -> return Error (sprintf "not a repo name: %s" e)
                     | Ok repo ->
                         return!
+                            andRefold services invocation (
                             andPublish services Repos.queryName (
                                 async {
                                     match! service.AddRepo (repoCaller invocation) repo with
@@ -127,7 +176,7 @@ let dispatch (services: CommandServices) : CommandDispatch =
                                                          ". Terminals do not start there: set_shell_profile with that path if this is where the work is."
                                                      else
                                                          ""))
-                                })
+                                }))
                 | Some _, other -> return Error (sprintf "add_repo takes one repo, got %d arguments" (List.length other))
             }
 
@@ -141,6 +190,7 @@ let dispatch (services: CommandServices) : CommandDispatch =
                     | Error e -> return Error (sprintf "not a repo name: %s" e)
                     | Ok repo ->
                         return!
+                            andRefold services invocation (
                             andPublish services Repos.queryName (
                                 async {
                                     match! service.RemoveRepo (repoCaller invocation) repo (force = "true") with
@@ -171,7 +221,7 @@ let dispatch (services: CommandServices) : CommandDispatch =
                                                     "removed %s — the checkout is gone from this session, and from the work environment.%s"
                                                     (RepoRef.value repo)
                                                     profiles)
-                                })
+                                }))
                 | Some _, other ->
                     return Error (sprintf "remove_repo takes a repo and a flag, got %d arguments" (List.length other))
             }
@@ -186,12 +236,13 @@ let dispatch (services: CommandServices) : CommandDispatch =
                     | Error e -> return Error (sprintf "not a repo name: %s" e)
                     | Ok repo ->
                         return!
+                            andRefold services invocation (
                             andPublish services Repos.queryName (
                                 async {
                                     match! service.SwitchBranch (repoCaller invocation) repo branch (create = "true") with
                                     | Error e -> return Error e
                                     | Ok listing -> return Ok (sprintf "now on %s" (RepoListing.describe listing))
-                                })
+                                }))
                 | Some _, other ->
                     return Error (sprintf "switch_branch takes a repo, a branch and a flag, got %d arguments" (List.length other))
             }
@@ -344,13 +395,7 @@ let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCap
               Authority = Authority.agentFor turnActor }
     { capabilities with
         StartWorkSandbox =
-          fun name decl ->
-            let summary =
-                match WorkSandboxes.normaliseForward decl.Forward with
-                | [] -> sprintf "start_work_sandbox %s" (SandboxRef.render name)
-                | names ->
-                    sprintf "start_work_sandbox %s forwarding %s" (SandboxRef.render name) (String.concat ", " names)
-            gated startWorkSandboxTool [ SandboxRef.render name; SandboxDecl.encode decl ] summary
+          fun name decl -> capabilities.RunGated (startWorkSandboxCall (Authority.agentFor turnActor) name decl)
         StopWorkSandbox =
           fun name ->
             gated

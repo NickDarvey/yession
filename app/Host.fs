@@ -51,6 +51,11 @@ type SessionHost =
       /// composed — the Host owns the gate because it owns the doc and the log, and the
       /// table has to arrive from the layer above it.
       SetCommandDispatch : CommandDispatch -> unit
+      /// The gate itself, for the one caller that is not a turn: the fold over every
+      /// checkout's `yession.yaml` (Plan 27). It goes through the SAME door the agent's
+      /// calls do — which is the reason the gate was made a capability rather than a detail
+      /// of the MCP adapter, and the reason there is no second path to a sandbox.
+      RunGated : RunGatedCommand
       /// The agent's terminal capabilities (Plan 13, stage 3b), exposed so a test can drive
       /// the agent's HALF of the approval flow without a model in the loop. Production reaches
       /// them through `AgentCapabilities`, which is built from this same value.
@@ -873,6 +878,7 @@ let startFull
               Sandboxes = sandboxes
               Terminals = terminals
               SetCommandDispatch = fun table -> commandDispatch.Value <- table
+              RunGated = commandGate.Run
               TerminalCommands = terminalCommands
               WaitForNextSessionEnd = waitForNextSessionEnd
               Connect = onConnection

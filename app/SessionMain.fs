@@ -347,6 +347,11 @@ let mutable private queryRegistry : Queries.QueryRegistry = Queries.empty
 // which no turn can run, because nothing is listening.
 let mutable private workSandboxes : WorkSandboxes.WorkSandboxes = WorkSandboxes.unavailable
 
+// The fold over every checkout's `yession.yaml` (Plan 27). Filled once the Host exists,
+// because it puts each declaration through the Host's own command gate — the same door the
+// agent's `start_work_sandbox` goes through, which is the whole point.
+let mutable private repoSandboxes : RepoSandboxes.RepoSandboxes = RepoSandboxes.none
+
 // The terminal manager (Plan 25 needs it here for the `shell_profile` query and the command
 // that changes it). Filled from the Host beside the sandboxes above, and for the same
 // reason: the Host owns the log both are built over.
@@ -439,7 +444,18 @@ let private commandServices : Commands.CommandServices =
     { Repos = fun () -> reposService
       Sandboxes = fun () -> workSandboxes
       Terminals = fun () -> terminals
-      Invalidate = fun name -> queryRegistry.Invalidate name }
+      Invalidate = fun name -> queryRegistry.Invalidate name
+      // What a repo verb does to the configuration. Handed as a function rather than the
+      // fold itself because the cell is filled after this record is built — and because a
+      // command's business is to say WHEN the configuration may have changed, never to know
+      // what reading it involves.
+      Refold =
+        fun actor ->
+            async {
+                do! repoSandboxes.Fold actor
+                queryRegistry.Invalidate RepoSandboxes.queryName
+                queryRegistry.Invalidate WorkSandboxes.queryName
+            } }
 
 /// The credential a party's calls on the provider run on (Plan 08): the session's own
 /// explicit credential first, then the actor's — fresh from the Manager, which lazily
@@ -637,6 +653,7 @@ Async.StartImmediate (
                   // the Host has not been started yet. By the time anyone reads it, it is.
                   WorkSandboxes.query (fun () -> workSandboxes)
                   ShellProfile.query (fun () -> terminals)
+                  RepoSandboxes.query (fun () -> repoSandboxes)
                   McpClient.query (fun () -> mcpServers) ]
             match Queries.create registrations with
             | Ok registry -> queryRegistry <- registry
@@ -719,6 +736,8 @@ Async.StartImmediate (
         // readiness line, and therefore before any turn or any browser can ask.
         workSandboxes <- host.Sandboxes
         terminals <- host.Terminals
+        repoSandboxes <-
+            RepoSandboxes.create reposDir (fun () -> reposService) (fun () -> workSandboxes) host.RunGated
         // How each gated command is carried out, handed to the gate the Host owns. Here —
         // and not closed over a turn — because the table is built from the services, and the
         // services are composed here.
@@ -810,4 +829,15 @@ Async.StartImmediate (
         // `version` lets the Manager notice it just launched a session from a different
         // release; a Manager old enough not to read the field simply ignores it.
         printfn """{"yession":"ready","port":%d,"version":"%s"}""" host.Port Version.current
+        // The first fold (Plan 27) — AFTER readiness, and fire-and-forget, for the same
+        // reason the MCP handshake is: a declaration can be a container to pull, and a boot
+        // that waited for one would look to the Manager like a session that failed to
+        // start. Nobody triggered this one, so it runs on nothing's authority; what it made
+        // of each file is the `repo_config` query's answer, live from the moment it lands.
+        Async.StartImmediate (
+            async {
+                do! repoSandboxes.Fold None
+                queryRegistry.Invalidate RepoSandboxes.queryName
+                queryRegistry.Invalidate WorkSandboxes.queryName
+            })
     })

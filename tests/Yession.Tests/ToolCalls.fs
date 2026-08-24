@@ -140,7 +140,8 @@ let private servicesOver (service: Repos.ReposService) : Commands.CommandService
     { Repos = fun () -> Some service
       Sandboxes = fun () -> WorkSandboxes.unavailable
       Terminals = fun () -> SessionTerminals.unavailable
-      Invalidate = ignore }
+      Invalidate = ignore
+      Refold = fun _ -> async { return () } }
 
 /// The same, with a shell profile already set for the default sandbox — a session where
 /// somebody has already said where terminals start.

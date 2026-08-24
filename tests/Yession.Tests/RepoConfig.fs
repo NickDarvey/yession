@@ -144,3 +144,182 @@ let tests =
             Expect.equal (List.length refused) 1 "the broken one is reported rather than dropped"
             Expect.equal (fst refused.[0]) bad "named, so somebody can fix it"
     ]
+
+// --- The fold ----------------------------------------------------------------------------
+
+/// A repos service that knows about `listed` and nothing else. Only `ListRepos` and
+/// `CheckoutOf` are the fold's business; every other verb is somebody else's suite.
+let private reposOver (reposDir: string) (listed: RepoRef list) : Repos.ReposService =
+    let denied _ = async { return Error "not part of this test" }
+    { AddRepo = fun _ _ -> denied ()
+      ListRepos =
+        fun () ->
+            async {
+                return
+                    Ok (
+                        listed
+                        |> List.map (fun r ->
+                            { Repo = r
+                              Branch = "main"
+                              Dirty = false
+                              Path = sprintf "%s/%s" reposDir (RepoRef.relativePath r) })) }
+      SwitchBranch = fun _ _ _ _ -> denied ()
+      FetchRepo = fun _ _ -> denied ()
+      RepoStatus = fun _ -> denied ()
+      RepoLog = fun _ -> denied ()
+      RepoDiff = fun _ -> denied ()
+      RemoveRepo = fun _ _ _ -> denied ()
+      CheckoutOf = fun r -> sprintf "%s/%s" reposDir (RepoRef.relativePath r) }
+
+/// A gate that approves everything and records what it was asked to do, so a test can see
+/// which declarations reached it and in what shape.
+let private recordingGate (seen: ResizeArray<GatedCall>) : RunGatedCommand =
+    fun call ->
+        async {
+            seen.Add call
+            return Ok { Handle = None; Tool = call.Tool; Summary = call.Summary; Status = CommandRan "ok" }
+        }
+
+/// A gate that refuses everything, with a reason a row has to carry.
+let private refusingGate (reason: string) : RunGatedCommand =
+    fun call ->
+        async {
+            return
+                Ok
+                    { Handle = None
+                      Tool = call.Tool
+                      Summary = call.Summary
+                      Status = CommandRefusedBy (ActorRef.System, Some reason) }
+        }
+
+let private cell (value: 'a) = fun () -> value
+
+let foldTests =
+    testList "the yession.yaml fold (Plan 27)" [
+
+        // The fold's whole job: a declaration becomes one of the commands the session
+        // already has, through the same gate the agent's goes through.
+        testCaseAsync "every declaration reaches the gate as a start_work_sandbox" <|
+            async {
+                let one, two = repo "octo/one", repo "octo/two"
+                let dir = mkdtemp nodeFs nodeOs
+                for r in [ one; two ] do mkdirp nodeFs (sprintf "%s/%s" dir (RepoRef.relativePath r))
+                writeFile nodeFs (RepoConfig.pathIn dir one) "version: 1\nsandboxes:\n  dev: {}\n"
+                writeFile nodeFs (RepoConfig.pathIn dir two) "version: 1\nsandboxes:\n  dev: {}\n  gate: {}\n"
+                let seen = ResizeArray<GatedCall> ()
+                let folded =
+                    RepoSandboxes.create
+                        dir
+                        (cell (Some (reposOver dir [ one; two ])))
+                        (cell WorkSandboxes.unavailable)
+                        (recordingGate seen)
+                do! folded.Fold None
+                Expect.equal (seen |> Seq.map (fun c -> c.Tool) |> Set.ofSeq) (Set.ofList [ "start_work_sandbox" ]) "one verb, no other"
+                Expect.equal (seen.Count) 3 "every declaration in every file, and nothing else"
+            }
+
+        // Attribution is the point of `ActorRef.Configured`: freshly-cloned code is less
+        // trusted than the agent, so the timeline has to say which file asked.
+        testCaseAsync "each ask is authored by the file that made it" <|
+            async {
+                let r = repo "octo/hello"
+                let dir = checkout r (Some "version: 1\nsandboxes:\n  dev: {}\n")
+                let seen = ResizeArray<GatedCall> ()
+                let folded =
+                    RepoSandboxes.create dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable) (recordingGate seen)
+                do! folded.Fold None
+                Expect.equal (Authority.author seen.[0].Authority) (ActorRef.Configured r) "the repo's own file"
+                Expect.equal (Authority.onBehalfOf seen.[0].Authority) None "and a boot fold borrows nobody's authority"
+            }
+
+        testCaseAsync "a triggered fold runs on the authority of whoever triggered it" <|
+            async {
+                let r = repo "octo/hello"
+                let dir = checkout r (Some "version: 1\nsandboxes:\n  dev:\n    forward: [ github ]\n")
+                let seen = ResizeArray<GatedCall> ()
+                let folded =
+                    RepoSandboxes.create dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable) (recordingGate seen)
+                let ada = UserRef (UserId.create "ada" |> expect)
+                do! folded.Fold (Some ada)
+                Expect.equal (Authority.effective seen.[0].Authority) ada "whose credential a forward: resolves against"
+            }
+
+        // The row is the fold's only surface for a declaration that did not become a
+        // sandbox, so a refusal that produced no row would be a silent one.
+        testCaseAsync "a refused declaration is a row saying which, and why" <|
+            async {
+                let r = repo "octo/hello"
+                let dir = checkout r (Some "version: 1\nsandboxes:\n  dev: {}\n")
+                let folded =
+                    RepoSandboxes.create
+                        dir
+                        (cell (Some (reposOver dir [ r ])))
+                        (cell WorkSandboxes.unavailable)
+                        (refusingGate "registry.npmjs.org is not in this session's egress")
+                do! folded.Fold None
+                match folded.Outcomes () with
+                | [ outcome ] ->
+                    Expect.equal outcome.Repo r "the repo whose file asked"
+                    Expect.equal (outcome.Sandbox |> Option.map SandboxRef.render) (Some "octo/hello:dev") "the sandbox it asked for"
+                    Expect.equal outcome.Problem (Some "registry.npmjs.org is not in this session's egress") "and the reason it did not get it"
+                | other -> failwithf "expected one row, got %A" other
+            }
+
+        testCaseAsync "a declaration that became a sandbox is a row with no problem" <|
+            async {
+                let r = repo "octo/hello"
+                let dir = checkout r (Some "version: 1\nsandboxes:\n  dev: {}\n")
+                let folded =
+                    RepoSandboxes.create
+                        dir
+                        (cell (Some (reposOver dir [ r ])))
+                        (cell WorkSandboxes.unavailable)
+                        (recordingGate (ResizeArray<GatedCall> ()))
+                do! folded.Fold None
+                Expect.equal (folded.Outcomes () |> List.map (fun o -> o.Problem)) [ None ] "nothing to report is nothing to report"
+            }
+
+        // A file nobody can read is fixed by whoever wrote the YAML; a sandbox that would
+        // not start is fixed by whoever wrote the sandbox. Different people, so the row
+        // distinguishes them.
+        testCaseAsync "an unreadable file is a row about the file, not about a sandbox" <|
+            async {
+                let r = repo "octo/hello"
+                let dir = checkout r (Some "version: 1\nsandboxes:\n  dev:\n    nope: 1\n")
+                let folded =
+                    RepoSandboxes.create
+                        dir
+                        (cell (Some (reposOver dir [ r ])))
+                        (cell WorkSandboxes.unavailable)
+                        (recordingGate (ResizeArray<GatedCall> ()))
+                do! folded.Fold None
+                match folded.Outcomes () with
+                | [ outcome ] ->
+                    Expect.equal outcome.Sandbox None "there is no sandbox to name — the file did not parse"
+                    Expect.isTrue (outcome.Problem |> Option.exists (fun p -> p.Contains "nope")) "the key that broke it"
+                | other -> failwithf "expected one row, got %A" other
+            }
+
+        // Re-folding is what makes the trigger cheap enough to run after every repo verb,
+        // and the property that buys it is `ensure`'s, not this module's.
+        testCaseAsync "a repo with no file contributes nothing and refuses nothing" <|
+            async {
+                let r = repo "octo/hello"
+                let dir = checkout r None
+                let seen = ResizeArray<GatedCall> ()
+                let folded =
+                    RepoSandboxes.create dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable) (recordingGate seen)
+                do! folded.Fold None
+                Expect.equal seen.Count 0 "nothing was asked for"
+                Expect.equal (folded.Outcomes ()) [] "and nothing is wrong"
+            }
+
+        testCaseAsync "a session with no repos service folds nothing rather than failing" <|
+            async {
+                let folded =
+                    RepoSandboxes.create "/nowhere" (cell None) (cell WorkSandboxes.unavailable) (recordingGate (ResizeArray<GatedCall> ()))
+                do! folded.Fold None
+                Expect.equal (folded.Outcomes ()) [] "no repos is not a fault"
+            }
+
+    ]

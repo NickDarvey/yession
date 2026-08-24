@@ -32,6 +32,7 @@ let all =
         Tag.needs "Connections" [] (fun () -> Connections.tests)
         Tag.needs "Queries" [] (fun () -> Queries.tests)
         Tag.needs "yession.yaml on disk" [] (fun () -> RepoConfig.tests)
+        Tag.needs "the yession.yaml fold" [] (fun () -> RepoConfig.foldTests)
         Tag.needs "WorkSandboxes" [] (fun () -> WorkSandboxes.tests)
         Tag.needs "CommandGates" [] (fun () -> CommandGates.tests)
         // The route is the same registry over real HTTP — SSE has no meaningful in-memory
