@@ -199,31 +199,50 @@ let dispatch (services: CommandServices) : CommandDispatch =
           startWorkSandboxTool,
           fun (invocation: GatedInvocation) ->
             async {
+                // A sandbox and a DECLARATION, because a declaration is what both callers
+                // have: the agent's names some credentials, a repo's file names everything.
+                // One shape, so the declarative route and the interactive one cannot
+                // diverge — which is the reason this gate is a capability at all.
                 match decodeArgs invocation.Args with
-                | name :: forward ->
+                | [ name; declared ] ->
                     match SandboxRef.parse name with
                     | Error e -> return Error (sprintf "not a sandbox: %s" e)
                     | Ok name ->
-                        // The gated args are strings, so what an agent can ask for through
-                        // this door is a name and some credential names — everything else a
-                        // sandbox can be is `yession.yaml`'s to say.
-                        let request = { SandboxRequest.defaults with Forward = forward }
-                        match! (services.Sandboxes ()).Ensure (sandboxCaller invocation) name request with
-                        | Error e -> return Error e
-                        | Ok entry ->
-                            services.Invalidate WorkSandboxes.queryName
-                            let forwarding =
-                                match entry.Request.Forward with
-                                | [] -> "nothing forwarded into it"
-                                | names -> "forwarding " + String.concat ", " names
-                            return
-                                Ok (
-                                    sprintf
-                                        "sandbox '%s' is up on %s, %s — run things in it with execute_command"
-                                        (SandboxRef.render entry.Ref)
-                                        entry.Backend
-                                        forwarding)
-                | [] -> return Error "start_work_sandbox takes a sandbox name"
+                        match ConfigFile.parseSandbox declared with
+                        | Error e -> return Error (sprintf "not a sandbox declaration: %s" e)
+                        | Ok decl ->
+                            // The checkout is DERIVED from the sandbox's scope, never
+                            // carried: a gated call that could name a checkout could name
+                            // any directory on this host.
+                            let checkout =
+                                match SandboxRef.scope name, services.Repos () with
+                                | RepoOwned repo, Some repos -> Some (repos.CheckoutOf repo)
+                                | RepoOwned _, None
+                                | SessionOwned, _ -> None
+                            match SandboxDecl.toRequest checkout decl with
+                            | Error e -> return Error e
+                            | Ok request ->
+                                match! (services.Sandboxes ()).Ensure (sandboxCaller invocation) name request with
+                                | Error e -> return Error e
+                                | Ok entry ->
+                                    services.Invalidate WorkSandboxes.queryName
+                                    let forwarding =
+                                        match entry.Request.Forward with
+                                        | [] -> "nothing forwarded into it"
+                                        | names -> "forwarding " + String.concat ", " names
+                                    return
+                                        Ok (
+                                            sprintf
+                                                "sandbox '%s' is up on %s, %s — run things in it with execute_command"
+                                                (SandboxRef.render entry.Ref)
+                                                entry.Backend
+                                                forwarding)
+                | other ->
+                    return
+                        Error (
+                            sprintf
+                                "start_work_sandbox takes a sandbox and a declaration, got %d arguments"
+                                (List.length other))
             }
 
           stopWorkSandboxTool,
@@ -325,13 +344,13 @@ let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCap
               Authority = Authority.agentFor turnActor }
     { capabilities with
         StartWorkSandbox =
-          fun name request ->
+          fun name decl ->
             let summary =
-                match WorkSandboxes.normaliseForward request.Forward with
+                match WorkSandboxes.normaliseForward decl.Forward with
                 | [] -> sprintf "start_work_sandbox %s" (SandboxRef.render name)
                 | names ->
                     sprintf "start_work_sandbox %s forwarding %s" (SandboxRef.render name) (String.concat ", " names)
-            gated startWorkSandboxTool (SandboxRef.render name :: request.Forward) summary
+            gated startWorkSandboxTool [ SandboxRef.render name; SandboxDecl.encode decl ] summary
         StopWorkSandbox =
           fun name ->
             gated

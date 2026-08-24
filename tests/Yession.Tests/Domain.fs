@@ -707,7 +707,7 @@ let private configTests =
                           "forward": [ "github" ] } } }"""
                  |> expect).Sandboxes
                 |> Map.find (sandboxName "dev")
-            let request = SandboxDecl.toRequest "/data/repos/octo/hello" decl
+            let request = SandboxDecl.toRequest (Some "/data/repos/octo/hello") decl |> expect
             Expect.equal request.Spec.WorkingDirectory (Some "/data/repos/octo/hello/app") "the workdir is under the checkout"
             Expect.equal request.Spec.Net [ "registry.npmjs.org" ] "the egress it asks for"
             Expect.equal request.Spec.Read [ "/opt/cache" ] "the paths it asks to read"
@@ -721,7 +721,7 @@ let private configTests =
             for written in [ "."; "./"; "app/.." ] do
                 let decl = { SandboxDecl.empty with WorkingDirectory = Some written }
                 Expect.equal
-                    (SandboxDecl.toRequest "/data/repos/octo/hello" decl).Spec.WorkingDirectory
+                    (SandboxDecl.toRequest (Some "/data/repos/octo/hello") decl |> expect).Spec.WorkingDirectory
                     (Some "/data/repos/octo/hello")
                     (sprintf "'%s' is the checkout" written)
 
@@ -731,17 +731,70 @@ let private configTests =
         // is CLAMPED there, so `../../etc` names the same directory `etc` does.
         testCase "no declaration can name a directory above its checkout" <| fun () ->
             let resolved written =
-                (SandboxDecl.toRequest "/data/repos/octo/hello" { SandboxDecl.empty with WorkingDirectory = Some written })
+                (SandboxDecl.toRequest (Some "/data/repos/octo/hello") { SandboxDecl.empty with WorkingDirectory = Some written } |> expect)
                     .Spec.WorkingDirectory
             Expect.equal (resolved "../..") (Some "/data/repos/octo/hello") "climbing runs out at the checkout"
             Expect.equal (resolved "../../etc") (Some "/data/repos/octo/hello/etc") "and what follows lands inside it"
             Expect.equal (resolved "a/../../../etc") (Some "/data/repos/octo/hello/etc") "however far it climbed first"
 
+        // A session's own sandbox has no checkout for a relative path to be relative to, so
+        // there is nothing to resolve against and nothing honest to invent.
+        testCase "a workdir on a sandbox no repo declared is refused, naming the verb that does move one" <| fun () ->
+            match SandboxDecl.toRequest None { SandboxDecl.empty with WorkingDirectory = Some "./app" } with
+            | Ok _ -> failwith "expected a refusal"
+            | Error e ->
+                Expect.isTrue (e.Contains "./app") "it names the path"
+                Expect.isTrue (e.Contains "set_shell_profile") "and what does move where terminals start"
+
+        testCase "a declaration with no workdir needs no checkout" <| fun () ->
+            Expect.equal
+                (SandboxDecl.toRequest None { SandboxDecl.empty with Forward = [ "github" ] } |> expect)
+                { SandboxRequest.defaults with Forward = [ "github" ] }
+                "which is every ask the agent's own tool can make"
+
+        // What crosses the command gate is a declaration, so the gate's args are bounded by
+        // the FILE's schema rather than by a second one: whatever is written here, the file
+        // must be willing to read back.
+        testCase "a declaration written for the gate reads back as itself" <| fun () ->
+            let declared =
+                (ConfigFile.parse """
+                    { "version": 1,
+                      "sandboxes": {
+                        "dev": {
+                          "container":
+                            { "image": "node:24",
+                              "cmd": "npm start",
+                              "volumes": [ { "source": "workspace", "target": "/w", "mode": "ro" } ] },
+                          "workdir": "app",
+                          "env": { "NODE_ENV": "development", "DB": { "secret": "db-url" } },
+                          "net": [ "registry.npmjs.org" ],
+                          "read": [ "/opt/cache" ],
+                          "forward": [ "github" ] } } }"""
+                 |> expect).Sandboxes
+                |> Map.find (sandboxName "dev")
+            Expect.equal
+                (ConfigFile.parseSandbox (SandboxDecl.encode declared) |> expect)
+                declared
+                "every field survives the trip"
+
+        // The point of the round trip being through the FILE's schema: a host path is
+        // refused there, so it cannot cross the gate either — one rule, not two.
+        testCase "a host-path volume cannot be written back through the gate" <| fun () ->
+            let smuggled =
+                { SandboxDecl.empty with
+                    Container =
+                        Some
+                            { ContainerSpec.defaults with
+                                Mounts = [ { Source = HostPath "/var/run/docker.sock"; Target = "/s"; Mode = ReadWrite } ] } }
+            Expect.isError
+                (ConfigFile.parseSandbox (SandboxDecl.encode smuggled))
+                "the schema refuses on the way back in, wherever the declaration came from"
+
         // Saying nothing is not asking to be confined — what nothing means is the backend's
         // answer, and `forBackend` is where the two authors meet.
         testCase "a declaration with no container asks for no container, not for confinement" <| fun () ->
             Expect.equal
-                (SandboxDecl.toRequest "/checkout" SandboxDecl.empty)
+                (SandboxDecl.toRequest (Some "/checkout") SandboxDecl.empty |> expect)
                 SandboxRequest.defaults
                 "an empty declaration is the ask that names nothing in particular"
 
