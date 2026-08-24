@@ -77,6 +77,7 @@
     <Compile Include="TestSources.fs" />
     <Compile Include="EmitSources.fs" />
     <Compile Include="RecordShapes.fs" />
+    <Compile Include="NamespaceShadowing.fs" />
     <Compile Include="LockSource.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>
