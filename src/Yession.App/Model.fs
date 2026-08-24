@@ -487,6 +487,24 @@ type ClientModel =
       /// the cursor, and what it DISPLAYS is a projection of what it emitted. The transcript
       /// stays the record; this is the view.
       TerminalScreens : Map<TerminalId, string>
+      /// How big this client's own view of each terminal is, in CHARACTER CELLS: the box the
+      /// output is laid into, measured from the rendered page rather than assumed.
+      ///
+      /// What it is FOR is the command about to be queued (`PendingAct.Size`). A block that
+      /// ran at eighty columns is eighty-column text in the transcript for ever, so the width
+      /// a command runs at is worth as much as the command — and until this, block mode had
+      /// no width at all: every terminal was 80x24 for its whole life.
+      ///
+      /// LOCAL, never synced. A shared register of everyone's viewport has to answer "whose
+      /// wins", and that is the question the size riding the ACT exists to avoid. What leaves
+      /// this client is a claim about one command, or a resize on a lease this peer holds —
+      /// neither of them a fact about the room.
+      ///
+      /// A terminal the pane is not showing keeps its last measurement rather than losing it.
+      /// There is nothing on screen to measure, and no measurement is not the same as a
+      /// measurement of nothing: the width this reader last had is the truer answer, and the
+      /// only one they could have meant.
+      TerminalViewports : Map<TerminalId, TerminalSize>
       /// What this client PINNED to the strip, in pin order (Plan 20, stage 1).
       ///
       /// The strip used to be a census — every terminal the session ever had, for ever,
@@ -638,6 +656,11 @@ type ClientMsg =
     /// which owns the emulator: a screen is a projection an emulator maintains, and the
     /// reducer is pure.
     | TerminalScreenMsg of TerminalId * screen: string
+    /// This client's own view of a terminal was measured, and it had moved (Plan 13, stage
+    /// 2b). Dispatched by the platform half, which is the only half that can measure a box —
+    /// and it measures on the edges a render loop cannot see, a splitter dragged or a window
+    /// turned, because those change the box without changing anything the model holds.
+    | TerminalViewportMsg of TerminalId * TerminalSize
     /// Show something in the pane, in a stated read of it (Plan 25, stage 2).
     ///
     /// ONE message for every way in — a chat chip, a tab in the strip, a row in the list, the
@@ -719,6 +742,7 @@ module ClientModel =
           TerminalFeeds = Map.empty
           TerminalKeyframes = Map.empty
           TerminalScreens = Map.empty
+          TerminalViewports = Map.empty
           Pins = []
           Pane = None
           TerminalsOpen = false
@@ -1554,6 +1578,14 @@ module ClientModel =
             { model with TerminalKeyframes = Map.add (terminal, keyframe.Seq) keyframe model.TerminalKeyframes }
         | TerminalScreenMsg (terminal, screen) ->
             { model with TerminalScreens = Map.add terminal screen model.TerminalScreens }
+        | TerminalViewportMsg (terminal, size) ->
+            // A box that is not in the document yet, or has just left it, measures as zero
+            // cells — and a zero-column terminal is not a narrow one, it is a broken one. The
+            // refusal is here, with the state, so that no route to it can put one in front of
+            // a command: the reducer is the only way in, and it says no.
+            if TerminalSize.isValid size then
+                { model with TerminalViewports = Map.add terminal size model.TerminalViewports }
+            else model
         | ShowInPaneMsg mode ->
             // The WHOLE next face, stated by every way in. Nothing here clears a subset and
             // hopes the rest was already right: the list cannot survive a choice that
@@ -1646,9 +1678,11 @@ module ClientModel =
                       // A person's composer never waits on a command, so there is nothing
                       // for a background flag to spare them (Plan 20, stage 2).
                       Background = false
-                      // Nothing fills this in yet, so every command still runs at whatever
-                      // width the terminal had. The composer learns its own width next.
-                      Size = None }
+                      // The width of the box this author is looking at, so the output is laid
+                      // out for the screen it will be read on. Absent when nothing has been
+                      // measured — a terminals column that has never been opened — which is a
+                      // claim of nothing rather than a guess at eighty.
+                      Size = Map.tryFind terminal model.TerminalViewports }
                 model
                 |> withSynced
                     { model.Synced with

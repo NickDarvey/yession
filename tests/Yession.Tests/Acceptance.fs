@@ -157,6 +157,7 @@ let private representativeModel : ClientModel =
                 Header = Some { Width = 80; Height = 24; Timestamp = 0L } } ]
       TerminalKeyframes = Map.empty
       TerminalScreens = Map.empty
+      TerminalViewports = Map.empty
       Pins = []
       Pane = None
       TerminalsOpen = true

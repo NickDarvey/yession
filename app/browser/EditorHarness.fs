@@ -649,6 +649,14 @@ let private exposeRecord (f: string -> int -> string -> string -> unit) : unit =
 [<Emit("(function(c, r){ window.__resized = c + 'x' + r })($1, $2)")>]
 let private recordResized (_terminal: TerminalId) (cols: int) (rows: int) : unit = jsNative
 
+/// The size this client last measured its OWN view of a terminal at — the width a command
+/// queued from that pane would claim (`PendingAct.Size`). A second hook rather than a reading
+/// of `window.__resized`, because the two are different facts: that one is what was sent to the
+/// pty for a lease this peer holds, and this one is measured in BLOCK mode, where nobody holds
+/// anything and nothing is sent at all.
+[<Emit("(function(c, r){ window.__viewport = c + 'x' + r })($1, $2)")>]
+let private recordViewport (_terminal: TerminalId) (cols: int) (rows: int) : unit = jsNative
+
 /// Hand a terminal's lease to this peer WITHOUT a press, as the alt-screen flip does: a block
 /// takes the screen and the Session Process gives its author the keyboard. Exposed for the
 /// same reason the snapshot is — it is the arrival of a fact from elsewhere, and a test that
@@ -686,6 +694,14 @@ do
     let mutable model = shellModel
     let rec dispatch (msg: ClientMsg) : unit =
         model <- ClientModel.update msg model
+        // Read back off the MODEL rather than out of the message: a measurement the reducer
+        // refused is not a width anything would claim, and a hook that reported it anyway
+        // would say the opposite of what happened.
+        match msg with
+        | TerminalViewportMsg (terminal, _) ->
+            Map.tryFind terminal model.TerminalViewports
+            |> Option.iter (fun size -> recordViewport terminal size.Cols size.Rows)
+        | _ -> ()
         render ()
     and render () =
         Lit.render (unbox shellHost) (View.view actions model dispatch)

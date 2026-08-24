@@ -38,36 +38,66 @@ open Yession.App
 open Yession.SessionProcess
 open Yession.Host
 
-/// The holder's viewport size in CHARACTER CELLS, measured from the rendered screen rather
-/// than assumed: the pane is one width on a desktop and another on a phone, and the program
-/// on the other end lays its screen out to whatever it is told. Measured by putting a known
-/// run of characters in the element and reading the box it takes, which is the only way to
-/// get a font's advance width without hard-coding one.
-[<Emit("""(function (terminalId) {
-  const el = document.querySelector('[data-terminal-screen="' + terminalId + '"]')
-  if (!el) return null
-  const probe = document.createElement('span')
-  probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre'
-  probe.textContent = 'M'.repeat(80)
-  el.appendChild(probe)
-  const cell = probe.getBoundingClientRect().width / 80
-  const line = probe.getBoundingClientRect().height
-  el.removeChild(probe)
-  if (!(cell > 0) || !(line > 0)) return null
-  const box = el.getBoundingClientRect()
-  const cols = Math.max(1, Math.floor((box.width - 24) / cell))
-  const rows = Math.max(1, Math.floor((box.height - 16) / line))
-  return [cols, rows]
-})($0)""")>]
-let private measure (terminalId: string) : (int * int) option = jsNative
-
-/// The screen this peer is typing into, if one is on screen. `tabindex="0"` is what makes it
-/// the holder's: the other two variants the view renders are `role="region"`, and the pane
-/// shows one tab at a time.
-let private holderScreen () : Element option =
-    match document.querySelector "[data-terminal-screen][tabindex=\"0\"]" with
+/// The box a terminal's output is laid into, whichever mode it is in: the live screen while a
+/// program holds it, the block scrollback while commands do. ONE selector, because it is one
+/// question — how wide is what this reader is looking at — and the pane shows one of the two
+/// at a time. It used to name only the screen, which is why block mode never had a width:
+/// there was nothing to measure until somebody took the keyboard.
+let private viewportOf (terminalId: string) : HTMLElement option =
+    let selector =
+        sprintf
+            "[data-terminal-screen=\"%s\"], [data-terminal-scrollback][data-terminal-id=\"%s\"]"
+            terminalId
+            terminalId
+    match document.querySelector selector with
     | null -> None
-    | element -> Some element
+    | element -> Some (element :?> HTMLElement)
+
+/// A CSS length as pixels, or zero. `getPropertyValue` answers `"12px"` for a resolved length
+/// and `""` for anything it cannot resolve, and only the first is a number to subtract.
+let private pixels (element: HTMLElement) (property: string) : float =
+    match System.Double.TryParse ((computedProperty element property).Trim().Replace ("px", "")) with
+    | true, pixels -> pixels
+    | _ -> 0.0
+
+/// The viewport size in CHARACTER CELLS, measured from the rendered page rather than assumed:
+/// the pane is one width on a desktop and another on a phone, and the program on the other end
+/// lays its screen out to whatever it is told.
+///
+/// Two measurements, neither of them a constant. The CELL comes from putting a known run of
+/// characters in the box and reading what it takes — the only way to get a font's advance
+/// width without hard-coding one — wearing the class the output really renders in, so the font
+/// measured is the font used. `white-space: pre` inline over that class, because it wraps, and
+/// a wrapped run measures the box instead of the text.
+///
+/// The BOX is `clientWidth` less its padding: that already excludes the border and any
+/// scrollbar, which are exactly the pixels no character is drawn on. Read rather than
+/// subtracted as a constant — the two modes pad differently, and the version of this that
+/// hard-coded `- 24` was one restyle from being quietly wrong.
+let private measure (terminalId: string) : (int * int) option =
+    match viewportOf terminalId with
+    | None -> None
+    | Some box ->
+        let probe = document.createElement "span"
+        probe.className <- Style.terminalOutput
+        // Out of flow and out of sight, so measuring a box never moves it. `pre` over the
+        // class, which wraps: a wrapped run measures the box instead of the text.
+        setStyleProperty probe "position" "absolute"
+        setStyleProperty probe "visibility" "hidden"
+        setStyleProperty probe "white-space" "pre"
+        probe.textContent <- Array.create 80 "M" |> String.concat ""
+        box.appendChild probe |> ignore
+        let rect = probe.getBoundingClientRect ()
+        let cell = rect.width / 80.0
+        let line = rect.height
+        box.removeChild probe |> ignore
+        if not (cell > 0.0) || not (line > 0.0) then None
+        else
+            let width = box.clientWidth - pixels box "padding-left" - pixels box "padding-right"
+            let height = box.clientHeight - pixels box "padding-top" - pixels box "padding-bottom"
+            let cols = int (floor (width / cell))
+            let rows = int (floor (height / line))
+            if cols > 0 && rows > 0 then Some (cols, rows) else None
 
 /// One terminal's screen as this client composes it.
 type private Live =
@@ -109,14 +139,14 @@ let create (dispatch: ClientMsg -> unit) (report: TerminalId -> int -> int -> un
     /// would miss exactly the terminal somebody just opened.
     let held = System.Collections.Generic.Dictionary<string, bool> ()
 
-    /// The size each terminal's viewport was last reported at, so a render that moved nothing
-    /// does not re-send it — a resize is a signal to the program on the other end, and
-    /// repeating it makes a full-screen program redraw for no reason.
-    let reportedSize = System.Collections.Generic.Dictionary<string, int * int> ()
+    /// The size each terminal's viewport was last measured at, so a render that moved nothing
+    /// says nothing — a resize is a signal to the program on the other end, and repeating it
+    /// makes a full-screen program redraw for no reason.
+    let measuredSize = System.Collections.Generic.Dictionary<string, int * int> ()
 
     let forget (key: string) =
         held.Remove key |> ignore
-        reportedSize.Remove key |> ignore
+        measuredSize.Remove key |> ignore
         match live.TryGetValue key with
         | true, existing ->
             existing.Emulator.Dispose ()
@@ -140,36 +170,49 @@ let create (dispatch: ClientMsg -> unit) (report: TerminalId -> int -> int -> un
     /// callback cannot be handed one.
     let mutable latest : ClientModel option = None
 
-    /// Tell the app how big the holder's screen is. Only the HOLDER: the pty has one size and
-    /// every peer is looking at the same screen, so a viewer with a narrower pane scrolls
-    /// rather than reshaping everyone else's terminal.
-    let reportSizes (model: ClientModel) =
+    /// Measure what this reader is looking at, and say so — twice, to two different places,
+    /// because the two answers are about different things.
+    ///
+    /// Into the MODEL, always: a width is a fact about this client's own window, and the
+    /// command about to be queued claims it (`PendingAct.Size`). That claim is made in BLOCK
+    /// mode, where nobody holds anything — so measuring only the holder, as this used to,
+    /// meant block mode never had a width to claim.
+    ///
+    /// Over the WIRE, only for the holder: the pty has one size while a program is drawing on
+    /// it, and every peer is watching the same screen, so a viewer with a narrower pane
+    /// scrolls rather than reshaping everyone else's terminal.
+    let measureSizes (model: ClientModel) =
         let mine = ActorRef.PeerRef model.Peer.PeerId
         for terminal in TerminalProjection.openTerminals model.Terminals do
-            if terminal.Lease = Some mine then
-                let key = TerminalId.value terminal.TerminalId
-                match measure key with
-                | None -> ()
-                | Some (cols, rows) ->
-                    let last = match reportedSize.TryGetValue key with | true, v -> Some v | _ -> None
-                    if last <> Some (cols, rows) then
-                        reportedSize.[key] <- (cols, rows)
-                        report terminal.TerminalId cols rows
+            let key = TerminalId.value terminal.TerminalId
+            match measure key with
+            | None -> ()
+            | Some (cols, rows) ->
+                let last = match measuredSize.TryGetValue key with | true, v -> Some v | _ -> None
+                if last <> Some (cols, rows) then
+                    measuredSize.[key] <- (cols, rows)
+                    dispatch (TerminalViewportMsg (terminal.TerminalId, { Cols = cols; Rows = rows }))
+                    if terminal.Lease = Some mine then report terminal.TerminalId cols rows
 
-    /// One observer, re-pointed at whichever screen the holder is typing into. A box can change
+    /// One observer, re-pointed at whichever terminal the pane is showing. A box can change
     /// without the model changing — the splitter is dragged, the window is resized, the phone
     /// is turned — and those are exactly the cases a render-loop measurement cannot see.
     ///
-    /// `reportedSize` is what keeps this cheap: an observer fires on every frame of a drag, and
-    /// only the frames that cross a whole character cell send anything.
+    /// `measuredSize` is what keeps this cheap: an observer fires on every frame of a drag, and
+    /// only the frames that cross a whole character cell say anything.
     let observer =
         if ResizeObserver.isSupported () then
-            Some (ResizeObserver.create (fun () -> latest |> Option.iter reportSizes))
+            Some (ResizeObserver.create (fun () -> latest |> Option.iter measureSizes))
         else None
-    let mutable observed : Element option = None
+    let mutable observed : HTMLElement option = None
 
-    let watchHolderScreen () =
-        let element = holderScreen ()
+    /// The pane shows one terminal at a time, so there is one box worth watching. Named from
+    /// the MODEL rather than found by a bare selector: two variants of a screen and a
+    /// scrollback all match, and the one that matters is the one whose terminal is selected.
+    let watchViewport (model: ClientModel) =
+        let element =
+            ClientModel.selectedTerminal model
+            |> Option.bind (fun terminal -> viewportOf (TerminalId.value terminal))
         let unchanged =
             match element, observed with
             | Some element, Some observed -> System.Object.ReferenceEquals (element, observed)
@@ -179,7 +222,7 @@ let create (dispatch: ClientMsg -> unit) (report: TerminalId -> int -> int -> un
             observer
             |> Option.iter (fun observer ->
                 observer.disconnect ()
-                element |> Option.iter observer.observe)
+                element |> Option.iter (fun element -> observer.observe (element :> Element)))
             observed <- element
 
     { Snapshot =
@@ -262,9 +305,9 @@ let create (dispatch: ClientMsg -> unit) (report: TerminalId -> int -> int -> un
                 |> Seq.distinct
                 |> Seq.toList do
                 forget stale
-            // Last, because both read the document this render has just produced: which screen
-            // the holder is typing into, and how big it is.
+            // Last, because both read the document this render has just produced: which box
+            // this reader is looking at, and how big it is.
             latest <- Some model
-            watchHolderScreen ()
-            reportSizes model
+            watchViewport model
+            measureSizes model
       Forget = fun id -> forget (TerminalId.value id) }

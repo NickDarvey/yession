@@ -1459,6 +1459,34 @@ let editorTests =
                 let! after = await (reported ())
                 Expect.notEqual after before "the pty is told the width the reader chose"
             }
+        // The same measurement, in the mode that CANNOT report it over the wire. A terminal
+        // running commands as blocks has no lease, so nothing is sent to a pty — but the width
+        // is exactly what the next command will claim (`PendingAct.Size`), and a block that ran
+        // at eighty columns is eighty-column text in the transcript for ever. Only a browser
+        // can answer it: what is under test is that a pane showing BLOCKS is a measurable box
+        // at all, and that the number follows the reader's own splitter.
+        editorCaseIn 1440 900 "a pane showing blocks measures itself, with no lease to report through" (EDITOR_PORT + 21) <| fun page ->
+            async {
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                let! _ =
+                    await (
+                        page.WaitForSelectorAsync
+                            "#shell [data-terminal-scrollback][data-terminal-id='term-harness']")
+
+                // Nobody holds this terminal, so the holder's report never fires: this is the
+                // measurement the model kept, which is the one a command reads.
+                let viewport () = page.EvaluateAsync<string> "() => window.__viewport || ''"
+                let! _ = await (page.WaitForFunctionAsync "window.__viewport")
+                let! before = await (viewport ())
+
+                // Widen the column from the keyboard, which dispatches nothing at all.
+                do! awaitU (page.FocusAsync "#shell [data-term-resize]")
+                for _ in 1 .. 12 do
+                    do! awaitU (page.Keyboard.PressAsync "ArrowLeft")
+                let! _ = await (page.WaitForFunctionAsync (sprintf "window.__viewport !== '%s'" before))
+                let! after = await (viewport ())
+                Expect.notEqual after before "the width the next command would claim follows the pane"
+            }
         // The DVR (Plan 14, stage 7). What only a browser can answer: that rewinding a LIVE
         // terminal really mounts a player over what it has recorded so far — the same player
         // and the same cast a finished terminal's replay uses, which is what "rewound like

@@ -2035,6 +2035,65 @@ let private schedulerTests =
 
 // --- The synced state's codec ----------------------------------------------------------------
 
+// --- The width a command claims (Plan 13, stage 2b) ----------------------------------------
+
+/// A client that has published a composer slot for `terminalA`, which is the only state a send
+/// can be made from: the queue entry inherits the slot's identity, so without one there is
+/// nothing to send.
+let private composing (model: ClientModel) : ClientModel =
+    { model with
+        Synced =
+            { model.Synced with
+                TerminalDrafts =
+                    Map.ofList
+                        [ (terminalA, ada), { Terminal = terminalA; Author = ada; QueueId = queue "term-a" } ] } }
+
+/// Send that slot and read back the entry it queued.
+let private sent (model: ClientModel) : PendingAct =
+    let after = ClientModel.update (SendTerminalDraftMsg (terminalA, ada)) model
+    match after.Synced.Pending |> Map.toList |> List.map snd with
+    | [ entry ] -> entry
+    | other -> failwithf "expected one queued command, got %d" (List.length other)
+
+let private viewportTests =
+    let client () = ClientModel.init { PeerId = ada; DisplayName = "ada" }
+
+    testList "The width a command claims (Plan 13, stage 2b)" [
+        testCase "a command claims the width of the box its author is looking at" <| fun () ->
+            // The whole point of the field. A block that ran at 132 columns is 132-column text
+            // in the transcript for ever, so the width belongs to whoever asked for it.
+            let model =
+                client ()
+                |> ClientModel.update (TerminalViewportMsg (terminalA, { Cols = 132; Rows = 43 }))
+                |> composing
+            Expect.equal (sent model).Size (Some { Cols = 132; Rows = 43 }) "the author's own viewport"
+
+        testCase "a client that has measured nothing claims no width" <| fun () ->
+            // A terminals column that was never opened has no box to measure, and no claim is
+            // the honest answer: the terminal keeps the width it had rather than being
+            // reshaped to a constant nobody chose.
+            Expect.isNone (sent (composing (client ()))).Size "nothing measured, nothing claimed"
+
+        testCase "a box measured as nothing is refused, not carried into a command" <| fun () ->
+            // Zero cells is a box that is not in the document rather than a very small
+            // terminal, and a command that ran at zero columns is a command whose output is
+            // unreadable for ever.
+            let model =
+                client ()
+                |> ClientModel.update (TerminalViewportMsg (terminalA, { Cols = 132; Rows = 43 }))
+                |> ClientModel.update (TerminalViewportMsg (terminalA, { Cols = 0; Rows = 0 }))
+                |> composing
+            Expect.equal (sent model).Size (Some { Cols = 132; Rows = 43 }) "the last real measurement stands"
+
+        testCase "one terminal's width is not another's" <| fun () ->
+            // Two terminals are two panes, and the reader may have looked at only one of them.
+            let model =
+                client ()
+                |> ClientModel.update (TerminalViewportMsg (terminalB, { Cols = 132; Rows = 43 }))
+                |> composing
+            Expect.isNone (sent model).Size "terminal B's pane says nothing about terminal A's"
+    ]
+
 let private syncTests =
     testList "Terminal collaborative state" [
         testCase "a terminal queue entry survives a doc round-trip" <| fun () ->
@@ -3475,4 +3534,5 @@ let tests =
         managerTests
         schedulerTests
         syncTests
+        viewportTests
     ]
