@@ -207,6 +207,29 @@ let private sandboxPolicyTests =
             Expect.equal (Map.tryFind "ANTHROPIC_API_KEY" ambientRun) (Some "ambient-key") "the ambient key passes when nothing displaces it"
             Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" ambientRun) (Some "ambient-token") "so does the ambient token"
 
+        testCase "a sandbox's own process needs a backend that has one" <| fun () ->
+            // `cmd` is compose's `command`, and only a container has a `Cmd` to replace. A
+            // host or srt sandbox is a confinement around spawns, so the ask is refused
+            // rather than ignored — a sandbox that silently did not run what it was asked
+            // to run is worse than one that says so.
+            let withCommand = { EnvironmentSpec.defaults with Command = Some "postgres -c fsync=off" }
+            Expect.isError (Sandboxes.forBackend HostBackend "s" withCommand) "the host backend has no process to replace"
+            Expect.isError (Sandboxes.forBackend SrtBackend "s" withCommand) "nor does srt"
+            Expect.isOk (Sandboxes.forBackend DockerBackend "s" withCommand) "docker does"
+
+        testCase "the refusal says what was asked for and what would host it" <| fun () ->
+            // A refusal nobody can act on gets worked around instead of fixed.
+            match Sandboxes.forBackend HostBackend "s" { EnvironmentSpec.defaults with Command = Some "npm start" } with
+            | Ok _ -> failwith "expected a refusal"
+            | Error e ->
+                Expect.isTrue (e.Contains "npm start") "it quotes the command"
+                Expect.isTrue (e.Contains "docker") "and names the backend that could run it"
+
+        testCase "a sandbox with no command is unaffected on every backend" <| fun () ->
+            // The guard above must not have cost the ordinary sandbox anything.
+            Expect.isOk (Sandboxes.forBackend HostBackend "s" EnvironmentSpec.defaults) "host still works"
+            Expect.isOk (Sandboxes.forBackend DockerBackend "s" EnvironmentSpec.defaults) "so does docker"
+
         testCase "egress: only a confined backend carries an allowlist, and it is opt-in" <| fun () ->
             let ambient = Map.ofList [ "YESSION_SESSION_WORK_NET", "api.example.com, cdn.example.com" ]
             Expect.equal (Sandboxes.egressFor HostBackend ambient) None "an unconfined backend is unrestricted"
