@@ -30,6 +30,9 @@ module Yession.Browser.Screens
 // ahead of the screen would skip a record for ever.
 
 open Fable.Core
+open Browser.Dom
+open Browser.Types
+open Fable.ResizeObserver
 open Yession.Domain
 open Yession.App
 open Yession.SessionProcess
@@ -61,21 +64,10 @@ let private measure (terminalId: string) : (int * int) option = jsNative
 /// The screen this peer is typing into, if one is on screen. `tabindex="0"` is what makes it
 /// the holder's: the other two variants the view renders are `role="region"`, and the pane
 /// shows one tab at a time.
-[<Emit("document.querySelector('[data-terminal-screen][tabindex=\"0\"]')")>]
-let private holderScreen () : obj = jsNative
-
-[<Emit("new ResizeObserver($0)")>]
-let private newResizeObserver (onResized: unit -> unit) : obj = jsNative
-
-[<Emit("$0.observe($1)")>]
-let private observe (observer: obj) (element: obj) : unit = jsNative
-
-/// Every target at once, which is all of them: exactly one element is ever observed.
-[<Emit("$0.disconnect()")>]
-let private disconnect (observer: obj) : unit = jsNative
-
-[<Emit("$0 === $1")>]
-let private isSame (a: obj) (b: obj) : bool = jsNative
+let private holderScreen () : Element option =
+    match document.querySelector "[data-terminal-screen][tabindex=\"0\"]" with
+    | null -> None
+    | element -> Some element
 
 /// One terminal's screen as this client composes it.
 type private Live =
@@ -170,15 +162,25 @@ let create (dispatch: ClientMsg -> unit) (report: TerminalId -> int -> int -> un
     ///
     /// `reportedSize` is what keeps this cheap: an observer fires on every frame of a drag, and
     /// only the frames that cross a whole character cell send anything.
-    let observer = newResizeObserver (fun () -> latest |> Option.iter reportSizes)
-    let mutable observed : obj = null
+    let observer =
+        if ResizeObserver.isSupported () then
+            Some (ResizeObserver.create (fun () -> latest |> Option.iter reportSizes))
+        else None
+    let mutable observed : Element option = None
 
     let watchHolderScreen () =
         let element = holderScreen ()
-        if not (isSame element observed) then
-            disconnect observer
+        let unchanged =
+            match element, observed with
+            | Some element, Some observed -> System.Object.ReferenceEquals (element, observed)
+            | None, None -> true
+            | _ -> false
+        if not unchanged then
+            observer
+            |> Option.iter (fun observer ->
+                observer.disconnect ()
+                element |> Option.iter observer.observe)
             observed <- element
-            if not (isNull element) then observe observer element
 
     { Snapshot =
         fun id keyframe ->
