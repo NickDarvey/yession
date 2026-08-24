@@ -28,6 +28,7 @@ module Yession.Host.Telemetry
 open Fable.Core
 open Fable.Core.JsInterop
 open Yession.Domain
+open Yession.Domain.Agent
 
 /// The binding layer (module `Fable.OpenTelemetry`), qualified for clarity in app code.
 module OpenTelemetry = Fable.OpenTelemetry

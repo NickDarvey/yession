@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Agent
+
+open Yession.Domain
 
 /// Classification: the gate every proposed act passes on its way to happening (Plan 23).
 ///

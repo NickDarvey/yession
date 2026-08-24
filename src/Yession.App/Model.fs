@@ -1,6 +1,7 @@
 namespace Yession.App
 
 open Yession.Domain
+open Yession.Domain.Agent
 open Yession.Domain.Link
 open Yession.Domain.Terminals
 open Yession.Domain.Collab

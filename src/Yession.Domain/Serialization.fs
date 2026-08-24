@@ -1,6 +1,7 @@
 namespace Yession.Domain
 
 open System
+open Yession.Domain.Agent
 open Yession.Domain.Link
 open Yession.Domain.Terminals
 open Yession.Domain.Tools

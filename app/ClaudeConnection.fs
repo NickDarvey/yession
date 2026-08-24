@@ -11,6 +11,7 @@ module Yession.Host.ClaudeConnection
 open Fable.Core
 open Fable.Core.JsInterop
 open Yession.Domain
+open Yession.Domain.Agent
 open Yession.Domain.Access
 open Yession.Manager
 open Yession.SessionProcess

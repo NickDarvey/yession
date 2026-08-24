@@ -2,6 +2,7 @@ namespace Yession.SessionProcess
 
 open System
 open Yession.Domain
+open Yession.Domain.Agent
 open Yession.Domain.Terminals
 open Yession.Domain.Collab
 

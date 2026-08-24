@@ -21,6 +21,7 @@ module Yession.Host.RepoSandboxes
 // (`WorkSandboxes.fs`), and removal stays `stop_work_sandbox`.
 
 open Yession.Domain
+open Yession.Domain.Agent
 open Yession.Domain.Tools
 open Yession.SessionProcess
 

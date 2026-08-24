@@ -12,6 +12,7 @@ module Yession.Host.ModelRoutes
 
 open Fable.Core.JsInterop
 open Yession.Domain
+open Yession.Domain.Agent
 open Yession.SessionProcess
 open Yession.App
 open Yession.Host.Interop
