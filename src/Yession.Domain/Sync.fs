@@ -23,8 +23,7 @@ type AdaptiveSyncedState =
       SharedBrief : cval<SharedBrief option>
       TerminalDrafts : cmap<string, TerminalDraft>
       Pending : cmap<string, PendingAct>
-      Model : cval<ModelId option>
-      TerminalSizes : cmap<string, TerminalSize> }
+      Model : cval<ModelId option> }
 
 module SyncedStateSync =
 
@@ -60,9 +59,6 @@ module SyncedStateSync =
     let private pendingByKey (m: SyncedSessionState) : HashMap<string, PendingAct> =
         m.Pending |> Map.toSeq |> Seq.map (fun (k, v) -> QueueId.value k, v) |> HashMap.ofSeq
 
-    let private terminalSizesByKey (m: SyncedSessionState) : HashMap<string, TerminalSize> =
-        m.TerminalSizes |> Map.toSeq |> Seq.map (fun (k, v) -> TerminalId.value k, v) |> HashMap.ofSeq
-
     /// `Create` for Ylmish's options: build the adaptive companion from a model.
     let create (m: SyncedSessionState) : AdaptiveSyncedState =
         { Drafts = cmap (draftsByKey m)
@@ -71,8 +67,7 @@ module SyncedStateSync =
           SharedBrief = cval m.SharedBrief
           TerminalDrafts = cmap (terminalDraftsByKey m)
           Pending = cmap (pendingByKey m)
-          Model = cval m.Model
-          TerminalSizes = cmap (terminalSizesByKey m) }
+          Model = cval m.Model }
 
     /// `Update` for Ylmish's options: fold the next model into the companion. Setting
     /// `cmap.Value` yields keyed deltas, so only changed entries re-encode.
@@ -84,7 +79,6 @@ module SyncedStateSync =
         a.TerminalDrafts.Value <- terminalDraftsByKey m
         a.Pending.Value <- pendingByKey m
         a.Model.Value <- m.Model
-        a.TerminalSizes.Value <- terminalSizesByKey m
 
     /// Per-draft encoding: the map key *is* the author (one draft per client), so `author` is
     /// re-stated only because an empty object would write no Yjs key at all (Ylmish creates a
@@ -135,12 +129,14 @@ module SyncedStateSync =
                   (AVal.constant
                       (Authority.onBehalfOf q.Authority |> Option.map ActorRef.token |> Option.defaultValue ""))
               "author", Encode.string (AVal.constant (ActorRef.token (Authority.author q.Authority)))
-              "order", Encode.float (AVal.constant q.Order) ]
-
-    let private encodeTerminalSize (s: TerminalSize) : Encoded =
-        Encode.object
-            [ "cols", Encode.int (AVal.constant s.Cols)
-              "rows", Encode.int (AVal.constant s.Rows) ]
+              "order", Encode.float (AVal.constant q.Order)
+              // `"120x40"`, the same spelling the transcript's `r` record uses
+              // (`TerminalSize.format`), so one format serves the doc and the recording and
+              // neither can drift from the other. A string like `background` beside it: the
+              // doc carries text, and the domain type is where it becomes a value.
+              "size",
+              Encode.string
+                  (AVal.constant (q.Size |> Option.map TerminalSize.format |> Option.defaultValue "")) ]
 
     /// The session's model choice: one optional top-level REGISTER, which Ylmish lays out as
     /// a key in the argless root map rather than as a named root type (`Binding.attach`'s
@@ -167,8 +163,7 @@ module SyncedStateSync =
               // Named for what they hold rather than for the one subject kind that used to
               // be the only one (Plan 15, stage 3).
               "pending", Encode.map encodePendingAct (a.Pending :> amap<_, _>)
-              "model", Encode.option encodeModel a.Model
-              "terminalSizes", Encode.map encodeTerminalSize (a.TerminalSizes :> amap<_, _>) ]
+              "model", Encode.option encodeModel a.Model ]
 
     /// The doc-side field shapes, before identifier validation. Bodies are omitted here: they
     /// are top-level `Y.XmlFragment` roots the app resolves via the `BodyRegistry`, never part
@@ -209,7 +204,9 @@ module SyncedStateSync =
           /// Whether the author is waiting on this one (Plan 20, stage 2). A string on the
           /// doc side like every other field here — the doc carries text, and the domain
           /// type is where it becomes a bool.
-          Background : string }
+          Background : string
+          /// The author's terminal width, `"120x40"`, or empty for an act with no viewport.
+          Size : string }
 
     /// A terminal draft entry: the queue key it becomes when sent. Both ids come from the
     /// map key, so only this crosses.
@@ -226,19 +223,14 @@ module SyncedStateSync =
             let! author = Decode.object.required "author" Decode.string
             let! order = Decode.object.optional "order" Decode.float
             let! background = Decode.object.optional "background" Decode.string
+            let! size = Decode.object.optional "size" Decode.string
             return
                 { Subject = subject
                   OnBehalfOf = defaultArg onBehalfOf ""
                   Author = author
                   Order = defaultArg order 0.0
-                  Background = defaultArg background "" }
-        }
-
-    let private decodeTerminalSize<'m> : Decoder<'m, TerminalSize> =
-        Decode.object {
-            let! cols = Decode.object.optional "cols" Decode.int
-            let! rows = Decode.object.optional "rows" Decode.int
-            return { Cols = defaultArg cols 0; Rows = defaultArg rows 0 }
+                  Background = defaultArg background ""
+                  Size = defaultArg size "" }
         }
 
     /// A model register the smart constructor refuses reads back as ABSENT — the provider's
@@ -318,17 +310,11 @@ module SyncedStateSync =
                             (if f.OnBehalfOf = "" then None else ActorRef.ofToken f.OnBehalfOf)
                       // Absent reads as foreground, which is what every entry a person
                       // writes is and what every entry written before Plan 20 was.
-                      Background = (f.Background = "true") }
-            | _ -> acc)
-
-    let private terminalSizesToDomain (h: HashMap<string, TerminalSize>) : Map<TerminalId, TerminalSize> =
-        (Map.empty, HashMap.toSeq h)
-        ||> Seq.fold (fun acc (key, size) ->
-            match TerminalId.create key with
-            // An unusable size is dropped, which reads back as the DEFAULT rather than as a
-            // terminal zero columns wide. Same direction as an unreadable mode: absent means
-            // the default, and the default is always something a terminal can be.
-            | Ok terminal when TerminalSize.isValid size -> acc |> Map.add terminal size
+                      Background = (f.Background = "true")
+                      // Unreadable or absent is NO claim rather than a guessed one: an entry
+                      // written before the field existed, or by something that put nonsense
+                      // there, leaves the terminal at the width it had.
+                      Size = TerminalSize.parse f.Size }
             | _ -> acc)
 
     /// Decode the synced state out of a doc. Total, and decode-empty = init: on an empty
@@ -342,7 +328,6 @@ module SyncedStateSync =
             let! terminalDrafts = Decode.object.optional "terminalDrafts" (Decode.map decodeTerminalDraft)
             let! pending = Decode.object.optional "pending" (Decode.map decodePendingAct)
             let! model = Decode.object.optional "model" Decode.string
-            let! terminalSizes = Decode.object.optional "terminalSizes" (Decode.map decodeTerminalSize)
             return
                 { Drafts = drafts |> Option.map draftsToDomain |> Option.defaultValue Map.empty
                   Queue = queue |> Option.map queueToDomain |> Option.defaultValue Map.empty
@@ -351,9 +336,7 @@ module SyncedStateSync =
                   TerminalDrafts =
                     terminalDrafts |> Option.map terminalDraftsToDomain |> Option.defaultValue Map.empty
                   Pending = pending |> Option.map pendingToDomain |> Option.defaultValue Map.empty
-                  Model = modelToDomain model
-                  TerminalSizes =
-                    terminalSizes |> Option.map terminalSizesToDomain |> Option.defaultValue Map.empty }
+                  Model = modelToDomain model }
         }
 
     open Fable.Core
@@ -446,7 +429,8 @@ module SyncedStateSync =
                   OnBehalfOf = entryString entry "onBehalfOf"
                   Author = entryString entry "author"
                   Order = entry.get "order" |> Option.map (unbox<float>) |> Option.defaultValue 0.0
-                  Background = entryString entry "background" })
+                  Background = entryString entry "background"
+                  Size = entryString entry "size" })
         // Off the ARGLESS root map, not off a named root: a top-level register lives there
         // (see `encodeModel`), so `doc.getMap "model"` would silently mint an empty map and
         // read back as "nobody has chosen" for ever.
@@ -454,10 +438,6 @@ module SyncedStateSync =
             match (doc.getMap () : Yjs.Y.Map<obj>).get "model" with
             | Some id when not (isNull id) -> Some (unbox<string> id)
             | _ -> None
-        let terminalSizesH =
-            foldRoot doc "terminalSizes" (fun entry ->
-                { Cols = entry.get "cols" |> Option.map (unbox<int>) |> Option.defaultValue 0
-                  Rows = entry.get "rows" |> Option.map (unbox<int>) |> Option.defaultValue 0 })
         Ok
             { Drafts = draftsToDomain draftsH
               Queue = queueToDomain queueH
@@ -465,8 +445,7 @@ module SyncedStateSync =
               SharedBrief = brief
               TerminalDrafts = terminalDraftsToDomain terminalDraftsH
               Pending = pendingToDomain pendingH
-              Model = modelToDomain model
-              TerminalSizes = terminalSizesToDomain terminalSizesH }
+              Model = modelToDomain model }
 
     /// The origin tag on the Session Process's own doc writes (the drain's removals),
     /// distinct from the remote-apply origin so they broadcast like any local update.

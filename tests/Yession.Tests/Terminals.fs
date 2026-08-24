@@ -79,6 +79,7 @@ let private entry (id: string) (terminal: TerminalId) (author: ActorRef) (order:
     { QueueId = queue id
       Terminal = terminal
       Authority = Authority.ofAuthor author
+      Size = None
       Order = order
       Background = false }
 
@@ -381,17 +382,17 @@ let private emulatorTests =
                 emulator.Dispose ()
             }
 
-        testCase "a terminal with no size register is 80x24" <| fun () ->
-            // The default IS the absence: a terminal nobody has resized carries no register
-            // restating what every terminal has defaulted to since the VT100.
-            let size = SyncedSessionState.sizeOf terminalA SyncedSessionState.empty
-            Expect.equal size TerminalSize.default' "absent means default"
-            Expect.equal (size.Cols, size.Rows) (80, 24) "and the default is 80x24"
+        testCase "a command that claims no width is a command that resizes nothing" <| fun () ->
+            // The agent's commands carry no size, and neither does a person whose terminals
+            // column is shut. `None` has to mean "leave it alone" rather than "use the
+            // default", or every agent command would drag a shared terminal back to 80x24
+            // under whoever had just widened it.
+            Expect.equal (TerminalSize.parse "") None "nothing is not a size"
+            Expect.equal TerminalSize.default' { Cols = 80; Rows = 24 } "and what a terminal opens at is 80x24"
 
-        testCase "an unusable size reads back as the default, never as a broken terminal" <| fun () ->
-            // The doc is shared with peers we do not control, and a zero-column terminal is
-            // not a small terminal — it is one nothing can render. Same direction the
-            // approval mode fails in: absent means the default, and the default always works.
+        testCase "an unusable size is refused, never rounded into a broken terminal" <| fun () ->
+            // The size rides an entry in a doc shared with peers we do not control, and a
+            // zero-column terminal is not a small terminal — it is one nothing can render.
             Expect.isFalse (TerminalSize.isValid { Cols = 0; Rows = 24 }) "no columns is not a size"
             Expect.isFalse (TerminalSize.isValid { Cols = 80; Rows = -1 }) "nor are negative rows"
             Expect.isTrue (TerminalSize.isValid TerminalSize.default') "the default is always valid"

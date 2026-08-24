@@ -78,9 +78,10 @@ let private representativeModel : ClientModel =
                     // build one.
                     Authority = Authority.agentFor (PeerRef ada)
                     Order = 1.0
-                    Background = false } ]
-          Model = Some pickedModel
-          TerminalSizes = Map.empty }
+                    Background = false
+                    // An agent command, so no viewport and no claim about width.
+                    Size = None } ]
+          Model = Some pickedModel }
       Conversation =
         { Items =
             [ { MessageId = MessageId.create "msg-1" |> expect
