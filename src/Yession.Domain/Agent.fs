@@ -423,11 +423,15 @@ type DeleteSessionSecret = SecretName -> Async<Result<bool, string>>
 /// (Plan 08 precedence) into that sandbox's environment; the value goes nowhere else, and
 /// the event records which names and whose, never what.
 ///
-/// A whole `SandboxRequest` rather than a name and a list, because the same verb is what
+/// A whole `SandboxDecl` rather than a name and a list, because the same verb is what
 /// `yession.yaml` folds into and a file says more about a sandbox than a tool call does.
 /// One shape means the declarative and the interactive route cannot diverge — which was
 /// the point of making every mutating command ensure-shaped in the first place.
-type StartWorkSandbox = SandboxRef -> SandboxRequest -> Async<Result<CommandOutcome, string>>
+///
+/// A DECLARATION and not a request: what a caller has is what a file could have written,
+/// and turning one into the other needs the checkout, which is the session's to know. So
+/// the resolution happens on the far side of the gate, and no caller can name a directory.
+type StartWorkSandbox = SandboxRef -> SandboxDecl -> Async<Result<CommandOutcome, string>>
 
 /// Stop one, taking whatever is running in it down. The way to change a sandbox's
 /// forwarding, and stated as such wherever the change is refused.

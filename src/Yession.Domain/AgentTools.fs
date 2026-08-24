@@ -410,9 +410,9 @@ module AgentTools =
         withSandbox raw (fun name ->
             async {
                 // The tool's vocabulary is a name and some credentials; everything else a
-                // sandbox can be is the file's to say, so the ask is the defaults with the
-                // forwarding filled in.
-                match! capabilities.StartWorkSandbox name { SandboxRequest.defaults with Forward = forward } with
+                // sandbox can be is the file's to say, so the declaration is an empty one
+                // with the forwarding filled in.
+                match! capabilities.StartWorkSandbox name { SandboxDecl.empty with Forward = forward } with
                 | Ok outcome -> return renderCommandOutcome outcome
                 | Error e -> return sprintf "could not start the sandbox: %s" e
             })

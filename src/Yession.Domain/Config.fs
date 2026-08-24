@@ -58,6 +58,66 @@ module SandboxDecl =
           Read = []
           Forward = [] }
 
+    /// One declaration, written back as the file would have written it.
+    ///
+    /// Exists so the command gate can carry a declaration (see `ConfigFile.parseSandbox`).
+    /// The round trip through `parseSandbox` is what makes that safe: anything this writes,
+    /// the file's own schema must be willing to read, so a gated call cannot smuggle a shape
+    /// a `yession.yaml` would have been refused for.
+    let encode (decl: SandboxDecl) : string =
+        let container =
+            decl.Container
+            |> Option.map (fun container ->
+                Encode.object
+                    [ if container.Image.IsSome then
+                        "image", Encode.string (ContainerImage.render container.Image.Value)
+                      if container.Build.IsSome then
+                        let build = container.Build.Value
+                        "build",
+                        Encode.object
+                            [ "context", Encode.string build.ContextPath
+                              if build.DockerfilePath.IsSome then
+                                "dockerfile", Encode.string build.DockerfilePath.Value ]
+                      if not (List.isEmpty container.Mounts) then
+                        "volumes",
+                        Encode.list (
+                            container.Mounts
+                            |> List.map (fun mount ->
+                                Encode.object
+                                    [ "source",
+                                      Encode.string (
+                                          match mount.Source with
+                                          | SessionWorkspace -> "workspace"
+                                          | NamedVolume name -> name
+                                          // Written as it stands, and then REFUSED on the
+                                          // way back in: the schema is the one place a host
+                                          // path is rejected, so a second refusal here
+                                          // would be a spare that could disagree with it.
+                                          // The consequence is the intended one — a
+                                          // host-path mount cannot cross the gate.
+                                          | HostPath path -> path)
+                                      "target", Encode.string mount.Target
+                                      "mode",
+                                      Encode.string (match mount.Mode with ReadOnly -> "ro" | ReadWrite -> "rw") ]))
+                      if container.Command.IsSome then "cmd", Encode.string container.Command.Value ])
+        let env =
+            decl.EnvironmentVariables
+            |> Map.toList
+            |> List.map (fun (name, value) ->
+                name,
+                match value with
+                | PlainValue plain -> Encode.string plain
+                | SecretRef secret -> Encode.object [ "secret", Encode.string (SecretName.value secret) ])
+        let strings (names: string list) = Encode.list (names |> List.map Encode.string)
+        Encode.toString 0 (
+            Encode.object
+                [ if container.IsSome then "container", container.Value
+                  if decl.WorkingDirectory.IsSome then "workdir", Encode.string decl.WorkingDirectory.Value
+                  if not (Map.isEmpty decl.EnvironmentVariables) then "env", Encode.object env
+                  if not (List.isEmpty decl.Net) then "net", strings decl.Net
+                  if not (List.isEmpty decl.Read) then "read", strings decl.Read
+                  if not (List.isEmpty decl.Forward) then "forward", strings decl.Forward ])
+
     /// What a declaration ASKS the session for, given where this repo's checkout is.
     ///
     /// A rename rather than a translation, and that is the design: the file is a
@@ -67,19 +127,24 @@ module SandboxDecl =
     /// The checkout is the one thing a file cannot know — a path in it is relative to a
     /// directory the SESSION chose — so it is supplied. `workdir` is already guaranteed to
     /// be inside the checkout by the decoder, which is where a path a person can fix is
-    /// refused; joining is all that is left.
+    /// refused; resolving is all that is left.
+    ///
+    /// `None` is a sandbox NOBODY'S repo declared: the session's own, which has no checkout
+    /// for a relative path to be relative to. A `workdir` there is refused rather than
+    /// resolved against something invented, and the refusal says which verb does move where
+    /// a session sandbox's terminals start.
     ///
     /// `Container = None` becomes `Confinement`, and that is not the file saying "confine
     /// me". It is the file saying nothing, and what nothing means is the BACKEND's answer:
     /// docker starts its defaults, srt and host confine. `Sandboxes.forBackend` is where the
     /// two authors meet.
-    let toRequest (checkout: string) (decl: SandboxDecl) : SandboxRequest =
+    let toRequest (checkout: string option) (decl: SandboxDecl) : Result<SandboxRequest, string> =
         // Resolved rather than concatenated, and CLAMPED at the checkout. The decoder
         // already refuses a path that climbs out — that is the upstream fix, made where a
         // person can correct their file — and this is the downstream guard: a declaration
         // reaching here some other way still cannot name a directory above the checkout,
         // because there is no arithmetic here that could produce one.
-        let under (dir: string) =
+        let under (checkout: string) (dir: string) =
             let resolved =
                 dir.Split ([| '/'; '\\' |])
                 |> Array.fold
@@ -93,16 +158,27 @@ module SandboxDecl =
             match resolved with
             | [] -> checkout.TrimEnd '/'
             | segments -> checkout.TrimEnd '/' + "/" + String.concat "/" segments
-        { Spec =
-            { WorkingDirectory = decl.WorkingDirectory |> Option.map under
-              EnvironmentVariables = decl.EnvironmentVariables
-              Net = decl.Net
-              Read = decl.Read
-              Runtime =
-                match decl.Container with
-                | Some container -> Container container
-                | None -> Confinement }
-          Forward = decl.Forward }
+        let workingDirectory =
+            match decl.WorkingDirectory, checkout with
+            | None, _ -> Ok None
+            | Some dir, Some checkout -> Ok (Some (under checkout dir))
+            | Some dir, None ->
+                Error (
+                    sprintf
+                        "'%s' is relative to a checkout, and this sandbox is the session's own rather than a repo's                          — set_shell_profile moves where its terminals start"
+                        dir)
+        workingDirectory
+        |> Result.map (fun workingDirectory ->
+            { Spec =
+                { WorkingDirectory = workingDirectory
+                  EnvironmentVariables = decl.EnvironmentVariables
+                  Net = decl.Net
+                  Read = decl.Read
+                  Runtime =
+                    match decl.Container with
+                    | Some container -> Container container
+                    | None -> Confinement }
+              Forward = decl.Forward })
 
 /// One repo's whole file.
 type ConfigFile =
@@ -313,6 +389,21 @@ module ConfigFile =
     /// Decode one repo's file from already-parsed JSON text.
     let parse (json: string) : Result<ConfigFile, string> =
         Decode.fromString decoder json
+
+    /// ONE sandbox block, on its own.
+    ///
+    /// What crosses the command gate (`start_work_sandbox`) is a declaration, because a
+    /// declaration is what both callers have: the agent's names some credentials, a file's
+    /// names everything. One shape, so the declarative route and the interactive one cannot
+    /// diverge — which is the reason the gate is a capability rather than a detail of the
+    /// MCP adapter.
+    ///
+    /// And the round trip is a real property, not a convenience: whatever crosses the gate
+    /// is expressible in a `yession.yaml`, so every refusal the file's own schema makes —
+    /// the reserved prefix, a host-path volume, a workdir outside the checkout — applies to
+    /// a gated call for free rather than needing a second copy.
+    let parseSandbox (json: string) : Result<SandboxDecl, string> =
+        Decode.fromString sandbox json
 
     /// What ONE repo's file contributes to the session, keyed so it cannot collide with
     /// another repo's.
