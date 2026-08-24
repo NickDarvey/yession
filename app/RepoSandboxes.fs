@@ -21,6 +21,7 @@ module Yession.Host.RepoSandboxes
 // (`WorkSandboxes.fs`), and removal stays `stop_work_sandbox`.
 
 open Yession.Domain
+open Yession.Domain.Tools
 open Yession.SessionProcess
 
 /// What the last fold made of one repo. `Sandbox = None` is about the FILE itself — it

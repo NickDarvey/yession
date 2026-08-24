@@ -17,6 +17,7 @@ module Yession.Tests.ToolStreams
 
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Tools
 
 let private expect result =
     match result with

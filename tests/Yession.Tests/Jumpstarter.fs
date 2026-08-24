@@ -17,6 +17,7 @@ open System
 open Fable.Core
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Tools
 open Yession.Host
 
 /// The exporter and the provider, running, with the control url the provider announced.

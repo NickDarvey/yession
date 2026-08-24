@@ -16,6 +16,7 @@ module Yession.Host.Queries
 // value in SessionMain rather than a panel, a route, a message and a reducer case.
 
 open Yession.Domain
+open Yession.Domain.Tools
 
 /// One query, wired: what it declares, and how to answer it. `Read` is called on demand —
 /// nothing is cached, because every value here is somebody else's truth (the filesystem's

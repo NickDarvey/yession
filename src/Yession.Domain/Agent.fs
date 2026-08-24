@@ -1,6 +1,7 @@
 namespace Yession.Domain
 
 open Yession.Domain.Chat
+open Yession.Domain.Tools
 open Yession.Domain.Access
 
 /// The agent-turn capability vocabulary (Step 08). The Session Process runs an agent

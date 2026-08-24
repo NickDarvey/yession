@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Tools
+
+open Yession.Domain
 
 // The query vocabulary (Plan 15): the READ half of the session's imperative API,
 // declared once so that one declaration reaches two audiences — the agent (as an MCP

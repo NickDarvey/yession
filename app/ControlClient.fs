@@ -8,6 +8,7 @@ module Yession.Host.ControlClient
 
 open Fable.Core
 open Yession.Domain
+open Yession.Domain.Tools
 open Yession.Domain.Access
 open Yession.Manager
 open Yession.Oidc
