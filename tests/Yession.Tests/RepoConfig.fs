@@ -46,7 +46,8 @@ let private devWithNet = """
 version: 1
 sandboxes:
   dev:
-    image: node:24
+    container:
+      image: node:24
     net:
       - registry.npmjs.org
     forward: [ github ]
@@ -56,9 +57,9 @@ let private duplicateName = """
 version: 1
 sandboxes:
   dev:
-    image: node:24
+    container: { image: node:24 }
   dev:
-    image: node:20
+    container: { image: node:20 }
 """
 
 let private anchored = """
@@ -78,7 +79,8 @@ let tests =
             let dir = checkout r (Some devWithNet)
             let file = RepoConfig.read dir r |> expect |> Option.get
             let dev = file.Sandboxes |> Map.find (SandboxName.create "dev" |> expect)
-            Expect.equal dev.Image (Some { Name = "node"; Tag = Some "24" }) "the image survived the round trip"
+            Expect.equal (dev.Container |> Option.get).Image (Some { Name = "node"; Tag = Some "24" })
+                "the image survived the round trip"
             Expect.equal dev.Net [ "registry.npmjs.org" ] "so did the egress it asks for"
             Expect.equal dev.Forward [ "github" ] "and the credential names"
 
@@ -91,7 +93,7 @@ let tests =
             // Folding this into the case above is how a repo silently stops being configured
             // the day somebody mistypes a key.
             let r = repo "octo/broken"
-            Expect.isError (RepoConfig.read (checkout r (Some "version: 1\nsandboxes:\n  dev:\n    imagge: node:24\n")) r)
+            Expect.isError (RepoConfig.read (checkout r (Some "version: 1\nsandboxes:\n  dev:\n    workdirr: ./app\n")) r)
                 "an unknown key fails the file rather than yielding an empty one"
 
         testCase "the refusal names the repo it came from" <| fun () ->

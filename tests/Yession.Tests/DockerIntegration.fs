@@ -36,8 +36,17 @@ let private readFile (fs: obj) (path: string) : string = jsNative
 
 // --- Fixtures / helpers ------------------------------------------------------------------
 
+/// Reshape the container inside a spec. The runtime union nests what used to be flat, and
+/// these cases are all about the container, so they say so once here.
+let private withContainer (f: ContainerSpec -> ContainerSpec) (spec: EnvironmentSpec) : EnvironmentSpec =
+    { spec with
+        Runtime =
+            match spec.Runtime with
+            | Container c -> Container (f c)
+            | Confinement -> Container (f ContainerSpec.defaults) }
+
 let private alpineSpec =
-    { EnvironmentSpec.defaults with Image = Some { Name = "alpine"; Tag = Some "3" } }
+    { EnvironmentSpec.defaults with Runtime = Container { ContainerSpec.defaults with Image = Some { Name = "alpine"; Tag = Some "3" } } }
 
 /// The env fallback the old Manager-side injection ended on: the test process's env.
 let private envSecrets : SecretName -> Async<Result<string, string>> =
@@ -154,14 +163,14 @@ let tests =
                 let dir = mkdtemp nodeFs nodeOs
                 makeWorldWritable nodeFs dir
                 // Read-write: the container writes, the host reads it back.
-                let specRW = { alpineSpec with Mounts = [ { Source = HostPath dir; Target = "/host"; Mode = ReadWrite } ] }
+                let specRW = alpineSpec |> withContainer (fun c -> { c with Mounts = [ { Source = HostPath dir; Target = "/host"; Mode = ReadWrite } ] })
                 let! _, sandboxRW = startOrFail specRW
                 let! rw, _, _ = runInSandbox sandboxRW "sh" [ "-c"; "echo hostbound > /host/f" ] Map.empty None
                 Expect.equal rw (SandboxExited 0) "read-write mount accepts writes"
                 do! sandboxRW.Dispose ()
                 Expect.isTrue ((readFile nodeFs (dir + "/f")).Contains "hostbound") "the host sees the container's write"
                 // Read-only: the same path rejects writes.
-                let specRO = { alpineSpec with Mounts = [ { Source = HostPath dir; Target = "/host"; Mode = ReadOnly } ] }
+                let specRO = alpineSpec |> withContainer (fun c -> { c with Mounts = [ { Source = HostPath dir; Target = "/host"; Mode = ReadOnly } ] })
                 let! _, sandboxRO = startOrFail specRO
                 let! ro, _, _ = runInSandbox sandboxRO "sh" [ "-c"; "echo nope > /host/f2" ] Map.empty None
                 Expect.isFalse (ro = SandboxExited 0) "read-only mount rejects writes"
@@ -170,9 +179,11 @@ let tests =
 
             testCaseAsync "build spec: an image is built from a context and run" (async {
                 let spec =
-                    { alpineSpec with
-                        Image = None
-                        Build = Some { ContextPath = "tests/fixtures/docker"; DockerfilePath = None } }
+                    alpineSpec
+                    |> withContainer (fun c ->
+                        { c with
+                            Image = None
+                            Build = Some { ContextPath = "tests/fixtures/docker"; DockerfilePath = None } })
                 let! _, sandbox = startOrFail spec
                 let! run, out, _ = runInSandbox sandbox "cat" [ "/marker" ] Map.empty None
                 Expect.equal run (SandboxExited 0) "the built image runs"

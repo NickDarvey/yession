@@ -27,18 +27,17 @@ open Thoth.Json.Net
 /// things `start_work_sandbox` already takes, so nothing here is a new concept — the file
 /// says what the commands could already be told.
 type SandboxDecl =
-    { /// Docker backend only. A file naming one under `srt`/`host` is refused when it is
-      /// applied, not here: what backend a session runs is the operator's, and this module
-      /// has no way to know it.
-      Image : ContainerImage option
-      Build : ContainerBuildSpec option
+    { /// What this sandbox runs IN, when the repo asked for a container at all.
+      ///
+      /// `None` is not "confined" — it is the repo saying nothing, and what that means is the
+      /// BACKEND's answer, not this file's. Nesting the container's own keys under one
+      /// optional block is what makes `cmd` unwritable on a sandbox that has no container to
+      /// run it: there is no flat `cmd` to mistype.
+      Container : ContainerSpec option
       /// Relative to THIS repo's checkout.
       WorkingDirectory : string option
       /// `SecretRef` values name a secret; they never carry one, and the type cannot.
       EnvironmentVariables : Map<string, EnvironmentVariableRef>
-      Mounts : ContainerMount list
-      /// The sandbox's own process (compose's `command`). Docker only, same as `Image`.
-      Command : string option
       /// Egress this sandbox may reach. Widening the operator's ceiling is a REQUEST — it
       /// goes through the gate when the fold authors `start_work_sandbox` — so this is what
       /// is asked for, never what is granted.
@@ -52,12 +51,9 @@ type SandboxDecl =
 module SandboxDecl =
 
     let empty : SandboxDecl =
-        { Image = None
-          Build = None
+        { Container = None
           WorkingDirectory = None
           EnvironmentVariables = Map.empty
-          Mounts = []
-          Command = None
           Net = []
           Read = []
           Forward = [] }
@@ -162,20 +158,29 @@ module ConfigFile =
                 | Some "ro" -> ReadOnly
                 | _ -> ReadWrite })
 
-    let private sandboxKeys =
-        [ "image"; "build"; "workdir"; "env"; "volumes"; "cmd"; "net"; "read"; "forward" ]
+    let private containerKeys = [ "image"; "build"; "volumes"; "cmd" ]
+
+    /// The container block. `cmd` lives HERE and nowhere else, which is the whole reason the
+    /// block exists: a sandbox with no container has no place to write one.
+    let private container : Decoder<ContainerSpec> =
+        noUnknownKeys containerKeys
+        |> Decode.andThen (fun () ->
+            Decode.object (fun get ->
+                { Image = get.Optional.Field "image" image
+                  Build = get.Optional.Field "build" build
+                  Mounts = get.Optional.Field "volumes" (Decode.list mount) |> Option.defaultValue []
+                  Command = get.Optional.Field "cmd" Decode.string }))
+
+    let private sandboxKeys = [ "container"; "workdir"; "env"; "net"; "read"; "forward" ]
 
     let private sandbox : Decoder<SandboxDecl> =
         noUnknownKeys sandboxKeys
         |> Decode.andThen (fun () ->
             Decode.object (fun get ->
-                { Image = get.Optional.Field "image" image
-                  Build = get.Optional.Field "build" build
+                { Container = get.Optional.Field "container" container
                   WorkingDirectory = get.Optional.Field "workdir" Decode.string
                   EnvironmentVariables =
                     get.Optional.Field "env" environment |> Option.defaultValue Map.empty
-                  Mounts = get.Optional.Field "volumes" (Decode.list mount) |> Option.defaultValue []
-                  Command = get.Optional.Field "cmd" Decode.string
                   Net = get.Optional.Field "net" stringList |> Option.defaultValue []
                   Read = get.Optional.Field "read" stringList |> Option.defaultValue []
                   Forward = get.Optional.Field "forward" stringList |> Option.defaultValue [] }))

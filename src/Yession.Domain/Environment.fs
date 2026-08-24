@@ -34,38 +34,70 @@ type EnvironmentVariableRef =
     | PlainValue of string
     | SecretRef of SecretName
 
-/// What the session's WorkSandbox looks like, independent of the backend that confines
-/// it. Image/build/mounts apply to the docker backend; environment variables (with
-/// `SecretRef`s resolved at sandbox spawn) and the working directory apply everywhere.
-type EnvironmentSpec =
-    { WorkingDirectory : string option
-      Image : ContainerImage option
+/// What a CONTAINER is. Every field here is one only a container has — an image to run, a
+/// filesystem to build, volumes to mount, a process to be.
+type ContainerSpec =
+    { Image : ContainerImage option
       Build : ContainerBuildSpec option
       Mounts : ContainerMount list
-      EnvironmentVariables : Map<string, EnvironmentVariableRef>
-      /// The sandbox's own process — compose's `command` (Plan 27).
+      /// The container's own process — compose's `command` (Plan 27).
       ///
-      /// `None` is what every sandbox has had until now: the container idles and exists
-      /// only to be `exec`'d into. `Some` makes it a service, and inherits the semantics
-      /// that go with one — the sandbox lives exactly as long as the process does, so a
-      /// command that exits takes its terminals with it. That is docker's own behaviour
-      /// and not a policy invented here.
-      ///
-      /// DOCKER ONLY. A container has a `Cmd`; a host or srt sandbox is a confinement
-      /// around spawns, with no process of its own to replace, so asking for one there is
-      /// refused rather than ignored (`Sandboxes.forBackend`).
+      /// `None` is what every sandbox has had until now: the container idles and exists only
+      /// to be `exec`'d into. `Some` makes it a service and inherits the semantics that go
+      /// with one — the sandbox lives exactly as long as the process does, so a command that
+      /// exits takes its terminals with it. That is docker's own behaviour, not a policy
+      /// invented here.
       Command : string option }
+
+module ContainerSpec =
+
+    let defaults : ContainerSpec =
+        { Image = None; Build = None; Mounts = []; Command = None }
+
+/// What the sandbox IS, and the distinction is load-bearing rather than descriptive.
+///
+/// This used to be four optional fields on one record, and every one of them was meaningless
+/// on two of the three backends: a host or srt sandbox is a CONFINEMENT AROUND SPAWNS — it
+/// has no image, no volumes and no process of its own — so `Command = Some _` on one was a
+/// state the type permitted, the composition refused at run time, and a reader had to know
+/// the rule to avoid writing.
+///
+/// As a union it is simply not expressible. "A confined sandbox with a process" has no
+/// representation, so nothing downstream carries a case for it and no test has to prove it
+/// is refused.
+///
+/// What remains a run-time question, honestly: whether the BACKEND can host a container at
+/// all. The backend is the operator's (`YESSION_SESSION_WORK_BACKEND`) and the spec is partly
+/// the repo's, so the two are authored by different people and can only be reconciled where
+/// they meet (`Sandboxes.forBackend`).
+type SandboxRuntime =
+    /// host / srt. Nothing to build, nothing to run: the sandbox IS the confinement its
+    /// spawns go through. (Not `Confined` — `FilesystemConfinement` already has that case,
+    /// and a second one would shadow it wherever the domain is opened.)
+    | Confinement
+    /// docker.
+    | Container of ContainerSpec
+
+/// What the session's WorkSandbox looks like. The working directory and the environment
+/// (with `SecretRef`s resolved at sandbox spawn) apply to every runtime; everything that is
+/// a container's alone lives in `Container`.
+type EnvironmentSpec =
+    { WorkingDirectory : string option
+      EnvironmentVariables : Map<string, EnvironmentVariableRef>
+      Runtime : SandboxRuntime }
 
 module EnvironmentSpec =
 
     /// The minimal built-in spec: session defaults everywhere.
     let defaults : EnvironmentSpec =
         { WorkingDirectory = None
-          Image = None
-          Build = None
-          Mounts = []
           EnvironmentVariables = Map.empty
-          Command = None }
+          Runtime = Confinement }
+
+    /// The same, as a container — what the docker backend starts from when nothing asked for
+    /// anything in particular.
+    let container : EnvironmentSpec =
+        { defaults with Runtime = Container ContainerSpec.defaults }
 
 // --- Environment UI state, projected from events (Step 12) ---------------------------
 
