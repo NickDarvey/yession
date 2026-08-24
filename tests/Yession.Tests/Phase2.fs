@@ -693,7 +693,7 @@ let private lazyLifecycleTests =
                 // which reuses a terminal it already has and is therefore no need at all.
                 a.Connection.OpenTerminal "ada's"
                 do! a.Runner.WaitFor (fun model ->
-                        (TerminalProjection.openTerminals model.Terminals |> List.length) = 2)
+                        (Projection.openTerminals model.Terminals |> List.length) = 2)
 
                 Expect.equal recorder.Created 1 "exactly one sandbox created across two needs"
                 let! envEvents = environmentEventsOf managed.Host.Log

@@ -135,12 +135,12 @@ module SyncedStateSync =
               "author", Encode.string (AVal.constant (ActorRef.token (Authority.author q.Authority)))
               "order", Encode.float (AVal.constant q.Order)
               // `"120x40"`, the same spelling the transcript's `r` record uses
-              // (`TerminalSize.format`), so one format serves the doc and the recording and
+              // (`Size.format`), so one format serves the doc and the recording and
               // neither can drift from the other. A string like `background` beside it: the
               // doc carries text, and the domain type is where it becomes a value.
               "size",
               Encode.string
-                  (AVal.constant (q.Size |> Option.map TerminalSize.format |> Option.defaultValue "")) ]
+                  (AVal.constant (q.Size |> Option.map Size.format |> Option.defaultValue "")) ]
 
     /// The session's model choice: one optional top-level REGISTER, which Ylmish lays out as
     /// a key in the argless root map rather than as a named root type (`Binding.attach`'s
@@ -318,7 +318,7 @@ module SyncedStateSync =
                       // Unreadable or absent is NO claim rather than a guessed one: an entry
                       // written before the field existed, or by something that put nonsense
                       // there, leaves the terminal at the width it had.
-                      Size = TerminalSize.parse f.Size }
+                      Size = Size.parse f.Size }
             | _ -> acc)
 
     /// Decode the synced state out of a doc. Total, and decode-empty = init: on an empty

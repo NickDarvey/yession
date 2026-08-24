@@ -236,7 +236,7 @@ let private promptOf (context: AgentContextPack) : string =
         match context.Terminals with
         | [] -> ""
         | blocks ->
-            let render (block: TerminalBlockDigest) =
+            let render (block: BlockDigest) =
                 let outcome =
                     match block.Status with
                     | BlockRunning -> "still running"

@@ -274,11 +274,11 @@ let tests =
                 // Opening is a COMMAND — the terminal's id is the Process's to mint — and it
                 // arrives at every peer as an event, which is why B learns about it too.
                 a.Connection.OpenTerminal "build"
-                let hasOpenTerminal (m: ClientModel) = not (List.isEmpty (TerminalProjection.openTerminals m.Terminals))
+                let hasOpenTerminal (m: ClientModel) = not (List.isEmpty (Projection.openTerminals m.Terminals))
                 do! a.Runner.WaitFor hasOpenTerminal
                 do! b.Runner.WaitFor hasOpenTerminal
                 let terminal =
-                    (TerminalProjection.openTerminals (a.Runner.Model ()).Terminals |> List.head).TerminalId
+                    (Projection.openTerminals (a.Runner.Model ()).Terminals |> List.head).TerminalId
 
                 // The publication rule, wired per open terminal exactly as the browser wires
                 // it: Ada's slot appears when her command line has content and goes when it
@@ -297,7 +297,7 @@ let tests =
                 // Sending enqueues it; the drain runs it straight away.
                 a.Connection.SendTerminalDraft terminal a.Hello.PeerId
                 let ranSuccessfully (m: ClientModel) =
-                    match TerminalProjection.tryFind terminal m.Terminals with
+                    match Projection.tryFind terminal m.Terminals with
                     | Some view ->
                         view.Blocks
                         |> List.exists (fun b -> b.Command = "echo hello" && b.Status = BlockFinished (CommandSucceeded 0))
@@ -309,7 +309,7 @@ let tests =
                 // and the block's recorded range is what selects it, on both peers.
                 let outputOf (client: Client) =
                     let m = client.Runner.Model ()
-                    let view = TerminalProjection.tryFind terminal m.Terminals |> Option.get
+                    let view = Projection.tryFind terminal m.Terminals |> Option.get
                     let block = view.Blocks |> List.find (fun b -> b.Command = "echo hello")
                     TerminalFeed.outputText block.FromSeq (Option.defaultValue 0 block.ToSeq) (ClientModel.terminalFeed terminal m)
                 Expect.equal (outputOf a) "hello from the sandbox\r\n" "Ada sees the output"
@@ -471,9 +471,9 @@ let tests =
                 let! host = Host.startWithEnvironment None (Some (fun _ -> WorkSandboxes.singleton "scripted" environment)) None (sid ()) 0
                 let! a = connectInMemoryClient host "ada" "Ada"
                 a.Connection.OpenTerminal "build"
-                do! a.Runner.WaitFor (fun m -> not (List.isEmpty (TerminalProjection.openTerminals m.Terminals)))
+                do! a.Runner.WaitFor (fun m -> not (List.isEmpty (Projection.openTerminals m.Terminals)))
                 let terminal =
-                    (TerminalProjection.openTerminals (a.Runner.Model ()).Terminals |> List.head).TerminalId
+                    (Projection.openTerminals (a.Runner.Model ()).Terminals |> List.head).TerminalId
                 let! outcome = host.TerminalCommands.Execute { CommandRequest.ofCommand "rm -rf build" with Target = Some (InTerminal terminal) } agentActing
                 match outcome with
                 | Error reason -> failwith reason
@@ -483,7 +483,7 @@ let tests =
                     Expect.equal spawns.Value 1 "exactly once"
                 // The record every peer reads: the block exists, attributed to the agent.
                 let ran (m: ClientModel) =
-                    match TerminalProjection.tryFind terminal m.Terminals with
+                    match Projection.tryFind terminal m.Terminals with
                     | Some view -> view.Blocks |> List.exists (fun b -> b.Command = "rm -rf build")
                     | None -> false
                 do! a.Runner.WaitFor ran

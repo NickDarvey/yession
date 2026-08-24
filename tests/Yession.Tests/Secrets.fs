@@ -25,20 +25,20 @@ let private bob = UserId.create "bob" |> expect
 let private name = SecretName.create "deploy-token" |> expect
 
 /// A launch of session A that alice (and only alice) has signed in to.
-let private callerA : AuthzSubject = { Session = Some sessionA; Users = Set.singleton alice; Peers = Set.empty; Local = false }
+let private callerA : Subject = { Session = Some sessionA; Users = Set.singleton alice; Peers = Set.empty; Local = false }
 /// A launch of session A with no completed login.
-let private callerANoUsers : AuthzSubject = { Session = Some sessionA; Users = Set.empty; Peers = Set.empty; Local = false }
+let private callerANoUsers : Subject = { Session = Some sessionA; Users = Set.empty; Peers = Set.empty; Local = false }
 /// A launch of session A the Manager witnessed peer "browser-1" into (Plan 07).
 let private peer1 = PeerId.create "browser-1" |> expect
 let private peer2 = PeerId.create "browser-2" |> expect
-let private callerAWithPeer : AuthzSubject = { Session = Some sessionA; Users = Set.empty; Peers = Set.empty |> Set.add peer1; Local = false }
+let private callerAWithPeer : Subject = { Session = Some sessionA; Users = Set.empty; Peers = Set.empty |> Set.add peer1; Local = false }
 /// A launch of session A whose login was UNATTRIBUTED — `--auth localhost`. It has a
 /// subject (every launch does) but nobody was named behind it.
-let private callerALocal : AuthzSubject = { Session = Some sessionA; Users = Set.singleton alice; Peers = Set.empty; Local = true }
+let private callerALocal : Subject = { Session = Some sessionA; Users = Set.singleton alice; Peers = Set.empty; Local = true }
 /// A subject with no session at all (the future UI shape).
-let private noSession : AuthzSubject = { Session = None; Users = Set.singleton alice; Peers = Set.empty; Local = false }
+let private noSession : Subject = { Session = None; Users = Set.singleton alice; Peers = Set.empty; Local = false }
 
-let private request subject action resource : AuthzRequest =
+let private request subject action resource : Request =
     { Subject = subject; Action = SecretAction action; Resource = resource }
 
 let private permits msg r = Expect.equal (Policy.authorize r) Permit msg
@@ -131,7 +131,7 @@ let private policyTests =
 // family that lets a sign-in store an owner-scoped credential; the generic secret rows
 // above (user-scope writes always deny) are unchanged.
 let private connActions = [ ConnectCredential; ReadConnectionStatus; ResolveCredential; DisconnectCredential ]
-let private onConnection subject action scope : AuthzRequest =
+let private onConnection subject action scope : Request =
     { Subject = subject; Action = ConnectionAction action; Resource = SecretResource { Scope = scope; Name = name } }
 
 let private connectionPolicyTests =

@@ -1188,8 +1188,8 @@ let private start () =
 
         let syncTerminalSlots (model: ClientModel) =
             let openIds =
-                TerminalProjection.openTerminals model.Terminals |> List.map (fun t -> TerminalId.value t.TerminalId)
-            for terminal in TerminalProjection.openTerminals model.Terminals do
+                Projection.openTerminals model.Terminals |> List.map (fun t -> TerminalId.value t.TerminalId)
+            for terminal in Projection.openTerminals model.Terminals do
                 let key = TerminalId.value terminal.TerminalId
                 if not (terminalSlots.ContainsKey key) then
                     terminalSlots.[key] <-

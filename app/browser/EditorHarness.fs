@@ -716,7 +716,7 @@ do
             let taken =
                 SessionEvent.TerminalLeaseTaken
                     { TerminalId = id; By = ActorRef.PeerRef model.Peer.PeerId; FromSeq = 0 }
-            model <- { model with Terminals = TerminalProjection.applyEvent model.Terminals taken }
+            model <- { model with Terminals = Projection.applyEvent model.Terminals taken }
             render ()
     exposeSnapshot (fun id seq screen cols rows ->
         match TerminalId.create id with

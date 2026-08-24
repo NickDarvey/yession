@@ -262,10 +262,10 @@ module PaneTab =
     /// the strip and stays in the list, which is where every terminal the session has ever
     /// had now lives. A pin on a recording is a person keeping something to READ, which is
     /// what a block or stretch tab is, and those stay however their terminal ends.
-    let isLive (terminals: TerminalProjection) =
+    let isLive (terminals: Projection) =
         function
         | TerminalTab id ->
-            TerminalProjection.tryFind id terminals |> Option.map (fun t -> t.IsOpen) |> Option.defaultValue false
+            Projection.tryFind id terminals |> Option.map (fun t -> t.IsOpen) |> Option.defaultValue false
         | BlockTab _ | StretchTab _ -> true
 
 /// Which read of a tab the pane is showing (Plan 25, stage 2): the reader's POSITION — which
@@ -475,7 +475,7 @@ type ClientModel =
       /// The session environment's UI status, folded from lifecycle events (Step 12).
       Environment   : EnvironmentStatus
       /// Terminals, folded from terminal events (Plan 13) — the panel's structure.
-      Terminals     : TerminalProjection
+      Terminals     : Projection
       /// Each terminal's transcript as this client has it. Separate from the projection
       /// because it arrives on a different leg: facts fold from the event log, bytes
       /// stream from the transcript.
@@ -510,7 +510,7 @@ type ClientModel =
       /// There is nothing on screen to measure, and no measurement is not the same as a
       /// measurement of nothing: the width this reader last had is the truer answer, and the
       /// only one they could have meant.
-      TerminalViewports : Map<TerminalId, TerminalSize>
+      TerminalViewports : Map<TerminalId, Size>
       /// What this client PINNED to the strip, in pin order (Plan 20, stage 1).
       ///
       /// The strip used to be a census — every terminal the session ever had, for ever,
@@ -666,7 +666,7 @@ type ClientMsg =
     /// 2b). Dispatched by the platform half, which is the only half that can measure a box —
     /// and it measures on the edges a render loop cannot see, a splitter dragged or a window
     /// turned, because those change the box without changing anything the model holds.
-    | TerminalViewportMsg of TerminalId * TerminalSize
+    | TerminalViewportMsg of TerminalId * Size
     /// Show something in the pane, in a stated read of it (Plan 25, stage 2).
     ///
     /// ONE message for every way in — a chat chip, a tab in the strip, a row in the list, the
@@ -744,7 +744,7 @@ module ClientModel =
           Peers = Map.empty
           Composer = Unchosen
           Environment = EnvironmentNotStarted
-          Terminals = TerminalProjection.empty
+          Terminals = Projection.empty
           TerminalFeeds = Map.empty
           TerminalKeyframes = Map.empty
           TerminalScreens = Map.empty
@@ -860,7 +860,7 @@ module ClientModel =
     and selectedPane (model: ClientModel) : PaneTab option =
         let exists (tab: PaneTab) =
             match tab with
-            | TerminalTab id -> TerminalProjection.tryFind id model.Terminals |> Option.isSome
+            | TerminalTab id -> Projection.tryFind id model.Terminals |> Option.isSome
             | BlockTab _ | StretchTab _ -> true
         // The mode's SUBJECT rather than only what is on screen: while the list is up it is
         // the read the list covers, so the strip, the header and the composer keep answering
@@ -872,7 +872,7 @@ module ClientModel =
             match pinnedTerminal with
             | Some tab -> Some tab
             | None ->
-                TerminalProjection.openTerminals model.Terminals
+                Projection.openTerminals model.Terminals
                 |> List.map (fun t -> TerminalTab t.TerminalId)
                 |> List.tryHead
 
@@ -906,7 +906,7 @@ module ClientModel =
         |> Option.bind (function WatchingBehind (id, pin) -> Some (id, pin) | _ -> None)
         |> Option.filter (fun (id, _) -> id = terminal)
         |> Option.filter (fun _ ->
-            TerminalProjection.tryFind terminal model.Terminals
+            Projection.tryFind terminal model.Terminals
             |> Option.map (fun view -> view.IsOpen)
             |> Option.defaultValue false)
         |> Option.map snd
@@ -952,7 +952,7 @@ module ClientModel =
     /// OFFERED (`playable`) are the same question asked at two moments, and a surface that
     /// offered a control the builder then refused would be a button that does nothing.
     let private blockRange (terminal: TerminalId) (blockId: BlockId) (model: ClientModel) : (int * int) option =
-        TerminalProjection.tryFind terminal model.Terminals
+        Projection.tryFind terminal model.Terminals
         |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
         |> Option.filter (fun block -> match block.Status with BlockRejected _ -> false | _ -> true)
         |> Option.bind (fun block -> block.ToSeq |> Option.map (fun toSeq -> block.FromSeq, toSeq))
@@ -1011,7 +1011,7 @@ module ClientModel =
                 // replaying a finished session are the same mechanism with a moving end.
                 let pin = rewoundTo terminal model
                 let markers =
-                    TerminalProjection.tryFind terminal model.Terminals
+                    Projection.tryFind terminal model.Terminals
                     |> Option.map (fun view ->
                         view.Blocks
                         |> List.choose (fun block ->
@@ -1046,7 +1046,7 @@ module ClientModel =
                                 | WatchingFrom (id, blockId) when id = terminal -> Some blockId
                                 | _ -> None)
                             |> Option.bind (fun blockId ->
-                                TerminalProjection.tryFind terminal model.Terminals
+                                Projection.tryFind terminal model.Terminals
                                 |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId)))
                             |> Option.bind (fun block -> timeOf block.FromSeq)
                       Poster = pinnedEdge |> Option.map (fun at -> at + posterNudge)
@@ -1061,7 +1061,7 @@ module ClientModel =
         let wanted =
             match tab with
             | BlockTab (terminal, blockId) ->
-                TerminalProjection.tryFind terminal model.Terminals
+                Projection.tryFind terminal model.Terminals
                 |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
                 // A refused command has an empty range and never ran, so there is no screen
                 // it started from and nothing to fetch.
@@ -1096,7 +1096,7 @@ module ClientModel =
         model.TerminalFeeds |> Map.tryFind terminal |> Option.defaultValue TerminalFeed.empty
 
     /// Whether this client holds anything of a terminal's recording (Plan 20, stage 0) — the
-    /// one client-local input `TerminalAffordances.ofView` takes.
+    /// one client-local input `Affordances.ofView` takes.
     ///
     /// Either signal counts, because they are the same fact reaching this client two ways: a
     /// LIVE terminal's length arrives as a catch-up hint before any chunk is fetched, and a
@@ -1108,8 +1108,8 @@ module ClientModel =
         feed.KnownLength > 0 || not (Map.isEmpty feed.Records)
 
     /// What a terminal's row offers this reader.
-    let affordances (view: TerminalView) (model: ClientModel) : TerminalAffordances =
-        TerminalAffordances.ofView (hasRecording view.TerminalId model) view
+    let affordances (view: TerminalView) (model: ClientModel) : Affordances =
+        Affordances.ofView (hasRecording view.TerminalId model) view
 
     /// Whether this tab has a recording to play at all — what decides whether a surface
     /// OFFERS one. Cheap on purpose: map lookups and a list find, no cast built, so a view
@@ -1165,7 +1165,7 @@ module ClientModel =
         | BlockTab _ -> chosen
         | TerminalTab id ->
             chosen
-            || (TerminalProjection.tryFind id model.Terminals
+            || (Projection.tryFind id model.Terminals
                 |> Option.exists (fun view -> (affordances view model).ReplayIsTheRead))
 
     /// The terminal list, in the order it renders (Plan 20, stage 0): the OPEN terminals in
@@ -1211,7 +1211,7 @@ module ClientModel =
     /// stage 2e). Named because it resolves when a person finishes a task, and a queue that
     /// said only *pending* would leave that looking like a stall.
     let awaitsTerminal (entry: PendingAct) (model: ClientModel) : bool =
-        TerminalProjection.tryFind entry.Terminal model.Terminals
+        Projection.tryFind entry.Terminal model.Terminals
         |> Option.bind (fun view -> view.Lease)
         |> Option.isSome
 
@@ -1220,7 +1220,7 @@ module ClientModel =
     /// same reason: they resolve differently — one when a person finishes, this one when
     /// somebody repairs the terminal.
     let awaitsIntegration (entry: PendingAct) (model: ClientModel) : bool =
-        TerminalProjection.tryFind entry.Terminal model.Terminals
+        Projection.tryFind entry.Terminal model.Terminals
         |> Option.map (fun view -> view.IntegrationLost)
         |> Option.defaultValue false
 
@@ -1382,7 +1382,7 @@ module ClientModel =
                 |> List.fold (fun status e -> EnvironmentStatus.applyEvent status e.Event) model.Environment
             let terminals =
                 freshEvents
-                |> List.fold (fun proj e -> TerminalProjection.applyEvent proj e.Event) model.Terminals
+                |> List.fold (fun proj e -> Projection.applyEvent proj e.Event) model.Terminals
             // The roster keeps departed peers: a draft's author may have left while their words
             // are still in the composer, and "who wrote this" must still have an answer.
             let peers =
@@ -1589,7 +1589,7 @@ module ClientModel =
             // cells — and a zero-column terminal is not a narrow one, it is a broken one. The
             // refusal is here, with the state, so that no route to it can put one in front of
             // a command: the reducer is the only way in, and it says no.
-            if TerminalSize.isValid size then
+            if Size.isValid size then
                 { model with TerminalViewports = Map.add terminal size model.TerminalViewports }
             else model
         | ShowInPaneMsg mode ->

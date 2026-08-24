@@ -112,7 +112,7 @@ module private ToolArgs =
                 // Compiled HERE, so a pattern outside the subset is an answer to this call
                 // rather than something discovered part-way through a wait that then has to
                 // explain itself.
-                TerminalPattern.compile source
+                Pattern.compile source
                 |> Result.map (fun compiled ->
                     terminal, from, Some { Until = MatchPattern (compiled, source); TimeoutSeconds = timeout })
 

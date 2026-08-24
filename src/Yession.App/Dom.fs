@@ -290,7 +290,7 @@ module Dom =
         /// list is now the ONLY home of (Plan 20, stage 1) and which therefore keep the names
         /// they have always had: `terminalClose`, `terminalReattach`.
         ///
-        /// Every row verb is rendered ONLY where `TerminalAffordances` says it applies, so a
+        /// Every row verb is rendered ONLY where `Affordances` says it applies, so a
         /// test asserting one is absent is asserting the fold, not a template's mood.
         let terminalListRewind = "data-terminal-list-rewind"
         /// A closed row whose recording the per-terminal cap ate. The stated gap, where a

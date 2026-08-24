@@ -129,9 +129,9 @@ module ConversationProjection =
         | CommandStarted _
         | CommandOutputReceived _
         | CommandCompleted _ -> proj
-        // Terminals (Plan 13) project into `TerminalProjection`, and STILL do not fold here
+        // Terminals (Plan 13) project into `Projection`, and STILL do not fold here
         // (Plan 14, stage 1). This projection is what builds the agent's context, and the
-        // agent already receives block outcomes through `TerminalDigest` — folding them in
+        // agent already receives block outcomes through `Digest` — folding them in
         // here would double-feed the model and silently change what every turn reads.
         //
         // What Plan 14 reverses is the SCREEN, not the fold: a command someone ran does

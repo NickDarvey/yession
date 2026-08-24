@@ -28,7 +28,7 @@ open Yession.Domain
 /// with this code" — which is exactly what `C` and `D` say, and what
 /// `registerOscHandler(133, …)` reads without a parser of ours. Anything richer means
 /// encoding, and encoding means a payload.
-type TerminalMark =
+type Mark =
     /// `A` — the shell is about to print its prompt. The handshake the open-probe waits for,
     /// and the only evidence that instrumentation took at all.
     | MarkPromptStart
@@ -39,7 +39,7 @@ type TerminalMark =
     /// `D;<code>` — the command finished, with this exit status.
     | MarkCommandDone of exitCode: int
 
-module TerminalMarks =
+module Marks =
 
     [<Literal>]
     let private Esc = '\u001b'
@@ -60,7 +60,7 @@ module TerminalMarks =
     /// The body is `<kind>[;<param>]*`, and the nonce rides as a `y=` parameter so the shape
     /// stays a legal OSC 133 sequence — a terminal that does not know about `y=` ignores it,
     /// which keeps the emitter usable in a plain terminal for debugging.
-    let parseBody (nonce: string) (body: string) : TerminalMark option =
+    let parseBody (nonce: string) (body: string) : Mark option =
         let parts = body.Split ';' |> Array.toList
         let hasNonce = parts |> List.exists (fun p -> p = "y=" + nonce)
         if not hasNonce then None
@@ -98,10 +98,10 @@ module TerminalMarks =
     /// **A foreign mark is left alone.** Anything without our nonce — including a nested
     /// shell's own OSC 133 integration — passes through as ordinary output, because it IS
     /// ordinary output as far as this terminal is concerned.
-    let scan (nonce: string) (carry: string) (data: string) : TerminalMark list * string * string =
+    let scan (nonce: string) (carry: string) (data: string) : Mark list * string * string =
         let input = carry + data
         let out = System.Text.StringBuilder ()
-        let marks = ResizeArray<TerminalMark> ()
+        let marks = ResizeArray<Mark> ()
 
         let rec walk (index: int) : string =
             if index >= input.Length then ""

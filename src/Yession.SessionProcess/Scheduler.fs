@@ -163,10 +163,10 @@ module Scheduler =
                                 let events = page.Events |> List.map (fun envelope -> envelope.Event)
                                 let terminals =
                                     events
-                                    |> List.fold TerminalProjection.applyEvent TerminalProjection.empty
-                                    |> TerminalDigest.build
+                                    |> List.fold Projection.applyEvent Projection.empty
+                                    |> Digest.build
                                         (fun id fromSeq toSeq -> readTranscript id fromSeq toSeq |> Transcript.printed)
-                                        (TerminalDigest.window events)
+                                        (Digest.window events)
                                 do! AgentTurn.run log agent (signalFor turn) capabilitiesFor emitUsage (fun () -> turn.TurnId) mintMessageId sessionId projection.Items terminals (selectedModel ()) trigger
                                 // Release the slot and re-arm — unless an interrupt
                                 // already released it (and possibly started a successor).
@@ -218,10 +218,10 @@ module Scheduler =
                                 ConversationProjection.applyEvents None page.Events ConversationProjection.empty
                             let terminals =
                                 events
-                                |> List.fold TerminalProjection.applyEvent TerminalProjection.empty
-                                |> TerminalDigest.build
+                                |> List.fold Projection.applyEvent Projection.empty
+                                |> Digest.build
                                     (fun id fromSeq toSeq -> readTranscript id fromSeq toSeq |> Transcript.printed)
-                                    (TerminalDigest.window events)
+                                    (Digest.window events)
                             do!
                                 AgentTurn.run
                                     log
