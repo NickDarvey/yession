@@ -54,11 +54,12 @@ module ResizeObserver =
 /// not type: it stops at the DOM, and `element.style` belongs to the CSS bindings this
 /// repository does not otherwise need.
 ///
-/// Custom properties specifically. The shell keeps its one layout number — the width of the
-/// terminals column — as `--term-w` on the root element rather than in the model, because it is
-/// presentation: a Lit re-render must not fight it, and a number of pixels is not a fact about
-/// the session. Reading and writing it is all of what is needed here, so it is all that is
-/// declared.
+/// Lengths the stylesheet owns, in both directions. The shell keeps its one layout number —
+/// the width of the terminals column — as `--term-w` on the root element rather than in the
+/// model, because it is presentation: a Lit re-render must not fight it, and a number of pixels
+/// is not a fact about the session. The other direction is the same rule read backwards: what a
+/// box is padded by is the stylesheet's to say, and code that measures a box must ask rather
+/// than carry its own copy of the number.
 [<AutoOpen>]
 module Css =
 
@@ -73,8 +74,12 @@ module Css =
     [<Emit("$0.style.getPropertyValue($1)")>]
     let styleProperty (element: Browser.Types.HTMLElement) (name: string) : string = jsNative
 
-    /// Read a custom property as the cascade RESOLVED it — the design token, whichever
-    /// stylesheet defined it. The counterpart to the one above: that answers "did anybody set
-    /// this here", this answers "what is it".
+    /// Read a property as the cascade RESOLVED it — the design token, whichever stylesheet
+    /// defined it. The counterpart to the one above: that answers "did anybody set this here",
+    /// this answers "what is it".
+    ///
+    /// `getPropertyValue` is the CSSOM's general accessor, so this reads an ordinary property
+    /// (`"padding-left"`, answered in pixels) as readily as a custom one. Both callers here
+    /// want the same thing from it — a length the stylesheet decided, that no F# may assume.
     [<Emit("getComputedStyle($0).getPropertyValue($1)")>]
     let computedProperty (element: Browser.Types.HTMLElement) (name: string) : string = jsNative
