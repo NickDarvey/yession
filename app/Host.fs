@@ -248,7 +248,7 @@ let startFull
             match makeSandboxes with
             | Some make -> make log
             | None -> WorkSandboxes.unavailable
-        let environment = sandboxes.EnvironmentFor SandboxName.defaultName
+        let environment = sandboxes.EnvironmentFor SandboxRef.defaultRef
 
         let mintTurnId () =
             match AgentTurnId.create (string (Guid.NewGuid ())) with
@@ -461,7 +461,7 @@ let startFull
               // manager the list's buttons do. One implementation, two surfaces.
               OpenTerminal =
                 fun name sandbox ->
-                    terminals.OpenAgentTerminal (defaultArg sandbox SandboxName.defaultName) name
+                    terminals.OpenAgentTerminal (defaultArg sandbox SandboxRef.defaultRef) name
               CloseTerminal =
                 fun id ->
                     async {

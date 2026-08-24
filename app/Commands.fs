@@ -116,7 +116,7 @@ let dispatch (services: CommandServices) : CommandDispatch =
                                         // saying so once somebody has decided where.
                                         let unset =
                                             (services.Terminals ()).Profiles ()
-                                            |> ShellProfileProjection.workingDirectory SandboxName.defaultName
+                                            |> ShellProfileProjection.workingDirectory SandboxRef.defaultRef
                                             |> Option.isNone
                                         return
                                             Ok (
@@ -164,7 +164,7 @@ let dispatch (services: CommandServices) : CommandDispatch =
                                             | names ->
                                                 sprintf
                                                     " New terminals in %s start where the sandbox puts them again."
-                                                    (names |> List.map SandboxName.value |> String.concat ", ")
+                                                    (names |> List.map SandboxRef.render |> String.concat ", ")
                                         return
                                             Ok (
                                                 sprintf
@@ -201,8 +201,8 @@ let dispatch (services: CommandServices) : CommandDispatch =
             async {
                 match decodeArgs invocation.Args with
                 | name :: forward ->
-                    match SandboxName.create name with
-                    | Error e -> return Error (sprintf "not a sandbox name: %s" e)
+                    match SandboxRef.parse name with
+                    | Error e -> return Error (sprintf "not a sandbox: %s" e)
                     | Ok name ->
                         match! (services.Sandboxes ()).Ensure (sandboxCaller invocation) name forward with
                         | Error e -> return Error e
@@ -216,7 +216,7 @@ let dispatch (services: CommandServices) : CommandDispatch =
                                 Ok (
                                     sprintf
                                         "sandbox '%s' is up on %s, %s — run things in it with execute_command"
-                                        (SandboxName.value entry.Name)
+                                        (SandboxRef.render entry.Ref)
                                         entry.Backend
                                         forwarding)
                 | [] -> return Error "start_work_sandbox takes a sandbox name"
@@ -227,14 +227,14 @@ let dispatch (services: CommandServices) : CommandDispatch =
             async {
                 match decodeArgs invocation.Args with
                 | [ name ] ->
-                    match SandboxName.create name with
-                    | Error e -> return Error (sprintf "not a sandbox name: %s" e)
+                    match SandboxRef.parse name with
+                    | Error e -> return Error (sprintf "not a sandbox: %s" e)
                     | Ok name ->
                         match! (services.Sandboxes ()).Stop (sandboxCaller invocation) name with
                         | Error e -> return Error e
                         | Ok () ->
                             services.Invalidate WorkSandboxes.queryName
-                            return Ok (sprintf "sandbox '%s' is stopped; anything running in it is gone" (SandboxName.value name))
+                            return Ok (sprintf "sandbox '%s' is stopped; anything running in it is gone" (SandboxRef.render name))
                 | other -> return Error (sprintf "stop_work_sandbox takes one sandbox name, got %d arguments" (List.length other))
             }
 
@@ -243,8 +243,8 @@ let dispatch (services: CommandServices) : CommandDispatch =
             async {
                 match decodeArgs invocation.Args with
                 | [ name; cwd ] ->
-                    match SandboxName.create name with
-                    | Error e -> return Error (sprintf "not a sandbox name: %s" e)
+                    match SandboxRef.parse name with
+                    | Error e -> return Error (sprintf "not a sandbox: %s" e)
                     | Ok name ->
                         // The empty string is the CLEAR. The argument list is strings, so the
                         // absence has to be encoded as one — and it is encoded HERE and read
@@ -324,23 +324,23 @@ let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCap
           fun name forward ->
             let summary =
                 match WorkSandboxes.normaliseForward forward with
-                | [] -> sprintf "start_work_sandbox %s" (SandboxName.value name)
+                | [] -> sprintf "start_work_sandbox %s" (SandboxRef.render name)
                 | names ->
-                    sprintf "start_work_sandbox %s forwarding %s" (SandboxName.value name) (String.concat ", " names)
-            gated startWorkSandboxTool (SandboxName.value name :: forward) summary
+                    sprintf "start_work_sandbox %s forwarding %s" (SandboxRef.render name) (String.concat ", " names)
+            gated startWorkSandboxTool (SandboxRef.render name :: forward) summary
         StopWorkSandbox =
           fun name ->
             gated
                 stopWorkSandboxTool
-                [ SandboxName.value name ]
-                (sprintf "stop_work_sandbox %s" (SandboxName.value name))
+                [ SandboxRef.render name ]
+                (sprintf "stop_work_sandbox %s" (SandboxRef.render name))
         SetShellProfile =
           fun name cwd ->
             let summary =
                 match cwd with
-                | Some cwd -> sprintf "set_shell_profile %s -> %s" (SandboxName.value name) cwd
-                | None -> sprintf "set_shell_profile %s -> wherever the sandbox puts them" (SandboxName.value name)
-            gated setShellProfileTool [ SandboxName.value name; defaultArg cwd "" ] summary }
+                | Some cwd -> sprintf "set_shell_profile %s -> %s" (SandboxRef.render name) cwd
+                | None -> sprintf "set_shell_profile %s -> wherever the sandbox puts them" (SandboxRef.render name)
+            gated setShellProfileTool [ SandboxRef.render name; defaultArg cwd "" ] summary }
 
 /// Every command verb bound to ONE turn's actor: the acting party on the events is the agent,
 /// the credential is the turn human's (Plan 08). The Host leaves these as denials because

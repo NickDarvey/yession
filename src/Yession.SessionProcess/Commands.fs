@@ -48,7 +48,7 @@ module SessionCommands =
                 // Choosing a NAMED sandbox is likewise a command, and commands are the
                 // agent's (Plan 15) — a human who wants a terminal in `test` asks for one,
                 // and sees the act-line for it.
-                match! openTerminal (actorFor peerId) (SandboxShell SandboxName.defaultName) title with
+                match! openTerminal (actorFor peerId) (SandboxShell SandboxRef.defaultRef) title with
                 | Ok _ -> return CommandAccepted
                 | Error reason -> return CommandRejected reason
             | CloseTerminal terminalId ->

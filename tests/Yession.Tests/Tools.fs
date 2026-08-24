@@ -200,7 +200,7 @@ let private sessionTests =
                             SetShellProfile =
                               fun name cwd ->
                                 async {
-                                    seen <- Some (SandboxName.value name, cwd)
+                                    seen <- Some (SandboxRef.render name, cwd)
                                     return Ok { Status = CommandRan "set"; Tool = "set_shell_profile"; Summary = "s"; Handle = None }
                                 } }
                 let! _ =
@@ -217,7 +217,7 @@ let private sessionTests =
                             SetShellProfile =
                               fun name cwd ->
                                 async {
-                                    seen <- Some (SandboxName.value name, cwd)
+                                    seen <- Some (SandboxRef.render name, cwd)
                                     return Ok { Status = CommandRan "cleared"; Tool = "set_shell_profile"; Summary = "s"; Handle = None }
                                 } }
                 let! _ = registry.Invoke (call "yession" "set_shell_profile" """{"sandbox":"test"}""")

@@ -545,7 +545,7 @@ module SessionTerminals =
           /// mutable: a terminal IS a process inside one sandbox, so "moving" it would be
           /// a close and an open, and those already exist. `None` for an ATTACHED source
           /// (Plan 16, part D) — its process is somebody else's, in nothing we run.
-          Sandbox : SandboxName option
+          Sandbox : SandboxRef option
           mutable Shell : PtyHandle option
           /// Whether the last output chunk this terminal captured ended in `\r` — the carry
           /// `Onlcr.normalize` needs to leave a CRLF split across two reads alone. Mutable
@@ -635,7 +635,7 @@ module SessionTerminals =
           /// `reason` is the command that needed it, and becomes the title: the strip says
           /// `npm test` rather than `agent`, a better answer to "what is that terminal for"
           /// than a label would be.
-          AgentTerminal : SandboxName -> string -> Async<Result<TerminalId, string>>
+          AgentTerminal : SandboxRef -> string -> Async<Result<TerminalId, string>>
           /// Open a NAMED terminal for the agent (Plan 20, stage 3) — the same verb a person
           /// has, over the same terminals, so the agent can hold several things open and say
           /// what each is for.
@@ -644,7 +644,7 @@ module SessionTerminals =
           /// limit. A refusal rather than a hold, and that is the whole reason this verb
           /// exists: only the agent knows which of its own terminals it has finished with, so
           /// the answer has to reach it somewhere it can act.
-          OpenAgentTerminal : SandboxName -> string -> Async<Result<TerminalId, string>>
+          OpenAgentTerminal : SandboxRef -> string -> Async<Result<TerminalId, string>>
           /// Whether the agent opened this terminal. What decides if it may close it, and what
           /// the roster reports as `Mine`.
           OpenedByAgent : TerminalId -> bool
@@ -724,7 +724,7 @@ module SessionTerminals =
           /// The directory arrives, and is stored, in the vocabulary the rest of the session
           /// speaks (`SandboxPath`): as a terminal in that sandbox reaches it. What the
           /// sandbox resolves it to is the sandbox's own business and stays there.
-          SetProfile : ActorRef -> SandboxName -> string option -> Async<Result<string, string>>
+          SetProfile : ActorRef -> SandboxRef -> string option -> Async<Result<string, string>>
           /// Clear every profile whose directory is inside this tree, because the tree is
           /// about to stop existing (Plan 26; Plan 25's upstream half). Answers with the
           /// sandboxes it cleared, so the caller can say so.
@@ -737,7 +737,7 @@ module SessionTerminals =
           /// deleting a tree knows only that it is going, and a caller left to work out
           /// WHICH profiles that invalidates is a caller that can get it wrong somewhere no
           /// cheap test reaches.
-          ClearProfilesUnder : ActorRef -> string -> Async<SandboxName list>
+          ClearProfilesUnder : ActorRef -> string -> Async<SandboxRef list>
           /// Every sandbox's profile as it stands — what the `shell_profile` query reads.
           Profiles : unit -> ShellProfileProjection
           /// Reclaim any lease that has gone idle with something queued behind it (Plan 13,
@@ -810,7 +810,7 @@ module SessionTerminals =
         // terminal names the one it belongs to at open. Total by contract: a name this
         // session does not have resolves to an environment that refuses with the reason,
         // so there is no second way for a terminal to be told no.
-        (environmentFor: SandboxName -> SessionEnvironment.SessionEnvironment)
+        (environmentFor: SandboxRef -> SessionEnvironment.SessionEnvironment)
         (openTranscript: OpenTranscript)
         // Reading one back (Plan 19). The manager holds the WRITER for every live terminal
         // and none of the readers, because the two have opposite shapes — see
@@ -927,8 +927,8 @@ module SessionTerminals =
         /// are closed at boot rather than run in.
         let environmentOf (id: TerminalId) : SessionEnvironment.SessionEnvironment =
             match live.TryGetValue (TerminalId.value id) with
-            | true, terminal -> environmentFor (Option.defaultValue SandboxName.defaultName terminal.Sandbox)
-            | _ -> environmentFor SandboxName.defaultName
+            | true, terminal -> environmentFor (Option.defaultValue SandboxRef.defaultRef terminal.Sandbox)
+            | _ -> environmentFor SandboxRef.defaultRef
 
         let append event =
             async {
@@ -1120,7 +1120,7 @@ module SessionTerminals =
         /// down and the terminal keeps the per-block path. Deciding by observation rather than
         /// by shell name is the point: a POSIX `sh` has no prompt hook at all and rides its
         /// marks in PS1, which is the shakiest of the three and cannot be trusted on a name.
-        let openShell (id: TerminalId) (terminal: LiveTerminal) (sandbox: SandboxName) : Async<unit> =
+        let openShell (id: TerminalId) (terminal: LiveTerminal) (sandbox: SandboxRef) : Async<unit> =
             async {
                 let key = TerminalId.value id
                 let nonce = mintNonce ()
@@ -1937,7 +1937,7 @@ module SessionTerminals =
         /// The general-purpose one is not counted, so a plain command never has to ask.
         let agentTerminalLimit = 4
 
-        let openAgentTerminal (sandbox: SandboxName) (name: string) : Async<Result<TerminalId, string>> =
+        let openAgentTerminal (sandbox: SandboxRef) (name: string) : Async<Result<TerminalId, string>> =
             async {
                 let held =
                     agentOpened
@@ -1956,11 +1956,11 @@ module SessionTerminals =
                             sprintf
                                 "you already have %d terminals open in %s, which is the limit — close one you have finished with"
                                 held
-                                (SandboxName.value sandbox))
+                                (SandboxRef.render sandbox))
                 else
                     let title =
-                        if sandbox = SandboxName.defaultName then name
-                        else sprintf "[%s] %s" (SandboxName.value sandbox) name
+                        if sandbox = SandboxRef.defaultRef then name
+                        else sprintf "[%s] %s" (SandboxRef.render sandbox) name
                     match! openTerminal ActorRef.Agent (SandboxShell sandbox) title with
                     | Error reason -> return Error reason
                     | Ok id ->
@@ -1968,9 +1968,9 @@ module SessionTerminals =
                         return Ok id
             }
 
-        let agentTerminal (sandbox: SandboxName) (reason: string) : Async<Result<TerminalId, string>> =
+        let agentTerminal (sandbox: SandboxRef) (reason: string) : Async<Result<TerminalId, string>> =
             async {
-                let key = SandboxName.value sandbox
+                let key = SandboxRef.render sandbox
                 match agentTerminals.TryGetValue key with
                 | true, id when isOpen id -> return Ok id
                 | _ ->
@@ -1978,8 +1978,8 @@ module SessionTerminals =
                     // The sandbox is in the title when it is not the default one: several
                     // terminals in a strip are navigable only if each says where it is.
                     let title =
-                        if sandbox = SandboxName.defaultName then label
-                        else sprintf "[%s] %s" (SandboxName.value sandbox) label
+                        if sandbox = SandboxRef.defaultRef then label
+                        else sprintf "[%s] %s" (SandboxRef.render sandbox) label
                     match! openTerminal ActorRef.Agent (SandboxShell sandbox) title with
                     | Error reason -> return Error reason
                     | Ok id ->
@@ -1993,9 +1993,9 @@ module SessionTerminals =
         /// Validate, append, apply, answer — one verb, because a caller that could do the
         /// second without the first is a caller that can point every future terminal at a
         /// directory that is not there.
-        let setProfile (actor: ActorRef) (sandbox: SandboxName) (cwd: string option) : Async<Result<string, string>> =
+        let setProfile (actor: ActorRef) (sandbox: SandboxRef) (cwd: string option) : Async<Result<string, string>> =
             async {
-                let name = SandboxName.value sandbox
+                let name = SandboxRef.render sandbox
                 // Checked INSIDE the sandbox, by asking it. A host-side existence check
                 // would be wrong twice over: under docker the path is in a container this
                 // process cannot see, and under srt the sandbox's read scope is not ours.
@@ -2140,7 +2140,7 @@ module SessionTerminals =
         /// a place they already start in. The terminals open in it keep running — a shell
         /// whose directory is deleted is a fact of the filesystem, not ours to tidy — and the
         /// next one to open lands somewhere that exists.
-        let clearProfilesUnder (actor: ActorRef) (tree: string) : Async<SandboxName list> =
+        let clearProfilesUnder (actor: ActorRef) (tree: string) : Async<SandboxRef list> =
             async {
                 let affected =
                     ShellProfileProjection.listed profiles
@@ -2397,7 +2397,7 @@ module TerminalCommands =
         /// The session's agent terminal, opened on first use with `reason` as its TITLE — so
         /// the strip says "running the test suite" rather than "agent", which is what the
         /// retired `ensure_environment`'s one genuinely useful argument becomes.
-        (agentTerminal: SandboxName -> string -> Async<Result<TerminalId, string>>)
+        (agentTerminal: SandboxRef -> string -> Async<Result<TerminalId, string>>)
         (mintQueueId: unit -> QueueId)
         (now: unit -> DateTimeOffset)
         (onChanged: OnChanged)
@@ -2505,7 +2505,7 @@ module TerminalCommands =
                             // it is for. One per sandbox, so a command sent to `test` does
                             // not silently run in `default`.
                             | Some (InSandbox sandbox) -> return! agentTerminal sandbox request.Command
-                            | None -> return! agentTerminal SandboxName.defaultName request.Command
+                            | None -> return! agentTerminal SandboxRef.defaultRef request.Command
                         }
                     match terminal, syncedOf () with
                     | Error reason, _ -> return Error reason

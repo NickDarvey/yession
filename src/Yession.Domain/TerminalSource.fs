@@ -160,7 +160,7 @@ type TerminalSource =
     /// exit codes. Opening one IS a need, so it ensures that sandbox exists. The name rides
     /// the case rather than a parallel argument, because "which sandbox" is only a question
     /// a shell has: an attached stream is somebody else's process and has no answer.
-    | SandboxShell of SandboxName
+    | SandboxShell of SandboxRef
     /// A stream somebody else OFFERED (Plan 19). It does NOT ensure the sandbox: a session
     /// that only talks to a serial port should not start a container.
     ///

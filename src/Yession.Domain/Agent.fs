@@ -134,7 +134,7 @@ type CommandTarget =
     | InTerminal of TerminalId
     /// A named WorkSandbox: the agent's terminal there, opened on first use. This is what
     /// makes a started sandbox usable rather than merely listed.
-    | InSandbox of SandboxName
+    | InSandbox of SandboxRef
 
 /// One request to run a command (Plan 20). A record rather than positional arguments, because
 /// this is the one door and every capability the agent gains arrives here — `background` came
@@ -342,7 +342,7 @@ type TerminalSummary =
       /// as.
       Name : string
       /// Which WorkSandbox its shell lives in. `None` for a stream somebody else produces.
-      Sandbox : SandboxName option
+      Sandbox : SandboxRef option
       /// Whether the agent opened it. Not a permission — it is what the agent needs in order
       /// to know which of these are its own to close.
       Mine : bool
@@ -355,7 +355,7 @@ type TerminalSummary =
 /// Refuses, with the limit named, when the sandbox already has as many as the agent may hold.
 /// A refusal rather than a queue: the agent is the only party who can decide which of its own
 /// terminals is finished with, so the answer has to reach it where it can act on it.
-type OpenTerminal = string -> SandboxName option -> Async<Result<TerminalId, string>>
+type OpenTerminal = string -> SandboxRef option -> Async<Result<TerminalId, string>>
 
 /// Close one of the agent's own terminals. Refuses on a terminal a PERSON opened: a human
 /// typing in their shell is not the agent's to end, and the list gives them the same verb over
@@ -422,11 +422,11 @@ type DeleteSessionSecret = SecretName -> Async<Result<bool, string>>
 /// `forward` is a list of credential NAMES. Each resolves for the turn human (Plan 08
 /// precedence) into that sandbox's environment; the value goes nowhere else, and the
 /// event records which names and whose, never what.
-type StartWorkSandbox = SandboxName -> string list -> Async<Result<CommandOutcome, string>>
+type StartWorkSandbox = SandboxRef -> string list -> Async<Result<CommandOutcome, string>>
 
 /// Stop one, taking whatever is running in it down. The way to change a sandbox's
 /// forwarding, and stated as such wherever the change is refused.
-type StopWorkSandbox = SandboxName -> Async<Result<CommandOutcome, string>>
+type StopWorkSandbox = SandboxRef -> Async<Result<CommandOutcome, string>>
 
 /// Set (or clear) where a shell opened in one sandbox starts (Plan 25). `None` clears it,
 /// back to the sandbox's own default — one verb, because "what does a new terminal do" has
@@ -434,7 +434,7 @@ type StopWorkSandbox = SandboxName -> Async<Result<CommandOutcome, string>>
 ///
 /// A DIRECTORY and not a script: each field of a profile is applied by the spawn, so this
 /// can never become a second way to run something. See `ShellProfile`.
-type SetShellProfile = SandboxName -> string option -> Async<Result<CommandOutcome, string>>
+type SetShellProfile = SandboxRef -> string option -> Async<Result<CommandOutcome, string>>
 
 /// Answer one of the session's registered queries (Plan 15). The agent reaches the SAME
 /// registry the humans' settings surface streams from — that is the whole point of a

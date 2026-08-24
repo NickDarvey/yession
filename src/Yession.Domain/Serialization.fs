@@ -43,6 +43,18 @@ module Codec =
         { Encode = SandboxName.value >> Encode.string
           Decode = viaSmartCtor SandboxName.create Decode.string }
 
+    /// A sandbox as the log spells it. `render`/`parse` are each other's inverse and a
+    /// session-owned ref renders to the bare name, so this reads every log ever written
+    /// without a compatibility branch.
+    let private sandboxRef : Codec<SandboxRef> =
+        { Encode = fun (r: SandboxRef) -> Encode.string (SandboxRef.render r)
+          Decode =
+            Decode.string
+            |> Decode.andThen (fun raw ->
+                match SandboxRef.parse raw with
+                | Ok r -> Decode.succeed r
+                | Error e -> Decode.fail e) }
+
     let messageId : Codec<MessageId> =
         { Encode = MessageId.value >> Encode.string
           Decode = viaSmartCtor MessageId.create Decode.string }
@@ -706,7 +718,7 @@ module Codec =
                     [ "terminalId", terminalId.Encode p.TerminalId
                       "openedBy", actor.Encode p.OpenedBy
                       "title", Encode.string p.Title
-                      "sandbox", Encode.option sandboxName.Encode p.Sandbox
+                      "sandbox", Encode.option sandboxRef.Encode p.Sandbox
                       "renewable", Encode.bool p.Renewable ]
           Decode =
             Decode.object (fun get ->
@@ -724,8 +736,8 @@ module Codec =
                   TerminalOpened.Renewable =
                     get.Optional.Field "renewable" Decode.bool |> Option.defaultValue false
                   TerminalOpened.Sandbox =
-                    if written then get.Optional.Field "sandbox" sandboxName.Decode
-                    else Some SandboxName.defaultName }) }
+                    if written then get.Optional.Field "sandbox" sandboxRef.Decode
+                    else Some SandboxRef.defaultRef }) }
 
     let private terminalClosed : Codec<TerminalClosed> =
         { Encode =
@@ -941,7 +953,7 @@ module Codec =
             fun (p: WorkSandboxStarted) ->
                 Encode.object
                     [ "messageId", messageId.Encode p.MessageId
-                      "sandbox", sandboxName.Encode p.Sandbox
+                      "sandbox", sandboxRef.Encode p.Sandbox
                       "backend", Encode.string p.Backend
                       // Names only. There is no branch of this codec that can carry a
                       // credential VALUE, which is the point: the log is replicated to
@@ -952,7 +964,7 @@ module Codec =
           Decode =
             Decode.object (fun get ->
                 { WorkSandboxStarted.MessageId = get.Required.Field "messageId" messageId.Decode
-                  WorkSandboxStarted.Sandbox = get.Required.Field "sandbox" sandboxName.Decode
+                  WorkSandboxStarted.Sandbox = get.Required.Field "sandbox" sandboxRef.Decode
                   WorkSandboxStarted.Backend = get.Required.Field "backend" Decode.string
                   WorkSandboxStarted.Forwarded = get.Required.Field "forwarded" (Decode.list Decode.string)
                   WorkSandboxStarted.CredentialOwner = get.Required.Field "credentialOwner" (Decode.option actor.Decode)
@@ -963,12 +975,12 @@ module Codec =
             fun (p: WorkSandboxStopped) ->
                 Encode.object
                     [ "messageId", messageId.Encode p.MessageId
-                      "sandbox", sandboxName.Encode p.Sandbox
+                      "sandbox", sandboxRef.Encode p.Sandbox
                       "actor", actor.Encode p.Actor ]
           Decode =
             Decode.object (fun get ->
                 { WorkSandboxStopped.MessageId = get.Required.Field "messageId" messageId.Decode
-                  WorkSandboxStopped.Sandbox = get.Required.Field "sandbox" sandboxName.Decode
+                  WorkSandboxStopped.Sandbox = get.Required.Field "sandbox" sandboxRef.Decode
                   WorkSandboxStopped.Actor = get.Required.Field "actor" actor.Decode }) }
 
     let private shellProfileSet : Codec<ShellProfileSet> =
@@ -976,7 +988,7 @@ module Codec =
             fun (p: ShellProfileSet) ->
                 Encode.object
                     [ "messageId", messageId.Encode p.MessageId
-                      "sandbox", sandboxName.Encode p.Sandbox
+                      "sandbox", sandboxRef.Encode p.Sandbox
                       // The CLEAR rides as an absent value, which is what makes it
                       // indistinguishable from a line an older build wrote — and that is the
                       // right answer for both: no profile.
@@ -985,7 +997,7 @@ module Codec =
           Decode =
             Decode.object (fun get ->
                 { ShellProfileSet.MessageId = get.Required.Field "messageId" messageId.Decode
-                  ShellProfileSet.Sandbox = get.Required.Field "sandbox" sandboxName.Decode
+                  ShellProfileSet.Sandbox = get.Required.Field "sandbox" sandboxRef.Decode
                   ShellProfileSet.WorkingDirectory = get.Optional.Field "workingDirectory" Decode.string
                   ShellProfileSet.Actor = get.Required.Field "actor" actor.Decode }) }
 

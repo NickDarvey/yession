@@ -71,7 +71,7 @@ let createFull
                     |> Option.map (fun make ->
                         let createSandbox = make request.SessionId
                         fun log ->
-                            let create (name: SandboxName) (extraEnv: Map<string, string>) =
+                            let create (name: SandboxRef) (extraEnv: Map<string, string>) =
                                 let prepare =
                                     Sandboxes.preparePolicy
                                         HostBackend
@@ -90,7 +90,7 @@ let createFull
                                                 | Ok policy -> return Ok { policy with Env = Sandboxes.mergeEnv policy.Env extraEnv }
                                             })
                                         (Sandboxes.summaryFor HostBackend EnvironmentSpec.defaults)
-                                        (sprintf "env-%s-%s" (SessionId.value request.SessionId) (SandboxName.value name)))
+                                        (sprintf "env-%s-%s" (SessionId.value request.SessionId) (SandboxRef.render name)))
                             match WorkSandboxes.create
                                     { Backend = SandboxBackend.describe HostBackend
                                       Credentials = []

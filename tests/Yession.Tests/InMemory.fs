@@ -212,14 +212,14 @@ let tests =
                     WorkSandboxes.create
                         { Backend = "scripted"
                           Credentials = []
-                          Create = fun name _ -> Ok (environmentNamed (SandboxName.value name))
+                          Create = fun name _ -> Ok (environmentNamed (SandboxRef.render name))
                           Log = log
                           Clock = fun () -> System.DateTimeOffset (2026, 1, 1, 0, 0, 0, System.TimeSpan.Zero) }
                     |> expect
                 let! host = Host.startWithEnvironment None (Some makeSandboxes) None (sid ()) 0
 
                 let caller : WorkSandboxes.SandboxCaller = { Actor = ActorRef.Agent; Credential = ActorRef.Agent }
-                let test = SandboxName.create "test" |> expect
+                let test = SandboxRef.parse "test" |> expect
                 let! started = host.Sandboxes.Ensure caller test []
                 Expect.isTrue (Result.isOk started) "the sandbox starts"
 
@@ -407,8 +407,8 @@ let tests =
                       Stop = fun () -> async { return () }
                       CurrentRef = fun () -> Some "scripted" }
                 let! host = Host.startWithEnvironment None (Some (fun _ -> WorkSandboxes.singleton "scripted" environment)) None (sid ()) 0
-                let! held = host.Terminals.OpenAgentTerminal SandboxName.defaultName "holds"
-                let! frees = host.Terminals.OpenAgentTerminal SandboxName.defaultName "frees"
+                let! held = host.Terminals.OpenAgentTerminal SandboxRef.defaultRef "holds"
+                let! frees = host.Terminals.OpenAgentTerminal SandboxRef.defaultRef "frees"
                 let holds = held |> expect
                 let releases = frees |> expect
                 Expect.notEqual releases holds "two terminals, which is what makes the rest of this a question"

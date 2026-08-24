@@ -27,7 +27,7 @@ let private ada = UserRef (UserId.create "ada" |> expect)
 let private fixedClock () = DateTimeOffset (2026, 1, 1, 0, 0, 0, TimeSpan.Zero)
 let private newLog () : EventLog<SessionEvent> = InMemoryEventLog.create sessionId fixedClock
 
-let private sandbox (raw: string) = SandboxName.create raw |> expect
+let private sandbox (raw: string) = SandboxRef.parse raw |> expect
 
 /// A stand-in environment that records nothing but whether it is up. The registry's
 /// contract is about WHICH environments exist and what they were built with, so a real
@@ -51,7 +51,7 @@ let private registry (log: EventLog<SessionEvent>) (credentials: WorkSandboxes.C
               Credentials = credentials
               Create =
                 fun name env ->
-                    built.Add (SandboxName.value name, env)
+                    built.Add (SandboxRef.render name, env)
                     Ok (fakeEnvironment ())
               Log = log
               Clock = fixedClock }
@@ -86,7 +86,7 @@ let private nameTests =
                 Expect.isTrue (Result.isError (SandboxName.create raw)) (sprintf "'%s' is not a name" raw)
 
         testCase "the default is the one every session has always had" <| fun () ->
-            Expect.equal (SandboxName.value SandboxName.defaultName) "default" "named, not implicit"
+            Expect.equal (SandboxRef.render SandboxRef.defaultRef) "default" "named, not implicit"
     ]
 
 let private normaliseTests =
@@ -116,7 +116,7 @@ let private ensureTests =
                 let! second = sandboxes.Ensure caller (sandbox "test") []
                 let one = expect first
                 let two = expect second
-                Expect.equal one.Name two.Name "the same sandbox comes back"
+                Expect.equal one.Ref two.Ref "the same sandbox comes back"
                 Expect.equal
                     (built |> Seq.filter (fun (name, _) -> name = "test") |> Seq.length)
                     1
@@ -177,9 +177,9 @@ let private ensureTests =
             async {
                 let log = newLog ()
                 let sandboxes, _ = registry log []
-                let! _ = sandboxes.Ensure caller SandboxName.defaultName []
-                let! _ = sandboxes.Stop caller SandboxName.defaultName
-                match! (sandboxes.EnvironmentFor SandboxName.defaultName).Ensure None "a terminal was opened" with
+                let! _ = sandboxes.Ensure caller SandboxRef.defaultRef []
+                let! _ = sandboxes.Stop caller SandboxRef.defaultRef
+                match! (sandboxes.EnvironmentFor SandboxRef.defaultRef).Ensure None "a terminal was opened" with
                 | EnvironmentAvailable -> ()
                 | EnvironmentUnavailable reason -> failwithf "default should still be reachable: %s" reason
             }

@@ -47,7 +47,9 @@ type SandboxCaller =
 /// environment underneath is lazy, and `default` exists from boot without a sandbox
 /// existing anywhere.
 type RunningSandbox =
-    { Name : SandboxName
+    { /// Which sandbox, scope included — a repo's `dev` and the session's own are two
+      /// different sandboxes that happen to share a name.
+      Ref : SandboxRef
       Backend : string
       /// The credential names forwarded into it, normalised (trimmed, deduped, sorted) so
       /// that "is this the same configuration" is a comparison rather than a judgement.
@@ -64,19 +66,19 @@ type WorkSandboxesConfig =
       /// Build the environment for a name, with the resolved credentials as extra policy
       /// env. Synchronous and fallible: whether this backend can host another sandbox is
       /// known without starting one.
-      Create : SandboxName -> Map<string, string> -> Result<SessionEnvironment.SessionEnvironment, string>
+      Create : SandboxRef -> Map<string, string> -> Result<SessionEnvironment.SessionEnvironment, string>
       Log : EventLog<SessionEvent>
       Clock : unit -> DateTimeOffset }
 
 type WorkSandboxes =
     { /// Get-or-create by name. Idempotent when the configuration matches; a legible
       /// error when it does not.
-      Ensure : SandboxCaller -> SandboxName -> string list -> Async<Result<RunningSandbox, string>>
-      Stop : SandboxCaller -> SandboxName -> Async<Result<unit, string>>
+      Ensure : SandboxCaller -> SandboxRef -> string list -> Async<Result<RunningSandbox, string>>
+      Stop : SandboxCaller -> SandboxRef -> Async<Result<unit, string>>
       /// The environment a terminal runs in. Total, because a terminal has to be told no
       /// in the same shape it is told anything else — an unknown name resolves to an
       /// environment that refuses every spawn with the reason.
-      EnvironmentFor : SandboxName -> SessionEnvironment.SessionEnvironment
+      EnvironmentFor : SandboxRef -> SessionEnvironment.SessionEnvironment
       /// Every sandbox the session has, `default` first.
       Listed : unit -> RunningSandbox list
       /// Stop all of them — session shutdown. Sandbox lifetime is session lifetime.
@@ -94,11 +96,11 @@ let normaliseForward (names: string list) : string list =
 
 /// An environment for a name the session does not have. Refuses in the same shape a real
 /// one does, naming what is wrong rather than the generic "no environment".
-let private missing (name: SandboxName) : SessionEnvironment.SessionEnvironment =
+let private missing (name: SandboxRef) : SessionEnvironment.SessionEnvironment =
     let reason =
         sprintf
             "there is no sandbox named '%s' in this session — start_work_sandbox creates one"
-            (SandboxName.value name)
+            (SandboxRef.render name)
     { Ensure = fun _ _ -> async { return EnvironmentUnavailable reason }
       Spawn = fun _ _ -> async { return Error reason }
       SpawnPty = fun _ _ _ _ -> async { return Error reason }
@@ -109,20 +111,22 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
     // `default` exists from boot, because it is the sandbox every session has always had:
     // a terminal opened without naming one lands here, and nothing about a pre-Plan-15
     // session changes. It is created eagerly and started lazily, exactly as before.
-    config.Create SandboxName.defaultName Map.empty
+    config.Create SandboxRef.defaultRef Map.empty
     |> Result.map (fun defaultEnvironment ->
 
-    let mutable entries : (string * RunningSandbox) list =
-        [ SandboxName.value SandboxName.defaultName,
-          { Name = SandboxName.defaultName
+    // Keyed by the ref itself: it is a structural value, so a lookup is an equality rather
+    // than a rendered string two call sites have to agree on how to spell.
+    let mutable entries : (SandboxRef * RunningSandbox) list =
+        [ SandboxRef.defaultRef,
+          { Ref = SandboxRef.defaultRef
             Backend = config.Backend
             Forwarded = []
             StartedBy = None
             StartedAt = None
             Environment = defaultEnvironment } ]
 
-    let find (name: SandboxName) =
-        entries |> List.tryFind (fun (key, _) -> key = SandboxName.value name) |> Option.map snd
+    let find (name: SandboxRef) =
+        entries |> List.tryFind (fun (key, _) -> key = name) |> Option.map snd
 
     let mintMessageId () : MessageId =
         match MessageId.create (string (Guid.NewGuid ())) with
@@ -166,7 +170,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
             | None -> return Ok resolved
         }
 
-    let ensure (caller: SandboxCaller) (name: SandboxName) (forward: string list) : Async<Result<RunningSandbox, string>> =
+    let ensure (caller: SandboxCaller) (name: SandboxRef) (forward: string list) : Async<Result<RunningSandbox, string>> =
         async {
             let wanted = normaliseForward forward
             match find name with
@@ -174,7 +178,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                 // The idempotent case. Make sure it is actually up (the environment is
                 // lazy, and a stopped one recreates here), and record NOTHING — a second
                 // ask changed nothing, so the timeline should not claim it did.
-                match! existing.Environment.Ensure None (sprintf "sandbox '%s' was asked for" (SandboxName.value name)) with
+                match! existing.Environment.Ensure None (sprintf "sandbox '%s' was asked for" (SandboxRef.render name)) with
                 | EnvironmentUnavailable reason -> return Error reason
                 | EnvironmentAvailable -> return Ok existing
             | Some existing ->
@@ -183,7 +187,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                     Error (
                         sprintf
                             "sandbox '%s' is already running and forwards %s, not %s — stop_work_sandbox it first if you want to change that (anything running in it dies with it)"
-                            (SandboxName.value name)
+                            (SandboxRef.render name)
                             (render existing.Forwarded)
                             (render wanted))
             | None ->
@@ -193,18 +197,18 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                     match config.Create name credentialEnv with
                     | Error e -> return Error e
                     | Ok environment ->
-                        match! environment.Ensure None (sprintf "sandbox '%s' was started" (SandboxName.value name)) with
+                        match! environment.Ensure None (sprintf "sandbox '%s' was started" (SandboxRef.render name)) with
                         | EnvironmentUnavailable reason -> return Error reason
                         | EnvironmentAvailable ->
                             let startedAt = config.Clock ()
                             let entry =
-                                { Name = name
+                                { Ref = name
                                   Backend = config.Backend
                                   Forwarded = wanted
                                   StartedBy = Some caller.Actor
                                   StartedAt = Some startedAt
                                   Environment = environment }
-                            entries <- entries @ [ SandboxName.value name, entry ]
+                            entries <- entries @ [ name, entry ]
                             do!
                                 append
                                     caller.Actor
@@ -218,11 +222,11 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                             return Ok entry
         }
 
-    let stop (caller: SandboxCaller) (name: SandboxName) : Async<Result<unit, string>> =
+    let stop (caller: SandboxCaller) (name: SandboxRef) : Async<Result<unit, string>> =
         async {
             match find name with
             | None ->
-                return Error (sprintf "there is no sandbox named '%s' in this session" (SandboxName.value name))
+                return Error (sprintf "there is no sandbox named '%s' in this session" (SandboxRef.render name))
             | Some entry ->
                 do! entry.Environment.Stop ()
                 // `default` keeps its ENTRY — it is the sandbox every session has, and a
@@ -230,15 +234,15 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                 // configuration, so a later start may forward something different. Any
                 // other name leaves entirely, which is what makes "stop it first, then
                 // start it with different forwarding" work.
-                if name = SandboxName.defaultName then
+                if name = SandboxRef.defaultRef then
                     entries <-
                         entries
                         |> List.map (fun (key, existing) ->
-                            if key = SandboxName.value name then
+                            if key = name then
                                 key, { existing with Forwarded = []; StartedBy = None; StartedAt = None }
                             else key, existing)
                 else
-                    entries <- entries |> List.filter (fun (key, _) -> key <> SandboxName.value name)
+                    entries <- entries |> List.filter (fun (key, _) -> key <> name)
                 do!
                     append
                         caller.Actor
@@ -247,7 +251,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                 return Ok ()
         }
 
-    let environmentFor (name: SandboxName) : SessionEnvironment.SessionEnvironment =
+    let environmentFor (name: SandboxRef) : SessionEnvironment.SessionEnvironment =
         match find name with
         | Some entry -> entry.Environment
         | None -> missing name
@@ -270,7 +274,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
 /// hands `create` a `Create`.
 let singleton (backend: string) (environment: SessionEnvironment.SessionEnvironment) : WorkSandboxes =
     let entry =
-        { Name = SandboxName.defaultName
+        { Ref = SandboxRef.defaultRef
           Backend = backend
           Forwarded = []
           StartedBy = None
@@ -279,7 +283,7 @@ let singleton (backend: string) (environment: SessionEnvironment.SessionEnvironm
     { Ensure =
         fun _ name _ ->
             async {
-                if name <> SandboxName.defaultName then
+                if name <> SandboxRef.defaultRef then
                     return Error "this session has only its default sandbox"
                 else
                     match! environment.Ensure None "the sandbox was asked for" with
@@ -289,7 +293,7 @@ let singleton (backend: string) (environment: SessionEnvironment.SessionEnvironm
       Stop =
         fun _ name ->
             async {
-                if name <> SandboxName.defaultName then
+                if name <> SandboxRef.defaultRef then
                     return Error "this session has only its default sandbox"
                 else
                     do! environment.Stop ()
@@ -306,7 +310,7 @@ let singleton (backend: string) (environment: SessionEnvironment.SessionEnvironm
 /// way to say "this session has no environment".
 let unavailable : WorkSandboxes =
     let entry =
-        { Name = SandboxName.defaultName
+        { Ref = SandboxRef.defaultRef
           Backend = "none"
           Forwarded = []
           StartedBy = None
@@ -357,7 +361,7 @@ let query (current: unit -> WorkSandboxes) : Queries.QueryRegistration =
                     Ok (RowsOf (
                         (current ()).Listed ()
                         |> List.map (fun entry ->
-                            [ "name", CellText (SandboxName.value entry.Name)
+                            [ "name", CellText (SandboxRef.render entry.Ref)
                               "backend", CellText entry.Backend
                               "state",
                               CellText (

@@ -202,10 +202,10 @@ module AgentTools =
             | Ok repo -> return! inner repo
         }
 
-    let private withSandbox (raw: string) (inner: SandboxName -> Async<string>) : Async<string> =
+    let private withSandbox (raw: string) (inner: SandboxRef -> Async<string>) : Async<string> =
         async {
-            match SandboxName.create raw with
-            | Error e -> return sprintf "not a sandbox name: %s" e
+            match SandboxRef.parse raw with
+            | Error e -> return sprintf "not a sandbox: %s" e
             | Ok name -> return! inner name
         }
 
@@ -220,9 +220,9 @@ module AgentTools =
         async {
             let target =
                 if sandbox = "" then Ok None
-                else SandboxName.create sandbox |> Result.map (InSandbox >> Some)
+                else SandboxRef.parse sandbox |> Result.map (InSandbox >> Some)
             match target with
-            | Error e -> return ToolAnswer.text (sprintf "not a sandbox name: %s" e)
+            | Error e -> return ToolAnswer.text (sprintf "not a sandbox: %s" e)
             | Ok target ->
                 match! capabilities.ExecuteCommand { Command = command; Target = target; Background = background } with
                 | Ok outcome -> return { Text = renderOutcome outcome; Block = outcome.Block; Stream = None }
@@ -425,7 +425,7 @@ module AgentTools =
     /// Where terminals opened from now on start (Plan 25). The sandbox defaults, so the
     /// common call is one argument.
     let private setShellProfile (capabilities: AgentCapabilities) (raw: string) (cwd: string option) : Async<string> =
-        let raw = if raw = "" then SandboxName.value SandboxName.defaultName else raw
+        let raw = if raw = "" then SandboxRef.render SandboxRef.defaultRef else raw
         // An empty string is the CLEAR, like an absent one: a model that computed a path and
         // got nothing must not be told it set the profile to "".
         let cwd = cwd |> Option.map (fun path -> path.Trim ()) |> Option.filter (fun path -> path <> "")
@@ -495,9 +495,9 @@ module AgentTools =
                       | Ok (name, sandbox) ->
                           let sandbox =
                               if sandbox = "" then Ok None
-                              else SandboxName.create sandbox |> Result.map Some
+                              else SandboxRef.parse sandbox |> Result.map Some
                           match sandbox with
-                          | Error e -> return ToolAnswer.text (sprintf "not a sandbox name: %s" e) |> Ok
+                          | Error e -> return ToolAnswer.text (sprintf "not a sandbox: %s" e) |> Ok
                           | Ok sandbox ->
                               match! capabilities.OpenTerminal name sandbox with
                               | Ok id ->
@@ -539,7 +539,7 @@ module AgentTools =
                                   (TerminalId.value t.Terminal)
                                   t.Name
                                   (match t.Sandbox with
-                                   | Some s when s <> SandboxName.defaultName -> sprintf " in %s" (SandboxName.value s)
+                                   | Some s when s <> SandboxRef.defaultRef -> sprintf " in %s" (SandboxRef.render s)
                                    | _ -> "")
                                   (if t.Mine then " (yours)" else "")
                                   (if t.Busy then " — running something" else "")
