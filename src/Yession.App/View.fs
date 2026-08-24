@@ -1,6 +1,7 @@
 namespace Yession.App
 
 open Yession.Domain
+open Yession.Domain.Chat
 open Lit
 
 /// The client shell as Fable.Lit templates. The view is a total function of the model

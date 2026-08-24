@@ -1,5 +1,7 @@
 namespace Yession.Domain
 
+open Yession.Domain.Chat
+
 /// The agent-turn capability vocabulary (Step 08). The Session Process runs an agent
 /// turn against the *projection-derived* conversation — never Yjs/draft state — and the
 /// response comes back as streamed chunks plus a final result, which the Process turns

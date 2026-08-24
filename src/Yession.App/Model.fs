@@ -1,6 +1,7 @@
 namespace Yession.App
 
 open Yession.Domain
+open Yession.Domain.Chat
 
 /// The Browser Client Elmish model and update loop shell. It holds a single typed
 /// snapshot of what the client knows: the local peer, connection state, synced

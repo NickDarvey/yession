@@ -10,6 +10,7 @@ module Yession.Host.Agent
 open System
 open Fable.Core
 open Yession.Domain
+open Yession.Domain.Chat
 
 type private RunOutcome =
     abstract ok : bool
