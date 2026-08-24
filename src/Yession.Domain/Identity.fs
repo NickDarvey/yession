@@ -343,6 +343,18 @@ module Authority =
     let agentFor (turnActor: ActorRef) : Authority =
         { AuthAuthor = ActorRef.Agent; AuthOnBehalfOf = Some turnActor }
 
+    /// A repo's own `yession.yaml`, acting on the authority of whoever asked for the fold
+    /// (Plan 27). The file is the AUTHOR — it is what asked for the sandbox — and the
+    /// credential is never its own: a `forward:` resolves for the human by Plan 08
+    /// precedence, exactly as the agent's does.
+    ///
+    /// `None` is a fold nobody triggered: the one at boot, where there is no turn and no
+    /// caller. The act then runs on NOTHING rather than on somebody guessed at, which is the
+    /// same degraded state `effective` already answers safely — a `forward:` fails saying
+    /// there is no credential to forward, which is true.
+    let configuredBy (repo: RepoRef) (onBehalfOf: ActorRef option) : Authority =
+        { AuthAuthor = ActorRef.Configured repo; AuthOnBehalfOf = onBehalfOf }
+
     /// Recover what somebody else already wrote — a doc entry, a stored event. NOT an
     /// authoring path: it can express states the constructors above refuse, because it is
     /// recovering facts rather than deciding them, and a decoder that could not represent what

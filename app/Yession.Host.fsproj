@@ -47,6 +47,10 @@
          what the gate calls once a verdict is in — beside each other, and out of the entry
          module where no test could reach them. After the services they run against. -->
     <Compile Include="Commands.fs" />
+    <!-- The fold over every checkout's `yession.yaml` (Plan 27). After Commands.fs, because
+         a declaration becomes one of ITS calls and the encoding of that call is private to
+         it — there is no second way to ask for a sandbox. -->
+    <Compile Include="RepoSandboxes.fs" />
     <Compile Include="Agent.fs" />
     <Compile Include="ManagerStore.fs" />
     <Compile Include="SecretsCipher.fs" />
