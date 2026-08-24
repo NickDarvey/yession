@@ -4,6 +4,7 @@ open Elmish
 open Yjs
 open Ylmish.Codec
 open Yession.Domain
+open Yession.Domain.Terminals
 open Yession.Domain.Collab
 
 /// Composition of the Browser Client: the Elmish program bound to a Yjs document through

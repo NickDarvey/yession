@@ -1,6 +1,7 @@
 namespace Yession.Domain.Tools
 
 open Yession.Domain
+open Yession.Domain.Terminals
 
 // The agent's tools, as DATA (Plan 16, part A).
 //

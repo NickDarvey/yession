@@ -20,6 +20,7 @@ open System
 open Fable.Core
 open Node.Api
 open Yession.Domain
+open Yession.Domain.Terminals
 open Yession.SessionProcess
 
 let private existsSync (path: string) : bool = fs.existsSync (U2.Case1 path)

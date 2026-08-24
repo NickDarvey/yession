@@ -18,6 +18,7 @@ open Fable.Core
 open Lit
 open Yjs
 open Yession.Domain
+open Yession.Domain.Terminals
 open Yession.Domain.Collab
 open Yession.Domain.Chat
 open Yession.App

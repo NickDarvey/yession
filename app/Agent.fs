@@ -10,6 +10,7 @@ module Yession.Host.Agent
 open System
 open Fable.Core
 open Yession.Domain
+open Yession.Domain.Terminals
 open Yession.Domain.Tools
 open Yession.Domain.Chat
 

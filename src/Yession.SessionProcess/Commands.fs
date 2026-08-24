@@ -1,6 +1,7 @@
 namespace Yession.SessionProcess
 
 open Yession.Domain
+open Yession.Domain.Terminals
 open Yession.Domain.Collab
 
 /// Handling of `SessionCommand` requests on the Session Process. Commands are how

@@ -1,6 +1,7 @@
 namespace Yession.SessionProcess
 
 open Yession.Domain
+open Yession.Domain.Terminals
 open Yession.Domain.Chat
 
 /// Orchestration of one agent turn (Step 08): builds the context pack from the

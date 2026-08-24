@@ -34,6 +34,7 @@ open Browser.Dom
 open Browser.Types
 open Fable.BrowserExtras
 open Yession.Domain
+open Yession.Domain.Terminals
 open Yession.App
 open Yession.SessionProcess
 open Yession.Host

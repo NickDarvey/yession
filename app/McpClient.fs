@@ -14,6 +14,7 @@ module Yession.Host.McpClient
 open System
 open Fable.Core
 open Yession.Domain
+open Yession.Domain.Terminals
 open Yession.Domain.Tools
 
 /// What one POST came back as.

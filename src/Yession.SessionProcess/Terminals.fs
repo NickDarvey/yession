@@ -2,6 +2,7 @@ namespace Yession.SessionProcess
 
 open System
 open Yession.Domain
+open Yession.Domain.Terminals
 open Yession.Domain.Collab
 
 /// One terminal's durable transcript, as a capability (Plan 12). The Session

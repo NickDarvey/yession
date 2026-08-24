@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Terminals
+
+open Yession.Domain
 
 // Matching a pattern against what a terminal said (Plan 25, step 9).
 //

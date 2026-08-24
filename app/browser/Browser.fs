@@ -13,6 +13,7 @@ open Fable.Core
 open Fable.Core.JsInterop
 open Yjs
 open Yession.Domain
+open Yession.Domain.Terminals
 open Yession.Domain.Collab
 open Yession.App
 open Lit

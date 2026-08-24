@@ -10,6 +10,7 @@ open System
 open Fable.Pyxpecto
 open Yjs
 open Yession.Domain
+open Yession.Domain.Terminals
 open Yession.Domain.Collab
 open Yession.Domain.Tools
 open Yession.App

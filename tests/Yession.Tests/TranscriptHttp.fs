@@ -12,6 +12,7 @@ module Yession.Tests.TranscriptHttp
 open Fable.Core
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Terminals
 open Yession.App
 open Yession.Host
 open Yession.Tests.Support

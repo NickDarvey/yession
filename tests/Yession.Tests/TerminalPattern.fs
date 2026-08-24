@@ -10,6 +10,7 @@ module Yession.Tests.TerminalPattern
 
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Terminals
 
 let private compiled (pattern: string) =
     match TerminalPattern.compile pattern with

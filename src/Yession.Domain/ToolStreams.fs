@@ -1,6 +1,7 @@
 namespace Yession.Domain.Tools
 
 open Yession.Domain
+open Yession.Domain.Terminals
 
 // A stream a provider offers becomes a terminal (Plan 19).
 //

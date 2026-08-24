@@ -1,6 +1,7 @@
 namespace Yession.App
 
 open Yession.Domain
+open Yession.Domain.Terminals
 
 /// The HTTP contract of a Session Process: every path it serves, declared once. The
 /// server matches on these, the shell emits them, and the browser client fetches them —

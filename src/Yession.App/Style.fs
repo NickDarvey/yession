@@ -1,6 +1,7 @@
 namespace Yession.App
 
 open Yession.Domain
+open Yession.Domain.Terminals
 
 /// The client's visual language, authored entirely in F# by composing Tailwind's own
 /// utility classes into typed, named values. Tailwind supplies the utilities; F# supplies
