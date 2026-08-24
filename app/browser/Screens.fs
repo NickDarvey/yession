@@ -32,7 +32,7 @@ module Yession.Browser.Screens
 open Fable.Core
 open Browser.Dom
 open Browser.Types
-open Fable.ResizeObserver
+open Fable.BrowserExtras
 open Yession.Domain
 open Yession.App
 open Yession.SessionProcess

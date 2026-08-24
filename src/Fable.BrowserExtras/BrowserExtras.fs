@@ -1,4 +1,4 @@
-namespace Fable.ResizeObserver
+namespace Fable.BrowserExtras
 
 // Bindings for the browser's `ResizeObserver`: a callback when an element's BOX changes,
 // however it changed — a stylesheet, a parent's layout, a custom property, the window. That
@@ -49,3 +49,32 @@ module ResizeObserver =
     /// that would otherwise construct `undefined` and fail on the first `observe`.
     [<Emit("typeof ResizeObserver !== 'undefined'")>]
     let isSupported () : bool = jsNative
+
+/// The slice of the CSSOM the shell writes its layout through, which `Fable.Browser.Dom` does
+/// not type: it stops at the DOM, and `element.style` belongs to the CSS bindings this
+/// repository does not otherwise need.
+///
+/// Custom properties specifically. The shell keeps its one layout number — the width of the
+/// terminals column — as `--term-w` on the root element rather than in the model, because it is
+/// presentation: a Lit re-render must not fight it, and a number of pixels is not a fact about
+/// the session. Reading and writing it is all of what is needed here, so it is all that is
+/// declared.
+[<AutoOpen>]
+module Css =
+
+    /// Set a custom property on an element. `value` carries its own unit — `"420px"`, not `420`.
+    [<Emit("$0.style.setProperty($1, $2)")>]
+    let setStyleProperty (element: Browser.Types.HTMLElement) (name: string) (value: string) : unit =
+        jsNative
+
+    /// Read a custom property back off an element's own inline style — what was SET, not what
+    /// was computed. Empty when it is not set here, which is the honest answer: a property this
+    /// element does not carry is not a number to fall back on.
+    [<Emit("$0.style.getPropertyValue($1)")>]
+    let styleProperty (element: Browser.Types.HTMLElement) (name: string) : string = jsNative
+
+    /// Read a custom property as the cascade RESOLVED it — the design token, whichever
+    /// stylesheet defined it. The counterpart to the one above: that answers "did anybody set
+    /// this here", this answers "what is it".
+    [<Emit("getComputedStyle($0).getPropertyValue($1)")>]
+    let computedProperty (element: Browser.Types.HTMLElement) (name: string) : string = jsNative

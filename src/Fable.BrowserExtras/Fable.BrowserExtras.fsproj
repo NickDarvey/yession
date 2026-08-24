@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Fable bindings to the browser APIs the `Fable.Browser.*` family does not cover: the
+    `ResizeObserver`, and the corner of the CSSOM the shell writes its layout through. Fable-only:
+    `dotnet build` only type-checks it; the runnable JS comes from Fable. A standalone project so
+    the bindings are a distinct layer, mirroring Fable.Jose and Fable.Keyring — with one
+    difference worth stating, since the neighbours' names suggest otherwise: these bind browser
+    GLOBALS, not an npm package, so there is nothing to install and nothing in package.json to
+    keep them in step with.
+
+    The bar for adding to this file is that `Fable.Browser.Dom` (or a sibling that is already
+    referenced) genuinely lacks it — not that reaching for it here was quicker. Everything the
+    upstream bindings type should come from them, so that this stays small enough to read and
+    rare enough to touch: an emit body is inlined into its callers, which is exactly what makes
+    a file of them a file nobody notices going stale.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="BrowserExtras.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fable.Core" />
+    <PackageReference Include="Fable.Browser.Dom" />
+  </ItemGroup>
+
+</Project>

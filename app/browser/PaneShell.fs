@@ -22,11 +22,12 @@ module Yession.Browser.PaneShell
 // silently left every compiled caller stale — a test failing for a reason its source does not
 // contain, three runs of the browser tier before anybody looked at the bundle. Ordinary F# has
 // none of that: it is a module, so what depends on it recompiles. What is genuinely a binding
-// went to `Fable.ResizeObserver`; the rest is `Browser.Dom`, typed, and readable.
+// went to `Fable.BrowserExtras`; the rest is `Browser.Dom`, typed, and readable.
 
-open Fable.Core
 open Browser.Dom
 open Browser.Types
+open Browser.WebStorage
+open Fable.BrowserExtras
 
 /// A frame later, which is when the render that has to have happened, has. Every act in this
 /// module is "the model already changed, now do the part the DOM owns", and every one of them
@@ -50,6 +51,11 @@ let private focusOn (element: HTMLElement option) : unit =
 /// looks exactly like a line that could be deleted. (esbuild keeps it, minified or not: a
 /// property access may be a getter, so it is never assumed pure.)
 let private reflow (element: HTMLElement) : unit = element.offsetWidth |> ignore
+
+/// A CSS length as a number, with the unit dropped. `getPropertyValue` answers `"420px"` for a
+/// property set in pixels and `""` for one that is not set at all, and both have to become "no
+/// number I can use" rather than a parse that quietly succeeds at zero.
+let private trimPx (value: string) : string = value.Trim().Replace ("px", "")
 
 /// Whether focus has been left nowhere it can act from — on `body`, or nowhere at all — or
 /// inside something that is on its way out of the document.
@@ -178,85 +184,142 @@ let setOpen (isOpen: bool) : unit =
 /// The column was a fixed 420px chosen as "the width the content actually has", and measured
 /// against what a terminal actually prints it is 20 columns short of 80. Rather than guess a
 /// better constant for every screen, the split moves and is remembered.
+module private Split =
+
+    /// Where a reader's chosen width survives a reload. Per browser profile, like the peer id:
+    /// it is a preference about this screen, not a fact about the session.
+    let key = "yession:term-width"
+
+    /// Neither column can be dragged away to nothing. The pane's floor is its own; the chat's
+    /// is what bounds the pane's ceiling.
+    let minPane = 320.0
+    let minChat = 420.0
+
+    let private root = document.documentElement
+
+    let private handles () : HTMLElement list =
+        let found = document.querySelectorAll "[data-term-resize]"
+        [ for i in 0 .. found.length - 1 -> found.[i] :?> HTMLElement ]
+
+    /// The ceiling is what the CHAT can spare, not what the window is: the sidebar takes 280px
+    /// of the window and can be collapsed, so a bound measured against `innerWidth` let the pane
+    /// grow to 932px on a 1440 screen and left the conversation 228px — its title truncated to a
+    /// single letter and its commands gone. Ask the two columns how wide they actually are.
+    let widest () : float =
+        match find "[data-terminal-panel]", find "[data-conversation]" with
+        | Some pane, Some chat ->
+            let spare =
+                pane.getBoundingClientRect().width + chat.getBoundingClientRect().width - minChat
+            max minPane spare
+        | _ -> max minPane (window.innerWidth - minChat)
+
+    /// Set the split, clamped, and tell everything that reports it. The separator's
+    /// `aria-valuenow` is a value assistive technology reads out, so it is written here rather
+    /// than left at whatever literal the template shipped.
+    let apply (width: float) : unit =
+        // Rounded before clamping, so a bound is a bound exactly: clamping a fraction first
+        // and rounding after could land a pixel outside one.
+        let next = width |> round |> min (widest ()) |> max minPane
+        setStyleProperty root "--term-w" (sprintf "%dpx" (int next))
+        for handle in handles () do
+            handle.setAttribute ("aria-valuenow", string (int next))
+            handle.setAttribute ("aria-valuemin", string (int minPane))
+            handle.setAttribute ("aria-valuemax", string (int (widest ())))
+        // Storage is denied in a private window, and a split that cannot be remembered is
+        // still a split that works.
+        try localStorage.setItem (key, string (int next)) with _ -> ()
+
+    /// Where the split is now, asked of the property rather than of the column — because the
+    /// column ANIMATES, and a measurement taken mid-transition is not a width anybody chose.
+    let current () : float =
+        match System.Double.TryParse (styleProperty root "--term-w" |> trimPx) with
+        | true, said when said > 0.0 -> said
+        | _ -> find "[data-terminal-panel]" |> Option.map (fun pane -> pane.getBoundingClientRect().width) |> Option.defaultValue minPane
+
+    /// The width to start at: what was remembered, else the design token, else the floor.
+    ///
+    /// Seeded at install ALWAYS — not only when a width was remembered. Unseeded, `current`
+    /// had to fall back to measuring the column, and asked while the column is opening it
+    /// answers 1px (a shut pane is its own left border) or whatever the easing has reached, so
+    /// the arrow keys then step from a number that was never the split.
+    let seed () : float =
+        let remembered =
+            try
+                match System.Double.TryParse (localStorage.getItem key) with
+                | true, width when width > 0.0 -> Some width
+                | _ -> None
+            with _ -> None
+        let token =
+            match
+                System.Double.TryParse
+                    (computedProperty root "--spacing-term" |> trimPx)
+                with
+            | true, width when width > 0.0 -> Some width
+            | _ -> None
+        remembered |> Option.orElse token |> Option.defaultValue minPane
+
+/// Install the splitter: the pane's width becomes something the reader sets, with a pointer or
+/// with the keyboard, and keeps.
 ///
 /// Installed once, delegated from the document so it survives every re-render of the handle.
 /// The handle is a `separator` with a value, so the arrow keys have to move it — a splitter
-/// that only answers a drag is a control a keyboard cannot reach at all. Bounds keep both
-/// columns usable: neither the chat nor the pane can be dragged away to nothing, and the
-/// ceiling follows the window so a resize down cannot strand the split off screen.
-[<Emit("""(() => {
-  const KEY = 'yession:term-width'
-  const root = document.documentElement
-  const MIN = 320, CHAT_MIN = 420
-  // The ceiling is what the CHAT can spare, not what the window is: the sidebar takes 280px
-  // of the window and can be collapsed, so a bound measured against `innerWidth` let the pane
-  // grow to 932px on a 1440 screen and left the conversation 228px — its title truncated to a
-  // single letter and its commands gone. Ask the two columns how wide they actually are.
-  const max = () => {
-    const pane = document.querySelector('[data-terminal-panel]')
-    const chat = document.querySelector('[data-conversation]')
-    if (!pane || !chat) return Math.max(MIN, window.innerWidth - CHAT_MIN)
-    const spare = pane.getBoundingClientRect().width + chat.getBoundingClientRect().width - CHAT_MIN
-    return Math.max(MIN, spare)
-  }
-  const apply = (w) => {
-    const next = Math.max(MIN, Math.min(max(), Math.round(w)))
-    root.style.setProperty('--term-w', next + 'px')
-    for (const handle of document.querySelectorAll('[data-term-resize]')) {
-      handle.setAttribute('aria-valuenow', String(next))
-      handle.setAttribute('aria-valuemin', String(MIN))
-      handle.setAttribute('aria-valuemax', String(max()))
-    }
-    try { localStorage.setItem(KEY, String(next)) } catch (e) {}
-    return next
-  }
-  const current = () => {
-    const said = parseFloat(root.style.getPropertyValue('--term-w'))
-    if (said > 0) return said
-    const pane = document.querySelector('[data-terminal-panel]')
-    return pane ? pane.getBoundingClientRect().width : MIN
-  }
-  // Seeded at install, ALWAYS — not only when a width was remembered.
-  //
-  // Unseeded, `current()` had to fall back to measuring the column, and the column animates:
-  // asked while it is opening it answers 1px (a shut pane is its own left border) or whatever
-  // the easing has reached, and the arrow keys then step from a number that was never the
-  // split. It also left the separator reporting the literal the template ships until somebody
-  // resized, which is a value assistive technology reads and nothing had checked.
-  let remembered = NaN
-  try { remembered = Number(localStorage.getItem(KEY)) } catch (e) {}
-  const fromToken = parseFloat(getComputedStyle(root).getPropertyValue('--spacing-term'))
-  apply(remembered > 0 ? remembered : (fromToken > 0 ? fromToken : MIN))
-  window.addEventListener('resize', () => apply(current()))
-  document.addEventListener('pointerdown', (e) => {
-    const handle = e.target instanceof Element && e.target.closest('[data-term-resize]')
-    if (!handle) return
-    e.preventDefault()
-    handle.focus()
-    handle.setPointerCapture(e.pointerId)
-    root.classList.add('term-resizing')
-    const move = (ev) => apply(window.innerWidth - ev.clientX)
-    const done = () => {
-      root.classList.remove('term-resizing')
-      handle.removeEventListener('pointermove', move)
-      handle.removeEventListener('pointerup', done)
-      handle.removeEventListener('pointercancel', done)
-    }
-    handle.addEventListener('pointermove', move)
-    handle.addEventListener('pointerup', done)
-    handle.addEventListener('pointercancel', done)
-  })
-  document.addEventListener('keydown', (e) => {
-    const handle = e.target instanceof Element && e.target.closest('[data-term-resize]')
-    if (!handle) return
-    // Left grows this column, because the column is on the right and its edge is what moves.
-    const step = e.shiftKey ? 64 : 16
-    if (e.key === 'ArrowLeft') apply(current() + step)
-    else if (e.key === 'ArrowRight') apply(current() - step)
-    else if (e.key === 'Home') apply(max())
-    else if (e.key === 'End') apply(MIN)
-    else return
-    e.preventDefault()
-  })
-})()""")>]
-let installPaneResize () : unit = jsNative
+/// that only answers a drag is a control a keyboard cannot reach at all.
+let installPaneResize () : unit =
+    // Which handle an event happened on, asked as "does a handle contain this" rather than by
+    // testing the target's type: `contains` answers false for anything that is not a node, so
+    // there is nothing to narrow and no way to be wrong about what a target is.
+    let handleUnder (target: EventTarget) : HTMLElement option =
+        let found = document.querySelectorAll "[data-term-resize]"
+        [ for i in 0 .. found.length - 1 -> found.[i] :?> HTMLElement ]
+        |> List.tryFind (fun handle -> handle.contains (unbox target))
+
+    Split.apply (Split.seed ())
+    window.addEventListener ("resize", fun _ -> Split.apply (Split.current ()))
+
+    document.addEventListener (
+        "pointerdown",
+        fun event ->
+            match handleUnder event.target with
+            | None -> ()
+            | Some handle ->
+                let event = event :?> PointerEvent
+                event.preventDefault ()
+                handle.focus ()
+                handle.setPointerCapture event.pointerId
+                document.documentElement.classList.add "term-resizing"
+                // The pane's edge is on the LEFT of a right-hand column, so its width is the
+                // distance from the pointer to the right of the window.
+                let move = fun (moving: Event) ->
+                    Split.apply (window.innerWidth - (moving :?> PointerEvent).clientX)
+                let rec finish =
+                    fun (_: Event) ->
+                        document.documentElement.classList.remove "term-resizing"
+                        handle.removeEventListener ("pointermove", move)
+                        handle.removeEventListener ("pointerup", finish)
+                        handle.removeEventListener ("pointercancel", finish)
+                handle.addEventListener ("pointermove", move)
+                handle.addEventListener ("pointerup", finish)
+                handle.addEventListener ("pointercancel", finish))
+
+    document.addEventListener (
+        "keydown",
+        fun event ->
+            match handleUnder event.target with
+            | None -> ()
+            | Some _ ->
+                let event = event :?> KeyboardEvent
+                // Left GROWS this column, because the column is on the right and its edge is
+                // what moves.
+                let step = if event.shiftKey then 64.0 else 16.0
+                let moved =
+                    match event.key with
+                    | "ArrowLeft" -> Some (Split.current () + step)
+                    | "ArrowRight" -> Some (Split.current () - step)
+                    | "Home" -> Some (Split.widest ())
+                    | "End" -> Some Split.minPane
+                    | _ -> None
+                match moved with
+                | None -> ()
+                | Some width ->
+                    Split.apply width
+                    event.preventDefault ())
