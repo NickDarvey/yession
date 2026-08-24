@@ -26,6 +26,7 @@ module Yession.Host.Commands
 // refuses only when the configuration differs.
 
 open Yession.Domain
+open Yession.Domain.Repos
 open Yession.SessionProcess
 
 /// What the commands need from the session around them, as getters — the services are
