@@ -20,6 +20,10 @@
     <!-- Fable interop core (Node host + browser client). 5.2 adds `Compiler.isDotnet` &c.,
          the compile-time runtime discriminator the unified test harness uses. -->
     <PackageVersion Include="Fable.Core" Version="5.2.0" />
+    <!-- The DOM, typed. Already arrived transitively through Fable.Lit and was already being
+         used that way; named here because the client now leans on it directly — a dependency
+         you rely on and do not declare is one a transitive bump can take away. -->
+    <PackageVersion Include="Fable.Browser.Dom" Version="2.10.1" />
     <!-- Fable.Lit: the `html` DSL for the client shell (client-side render) and the
          management UI (our own SSR wrapper renders the same templates to a string). -->
     <PackageVersion Include="Fable.Lit" Version="1.4.2" />
