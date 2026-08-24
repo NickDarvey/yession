@@ -2,6 +2,7 @@ namespace Yession.Manager
 
 open System
 open Yession.Domain
+open Yession.Domain.Tools
 
 #if FABLE_COMPILER
 open Thoth.Json

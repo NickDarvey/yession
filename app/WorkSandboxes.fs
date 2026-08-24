@@ -21,6 +21,7 @@ module Yession.Host.WorkSandboxes
 
 open System
 open Yession.Domain
+open Yession.Domain.Tools
 open Yession.SessionProcess
 
 /// A credential this session knows how to forward, by name. The registry holds the name

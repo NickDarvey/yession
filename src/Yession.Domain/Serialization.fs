@@ -1,6 +1,7 @@
 namespace Yession.Domain
 
 open System
+open Yession.Domain.Tools
 open System.Globalization
 
 #if FABLE_COMPILER

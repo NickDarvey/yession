@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Tools
+
+open Yession.Domain
 
 /// MCP (Model Context Protocol) tool descriptors, in the standard `Tool` / `ListToolsResult`
 /// shapes. What the SESSION's MCP client decodes a server's `tools/list` into (Plan 17): the

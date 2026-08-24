@@ -14,6 +14,7 @@ module Yession.Tests.WorkSandboxes
 open System
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Tools
 open Yession.Domain.Chat
 open Yession.Host
 open Yession.SessionProcess

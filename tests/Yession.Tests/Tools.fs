@@ -17,6 +17,7 @@ module Yession.Tests.Tools
 
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Tools
 
 #if FABLE_COMPILER
 open Thoth.Json

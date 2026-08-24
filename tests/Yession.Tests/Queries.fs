@@ -14,6 +14,7 @@ module Yession.Tests.Queries
 open Fable.Core
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Tools
 open Yession.Host
 open Yession.SessionProcess
 
