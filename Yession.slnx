@@ -14,6 +14,7 @@
     <Project Path="src/Fable.Keyring/Fable.Keyring.fsproj" />
     <Project Path="src/Fable.OpenIdClient/Fable.OpenIdClient.fsproj" />
     <Project Path="src/Fable.OpenTelemetry/Fable.OpenTelemetry.fsproj" />
+    <Project Path="src/Fable.ResizeObserver/Fable.ResizeObserver.fsproj" />
     <Project Path="src/Yession.App/Yession.App.fsproj" />
     <Project Path="src/Yession.Domain/Yession.Domain.fsproj" />
     <Project Path="src/Yession.Manager/Yession.Manager.fsproj" />

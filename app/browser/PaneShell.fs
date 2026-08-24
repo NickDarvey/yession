@@ -12,33 +12,77 @@ module Yession.Browser.PaneShell
 // host-free shell harness the `Browser`-tier E2E drives. A second copy would be a second
 // thing to keep correct, and the one that rotted would be the one nothing runs.
 //
-// Both wait a frame: the model changes first, Lit renders second, and `focus()` on an element
-// that is not in the document yet is a no-op.
+// Everything here waits a frame: the model changes first, Lit renders second, and `focus()`
+// on an element that is not in the document yet is a no-op.
+//
+// This file used to be `[<Emit>]` bodies — a hundred-odd lines of JavaScript in strings, and
+// most of it POLICY rather than binding: which element is stranded, how a tab key becomes a
+// selector, what the splitter's bounds are. Emit bodies are inlined into whatever calls them,
+// and Fable does not treat a change to one as a change to its callers, so editing this file
+// silently left every compiled caller stale — a test failing for a reason its source does not
+// contain, three runs of the browser tier before anybody looked at the bundle. Ordinary F# has
+// none of that: it is a module, so what depends on it recompiles. What is genuinely a binding
+// went to `Fable.ResizeObserver`; the rest is `Browser.Dom`, typed, and readable.
 
 open Fable.Core
+open Browser.Dom
+open Browser.Types
 
-[<Emit("""requestAnimationFrame(() => {
-  const pane = document.querySelector('[data-pane-panel]')
-  if (pane) pane.focus()
-})""")>]
-let toPane () : unit = jsNative
+/// A frame later, which is when the render that has to have happened, has. Every act in this
+/// module is "the model already changed, now do the part the DOM owns", and every one of them
+/// needs the element to be in the document before it can be touched.
+let private nextFrame (act: unit -> unit) : unit =
+    window.requestAnimationFrame (fun _ -> act ()) |> ignore
+
+/// The first element matching, as something focusable. Everything here selects by `data-*`
+/// attributes the view puts on real controls, so the cast is the view's contract rather than
+/// an assumption: a hook on something unfocusable would be the bug, not this.
+let private find (selector: string) : HTMLElement option =
+    match document.querySelector selector with
+    | null -> None
+    | element -> Some (element :?> HTMLElement)
+
+let private focusOn (element: HTMLElement option) : unit =
+    element |> Option.iter (fun element -> element.focus ())
+
+/// Make the browser flush layout, by reading something it can only answer by doing so. The
+/// value is thrown away and the READ is the point, which is a thing to say out loud because it
+/// looks exactly like a line that could be deleted. (esbuild keeps it, minified or not: a
+/// property access may be a getter, so it is never assumed pure.)
+let private reflow (element: HTMLElement) : unit = element.offsetWidth |> ignore
+
+/// Whether focus has been left nowhere it can act from — on `body`, or nowhere at all — or
+/// inside something that is on its way out of the document.
+///
+/// This is the guard that lets a focus move run from the render loop rather than from a press.
+/// A press knows it is about to remove the thing under the hand; a render does not, and a
+/// render that moved focus unconditionally would yank a caret out of whatever somebody was
+/// typing in the moment something unrelated changed elsewhere on the page.
+let private stranded (leaving: string list) : bool =
+    match document.activeElement with
+    | null -> true
+    | active ->
+        System.Object.ReferenceEquals (active, document.body)
+        || leaving |> List.exists (fun selector -> (active.closest selector).IsSome)
+
+/// Move focus into the side pane after a chip opened a tab there.
+let toPane () : unit = nextFrame (fun () -> focusOn (find "[data-pane-panel]"))
 
 /// Return focus to the chat item that opened a tab, given that tab's key — the only thing the
 /// chip and the tab share. Falls back to the strip's first tab when the item has scrolled out
 /// of the rendered chat, because focus has to land somewhere real.
-[<Emit("""(function (tabKey) { return (
-requestAnimationFrame(() => {
-  const parts = tabKey.split(':')
-  const selector =
-    parts[0] === 'block' ? '[data-chat-block="' + parts[2] + '"]'
-    : parts[0] === 'stretch' ? '[data-chat-stretch="' + parts.slice(1).join(':') + '"]'
-    : null
-  const back = selector && document.querySelector(selector)
-  const next = back || document.querySelector('[role="tablist"] [role="tab"]')
-  if (next) next.focus()
-})
-) })($0)""")>]
-let toChatItem (tabKey: string) : unit = jsNative
+let toChatItem (tabKey: string) : unit =
+    nextFrame (fun () ->
+        let parts = tabKey.Split ':'
+        let back =
+            match List.ofArray parts with
+            | "block" :: _ :: blockId :: _ -> find (sprintf "[data-chat-block=\"%s\"]" blockId)
+            | "stretch" :: rest when not (List.isEmpty rest) ->
+                find (sprintf "[data-chat-stretch=\"%s\"]" (String.concat ":" rest))
+            | _ -> None
+        back
+        |> Option.orElseWith (fun () -> find "[role=\"tablist\"] [role=\"tab\"]")
+        |> focusOn)
 
 /// Hand focus to a terminal's watch toggle when the reader has been stranded (Plan 14,
 /// stage 7; Plan 25, stage 3).
@@ -49,20 +93,14 @@ let toChatItem (tabKey: string) : unit = jsNative
 /// none of that: a press keeps its own focus.
 ///
 /// What is left is the case no press causes. A rewound cast playing off its end unmounts the
-/// player by itself, under whoever was reading it. Hence the guard: focus is moved only when
-/// it is actually stranded (on `body`, or inside the player being unmounted), never yanked
-/// out of a composer somebody is typing in.
+/// player by itself, under whoever was reading it.
+///
 /// No terminal id: the toggle's VALUE is the face it will show, not which terminal it is
 /// about, and the pane shows one tab at a time — so there is exactly one of these in the
 /// document and naming a terminal could only ever name it wrongly.
-[<Emit("""requestAnimationFrame(() => {
-  const active = document.activeElement
-  const stranded = !active || active === document.body || active.closest('[data-pane-replay]')
-  if (!stranded) return
-  const next = document.querySelector('[data-terminal-watch]')
-  if (next) next.focus()
-})""")>]
-let toWatchToggle () : unit = jsNative
+let toWatchToggle () : unit =
+    nextFrame (fun () ->
+        if stranded [ "[data-pane-replay]" ] then focusOn (find "[data-terminal-watch]"))
 
 /// Hand focus to the live screen when this peer has just become the one typing into it.
 ///
@@ -73,24 +111,19 @@ let toWatchToggle () : unit = jsNative
 /// The person then types into nothing, which is indistinguishable from a terminal that does
 /// not work.
 ///
-/// The `stranded` guard is `toWatchToggle`'s, and it is what makes this safe to run from the
-/// render loop rather than from a press: a lease can land on a terminal while its holder is
-/// reading somewhere else entirely (the alt-screen flip follows the block's AUTHOR, and the
-/// agent's blocks flip too), and yanking a caret out of the message composer because a
-/// terminal three tabs away went full-screen would be worse than the stranding this fixes.
+/// The guard is what makes this safe to run from the render loop: a lease can land on a
+/// terminal while its holder is reading somewhere else entirely (the alt-screen flip follows
+/// the block's AUTHOR, and the agent's blocks flip too), and yanking a caret out of the
+/// message composer because a terminal three tabs away went full-screen would be worse than
+/// the stranding it fixes.
 ///
 /// `tabindex="0"` in the selector rather than the terminal's id: the screen renders in three
 /// variants and only the holder's takes keystrokes, so the focusable one is the only one this
 /// could ever mean. The pane shows one tab at a time, which is what makes that unambiguous —
 /// the same reason `toWatchToggle` names no terminal either.
-[<Emit("""requestAnimationFrame(() => {
-  const active = document.activeElement
-  const stranded = !active || active === document.body
-  if (!stranded) return
-  const next = document.querySelector('[data-terminal-screen][tabindex="0"]')
-  if (next) next.focus()
-})""")>]
-let toTerminalScreen () : unit = jsNative
+let toTerminalScreen () : unit =
+    nextFrame (fun () ->
+        if stranded [] then focusOn (find "[data-terminal-screen][tabindex=\"0\"]"))
 
 /// Scroll a terminal's history to one of its commands, and say which one (Plan 25, stage 3).
 ///
@@ -108,25 +141,35 @@ let toTerminalScreen () : unit = jsNative
 /// The mark is an animation that ends. A block scrolled to in a wall of identical mono is
 /// still a block nobody can pick out; a permanent highlight would still be pointing at it
 /// long after the reader had moved on.
-[<Emit("""(function (terminalId, blockId) { return (
-requestAnimationFrame(() => {
-  const scrollback = document.querySelector('[data-terminal-scrollback][data-terminal-id="' + terminalId + '"]')
-  const block = scrollback && scrollback.querySelector('[data-terminal-block="' + blockId + '"]')
-  if (!block) return
-  block.scrollIntoView({ block: 'start' })
-  block.classList.remove('animate-reveal')
-  void block.offsetWidth
-  block.classList.add('animate-reveal')
-})
-) })($0, $1)""")>]
-let revealBlock (terminalId: string) (blockId: string) : unit = jsNative
+let revealBlock (terminalId: string) (blockId: string) : unit =
+    nextFrame (fun () ->
+        let scrollback =
+            find (sprintf "[data-terminal-scrollback][data-terminal-id=\"%s\"]" terminalId)
+        let block =
+            scrollback
+            |> Option.bind (fun scrollback ->
+                match scrollback.querySelector (sprintf "[data-terminal-block=\"%s\"]" blockId) with
+                | null -> None
+                | block -> Some (block :?> HTMLElement))
+        block
+        |> Option.iter (fun block ->
+            block.scrollIntoView ()
+            // Restart the animation rather than add a class that is already there: removing
+            // it, forcing a reflow by READING a layout property, and adding it back is the
+            // only way to replay a CSS animation on an element that has already run it. The
+            // read is the load-bearing line, which is why it is not `ignore` on a call that
+            // does something — nothing is computed here, the browser is being made to flush.
+            block.classList.remove [| "animate-reveal" |]
+            reflow block
+            block.classList.add [| "animate-reveal" |]))
 
 /// The pane's open state, as a class on the shell root — the same mechanism the sidebar uses,
 /// so a Lit re-render never fights the CSS transition. A `set` rather than a toggle, because
 /// the model holds the bit and this only reflects it: the app opens this column itself
 /// whenever a chip or a tab is chosen.
-[<Emit("document.documentElement.classList.toggle('term-closed', !$0)")>]
-let setOpen (isOpen: bool) : unit = jsNative
+let setOpen (isOpen: bool) : unit =
+    if isOpen then document.documentElement.classList.remove [| "term-closed" |]
+    else document.documentElement.classList.add [| "term-closed" |]
 
 /// The pane's width on desktop, as a custom property on the shell root — the same mechanism
 /// the open state uses, and for the same reasons: it is presentation, a Lit re-render must not
