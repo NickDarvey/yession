@@ -13,6 +13,7 @@ open Fable.Core.JsInterop
 open Fable.Pyxpecto
 open Fable.OpenTelemetry
 open Yession.Domain
+open Yession.Domain.Access
 open Yession.Host
 
 // Local (not `Support.expect`) so this suite stays free of the WebRTC/native-addon import

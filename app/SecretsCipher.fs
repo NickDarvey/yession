@@ -12,6 +12,7 @@ module Yession.Host.SecretsCipher
 
 open Fable.Core
 open Yession.Domain
+open Yession.Domain.Access
 
 /// An imported, non-extractable AES-GCM key plus the operations it supports.
 type Cipher =

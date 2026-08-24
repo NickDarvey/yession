@@ -1,5 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Access
 
+open Yession.Domain
 open System
 
 /// Connection-credential vocabulary (Plan 08). A "connection" is an external-service

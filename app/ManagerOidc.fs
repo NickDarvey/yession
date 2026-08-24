@@ -19,6 +19,7 @@ module Yession.Host.ManagerOidc
 open Fable.Core
 open Fable.Core.JsInterop
 open Yession.Domain
+open Yession.Domain.Access
 open Yession.Oidc
 open Yession.Host.Interop
 

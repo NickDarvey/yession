@@ -13,6 +13,7 @@ module Yession.Host.SecretStore
 
 open System
 open Yession.Domain
+open Yession.Domain.Access
 open Yession.Manager
 
 type SecretStore =

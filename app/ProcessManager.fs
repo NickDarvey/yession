@@ -13,6 +13,7 @@ module Yession.Host.ProcessManager
 
 open System
 open Yession.Domain
+open Yession.Domain.Access
 open Yession.Manager
 open Yession.Oidc
 

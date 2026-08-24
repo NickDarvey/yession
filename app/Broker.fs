@@ -14,6 +14,7 @@ open System.Collections.Generic
 
 open Fable.Core
 open Yession.Domain
+open Yession.Domain.Access
 open Yession.Manager
 
 /// 32 random bytes, base64url — a PKCE code verifier (RFC 7636 §4.1: 43 chars).
