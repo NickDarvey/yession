@@ -71,7 +71,24 @@ type PendingAct =
       /// stage 2). Only an agent sets it — a person's composer never waits on anything —
       /// and it rides the queue entry because the drain is what reads the doc and mints the
       /// block that records it.
-      Background : bool }
+      Background : bool
+      /// How wide the author's terminal was when they asked for this, if they had one.
+      ///
+      /// The size rides the ACT rather than sitting in a register beside the terminal, and
+      /// that is the whole of the policy. A shared register has to answer "whose viewport
+      /// wins", and every answer is wrong somewhere: smallest-wins is tmux's worst
+      /// inheritance (see `TerminalSize`), and any other pick makes the width depend on who
+      /// happened to be connected. A command has one author, and the output belongs to them.
+      ///
+      /// It matters more here than in live mode because block geometry is not ephemeral.
+      /// Resize a live screen and the program redraws; a block that ran at 200 columns is
+      /// 200-column text in the transcript for ever — for every later reader, for the agent's
+      /// digest, for replay.
+      ///
+      /// `None` is an act with no viewport to speak for: the agent's commands, and a person
+      /// whose terminals column is shut. It makes no claim, so the terminal keeps the width it
+      /// had — which is the last human's, or the 80x24 it opened at. No constant to defend.
+      Size : TerminalSize option }
 
 /// The name of the top-level `Y.XmlFragment` root that holds a draft/queue body. Stable across
 /// peers so every replica's `BodyRegistry` and editor bind to the same fragment (root types
@@ -120,12 +137,7 @@ type SyncedSessionState =
       /// `None` — the absence of the register — is "the provider's own default". The
       /// default is the absence again, so a session nobody has configured carries nothing
       /// restating what the provider already decides.
-      Model       : ModelId option
-      /// Each terminal's size, as a synced register (Plan 13, stage 2b). Synced rather than
-      /// per-viewer because a pty has ONE size and every peer is looking at the same screen:
-      /// resizing to the smallest viewer is tmux's worst inheritance, so a viewer with less
-      /// room scrolls instead. Absent means the default.
-      TerminalSizes : Map<TerminalId, TerminalSize> }
+      Model       : ModelId option }
 
 module SyncedSessionState =
 
@@ -138,13 +150,7 @@ module SyncedSessionState =
           SharedBrief = None
           TerminalDrafts = Map.empty
           Pending = Map.empty
-          Model = None
-          TerminalSizes = Map.empty }
-
-    /// A terminal's size, defaulting to 80x24 — the size every terminal has ever defaulted
-    /// to, and the one the transcript header records when a terminal opens.
-    let sizeOf (terminal: TerminalId) (state: SyncedSessionState) : TerminalSize =
-        state.TerminalSizes |> Map.tryFind terminal |> Option.defaultValue TerminalSize.default'
+          Model = None }
 
 /// The queue's total order. `Order` is a float register; ties (possible when two peers
 /// mint concurrently) are broken by `QueueId`, so the order is always a total,

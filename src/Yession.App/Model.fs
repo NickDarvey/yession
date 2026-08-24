@@ -1645,7 +1645,10 @@ module ClientModel =
                       Authority = Authority.ofAuthor (PeerRef author)
                       // A person's composer never waits on a command, so there is nothing
                       // for a background flag to spare them (Plan 20, stage 2).
-                      Background = false }
+                      Background = false
+                      // Nothing fills this in yet, so every command still runs at whatever
+                      // width the terminal had. The composer learns its own width next.
+                      Size = None }
                 model
                 |> withSynced
                     { model.Synced with

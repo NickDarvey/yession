@@ -164,6 +164,7 @@ let private queueEntry (terminal: TerminalId) (author: ActorRef) (n: string) : P
       Terminal = terminal
       Authority = Authority.ofAuthor author
       Order = 1.0
+      Size = None
       Background = false }
 
 /// The same, authored by the agent on a peer's credential — the only way an agent-authored
@@ -728,6 +729,46 @@ let tests =
                     let printed = records |> Seq.map (fun r -> r.Data) |> String.concat ""
                     Expect.isTrue (printed.Contains "/tmp")
                         (sprintf "the second block saw the first block's directory, got: %s" printed)
+                })
+
+        testCaseAsync "a command is sized before it is written, not after" <|
+            // The size rides the queue entry, and what has to be true is the ORDER: the pty
+            // learns the width before the command reaches it. Asserted on the transcript
+            // because that is where both facts are recorded — the `r` record `applySize`
+            // writes, and the `i` record the command line is echoed as — and because their
+            // order is the claim, not a number a shell happened to report.
+            withLiveTerminal "sized" (fun terminals id records _ _ _ ->
+                async {
+                    let ada = PeerRef (PeerId.create "ada" |> expect)
+                    let entry = { queueEntry id ada "1" with Size = Some { Cols = 132; Rows = 43 } }
+                    do! terminals.RunBlock id entry "echo sized" ignore
+                    let ordered = List.ofSeq records
+                    let indexOf predicate = ordered |> List.tryFindIndex predicate
+                    let resized = indexOf (fun r -> r.Kind = TranscriptResize && r.Data = "132x43")
+                    let written = indexOf (fun r -> r.Kind = TranscriptInput && r.Data.Contains "echo sized")
+                    Expect.isSome resized "the width the entry asked for reached the terminal"
+                    Expect.isSome written "the command was written"
+                    Expect.isTrue (resized < written) "and the resize came first, or the command ran at the old width"
+                })
+
+        testCaseAsync "a command that claims no width leaves the terminal at the one it had" <|
+            // The agent's commands carry no size, and neither does a person whose terminals
+            // column is shut. `None` has to mean "leave it alone": if it meant "use the
+            // default" instead, every agent command would drag a shared terminal back to 80x24
+            // under whoever had just widened it. The first block widens so the second can only
+            // pass by resizing NOTHING — against a fresh terminal it would pass either way.
+            withLiveTerminal "unsized" (fun terminals id records _ _ _ ->
+                async {
+                    let ada = PeerRef (PeerId.create "ada" |> expect)
+                    let wide = { queueEntry id ada "1" with Size = Some { Cols = 120; Rows = 40 } }
+                    do! terminals.RunBlock id wide "echo wide" ignore
+                    do! terminals.RunBlock id { queueEntry id ada "2" with Size = None } "echo after" ignore
+                    let resizes =
+                        records |> Seq.filter (fun r -> r.Kind = TranscriptResize) |> List.ofSeq
+                    Expect.equal
+                        (resizes |> List.map (fun r -> r.Data))
+                        [ "120x40" ]
+                        "the sizeless command resized nothing, so the width the first one set stands"
                 })
 
         testCaseAsync "killing the pty settles Exited rather than hanging" <|

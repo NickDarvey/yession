@@ -693,11 +693,6 @@ module SessionTerminals =
           /// The lease holder's viewport size, applied to the pty and the emulator. `false`
           /// when dropped, on the same terms as `Input`.
           Resize : TerminalId -> ActorRef -> int -> int -> bool
-          /// The synced size register, applied in BLOCK mode. Ignored while the terminal is
-          /// leased: there, the holder's own viewport is what their foreground program has to
-          /// agree with, and a bystander resizing the register must not redraw under them.
-          /// Idempotent, so the doc watcher can call it on every update.
-          ApplySize : TerminalId -> TerminalSize -> unit
           /// Terminals with a block running — the drain's `busy` set.
           Busy : unit -> Set<string>
           /// Terminals a peer is typing into — the drain's `leased` set, `busy`'s counterpart.
@@ -782,7 +777,6 @@ module SessionTerminals =
           Write = fun _ _ _ -> async { return Error "this session has no terminals" }
           Tail = fun _ _ _ -> async { return Error "this session has no terminals" }
           Resize = fun _ _ _ _ -> false
-          ApplySize = fun _ _ -> ()
           Busy = fun () -> Set.empty
           Leased = fun () -> Set.empty
           Lost = fun () -> Set.empty
@@ -1461,6 +1455,36 @@ module SessionTerminals =
                     return Ok ()
             }
 
+        /// Size the terminal to what a queued command asked for, before it runs.
+        ///
+        /// Not on the record any more: the drain used to call it in a loop over a synced
+        /// register that nothing ever wrote. The size belongs to the ACT — one author, one
+        /// width, no arbitration — so the only caller is the one function that runs a command,
+        /// and there is nothing left for the outside to ask.
+        ///
+        /// Three refusals, all of them the same shape: this only ever narrows what a resize
+        /// can be, never invents one. A size that has not changed is not a resize; an invalid
+        /// one reaches us from a doc any peer can write; and a LEASED terminal is live mode,
+        /// where the holder's own viewport is what their foreground program has to agree with.
+        /// (The drain already holds the queue for a leased terminal, so the last is a guard
+        /// against a race rather than a path — and it stays because the rule is the terminal's,
+        /// not the drain's.)
+        let applySize (id: TerminalId) (size: TerminalSize) : unit =
+            let key = TerminalId.value id
+            let unchanged =
+                match appliedSize.TryGetValue key with
+                | true, current -> current = size
+                | _ -> false
+            if unchanged || not (TerminalSize.isValid size) || not (canResize key) || Map.containsKey key leases then ()
+            else
+                match live.TryGetValue key with
+                | true, terminal ->
+                    terminal.Shell |> Option.iter (fun pty -> pty.Resize size.Cols size.Rows)
+                    terminal.Emulator.Resize size.Cols size.Rows
+                    emit id terminal TranscriptResize (TerminalSize.format size)
+                    appliedSize.[key] <- size
+                | _ -> ()
+
         let runBlock (terminalId: TerminalId) (entry: PendingAct) (command: string) (onStarted: unit -> unit) : Async<unit> =
             async {
                 let key = TerminalId.value terminalId
@@ -1504,6 +1528,16 @@ module SessionTerminals =
                         runningAuthor.Remove key |> ignore
                         return ()
                     | Approved ->
+                        // The width this command asked for, applied before anything is
+                        // recorded. Before `markKeyframe` specifically, because the keyframe is
+                        // built from the size: taken after it, a ranged replay of this block
+                        // would paint at the geometry the block did not run at, and the `r`
+                        // record would land inside the range instead of ahead of it.
+                        //
+                        // No size is no resize. The agent's commands carry none, and a person
+                        // whose terminals column is shut carries none either, so the terminal
+                        // keeps whatever width the last one to ask for a width left it.
+                        entry.Size |> Option.iter (applySize terminalId)
                         let blockId = mintBlockId ()
                         // Taken BEFORE the command is written, which is forced by the anchor
                         // ordering below and is the honest reading anyway: on a pty the shell
@@ -1895,24 +1929,6 @@ module SessionTerminals =
                     true
                 | None -> false
 
-        let applySize (id: TerminalId) (size: TerminalSize) : unit =
-            let key = TerminalId.value id
-            let unchanged =
-                match appliedSize.TryGetValue key with
-                | true, current -> current = size
-                | _ -> false
-            // Leased terminals are the holder's to size, and an invalid size reaches us from a
-            // doc any peer can write — neither is a resize.
-            if unchanged || not (TerminalSize.isValid size) || not (canResize key) || Map.containsKey key leases then ()
-            else
-                match live.TryGetValue key with
-                | true, terminal ->
-                    terminal.Shell |> Option.iter (fun pty -> pty.Resize size.Cols size.Rows)
-                    terminal.Emulator.Resize size.Cols size.Rows
-                    emit id terminal TranscriptResize (TerminalSize.format size)
-                    appliedSize.[key] <- size
-                | _ -> ()
-
         let reconcileAtBoot () : Async<unit> =
             async {
                 // Every terminal the log still calls open belongs to a process that is
@@ -2174,7 +2190,6 @@ module SessionTerminals =
           Resize = resize
           Write = write
           Tail = tail
-          ApplySize = applySize
           Busy = fun () -> busy
           Leased = fun () -> TerminalLeases.held leases
           Lost = fun () -> lost
@@ -2257,14 +2272,6 @@ module TerminalScheduler =
             match SyncedStateSync.ofDoc doc with
             | Error _ -> ()
             | Ok synced ->
-
-            // The size register's block-mode path (Plan 13, stage 2e). `TerminalResize` is
-            // live-mode only, so in block mode the Process is what tells the pty its size —
-            // a shell that never learns its size is the one that redraws wrongly. Run before
-            // the queue check rather than after it, because a terminal with nothing queued is
-            // exactly the one whose size a peer is likely to be adjusting.
-            for terminal, size in Map.toList synced.TerminalSizes do
-                terminals.ApplySize terminal size
 
             if Map.isEmpty synced.Pending then () else
 
