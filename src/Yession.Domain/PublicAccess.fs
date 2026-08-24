@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Link
+
+open Yession.Domain
 
 /// Where Yession is reachable from OUTSIDE this machine (Plan 09).
 ///

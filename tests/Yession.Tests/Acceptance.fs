@@ -14,6 +14,7 @@ module Yession.Tests.Acceptance
 open System
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Link
 open Yession.Domain.Terminals
 open Yession.Domain.Collab
 open Yession.Domain.Tools

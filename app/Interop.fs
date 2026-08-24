@@ -5,6 +5,7 @@ module Yession.Host.Interop
 // actually used is bound; everything is event-callback based, matching libdatachannel.
 
 open Fable.Core
+open Yession.Domain.Link
 open Fable.Core.JsInterop
 
 // --- Awaiting a promise ------------------------------------------------------
@@ -218,8 +219,8 @@ let envOr (name: string) (fallback: string) : string = jsNative
 /// Read once per process at boot. The Manager parses it to render open links and to be
 /// its own OIDC issuer; a session parses the same variables, inherited by plain env, to
 /// build its OAuth redirect URI and to know the path it is mounted under.
-let publicAccess () : Result<Yession.Domain.PublicAccess, string> =
-    Yession.Domain.PublicAccess.create (envOr "YESSION_MANAGER_URL" "") (envOr "YESSION_SESSION_URL" "")
+let publicAccess () : Result<Yession.Domain.Link.PublicAccess, string> =
+    Yession.Domain.Link.PublicAccess.create (envOr "YESSION_MANAGER_URL" "") (envOr "YESSION_SESSION_URL" "")
 
 /// Terminate the Node process with an exit code.
 [<Emit("process.exit($0)")>]

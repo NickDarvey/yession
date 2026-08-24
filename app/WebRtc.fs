@@ -9,6 +9,7 @@ module Yession.Host.WebRtc
 open Fable.Core
 open Fable.Core.JsInterop
 open Yession.Domain
+open Yession.Domain.Link
 open Yession.SessionProcess
 open Yession.Host.Interop
 

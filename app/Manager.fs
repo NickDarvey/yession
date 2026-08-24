@@ -9,6 +9,7 @@ module Yession.Host.Manager
 
 open System
 open Yession.Domain
+open Yession.Domain.Link
 open Yession.SessionProcess
 
 /// A Session Process the Manager has launched and registered.

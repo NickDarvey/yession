@@ -1,6 +1,7 @@
 namespace Yession.SessionProcess
 
 open Yession.Domain
+open Yession.Domain.Link
 
 /// The Session Process side of a single peer connection: the token-gated hello/accept
 /// handshake, presence events, and the receive pump. `State` frames are handed to the

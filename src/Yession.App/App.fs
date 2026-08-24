@@ -4,6 +4,7 @@ open Elmish
 open Yjs
 open Ylmish.Codec
 open Yession.Domain
+open Yession.Domain.Link
 open Yession.Domain.Terminals
 open Yession.Domain.Collab
 

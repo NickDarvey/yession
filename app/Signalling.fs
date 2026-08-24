@@ -12,6 +12,7 @@ module Yession.Host.Signalling
 
 open Fable.Core.JsInterop
 open Yession.Domain
+open Yession.Domain.Link
 open Yession.SessionProcess
 open Yession.Host.Interop
 open Yession.Host.WebRtc
