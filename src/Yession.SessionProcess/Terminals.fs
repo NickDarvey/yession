@@ -2,6 +2,7 @@ namespace Yession.SessionProcess
 
 open System
 open Yession.Domain
+open Yession.Domain.Collab
 
 /// One terminal's durable transcript, as a capability (Plan 12). The Session
 /// Process appends to it BEFORE broadcasting a record, so a dropped frame costs latency

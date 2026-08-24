@@ -1,6 +1,7 @@
 namespace Yession.SessionProcess
 
 open Yession.Domain
+open Yession.Domain.Collab
 open Yession.Domain.Chat
 
 /// The Session Process Elmish model and its sub-states. The model holds a single typed

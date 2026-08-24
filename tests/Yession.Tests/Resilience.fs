@@ -31,6 +31,7 @@ open Fable.Pyxpecto
 open Yjs
 open Ylmish
 open Yession.Domain
+open Yession.Domain.Collab
 open Yession.App
 open Yession.Host
 open Yession.Tests.Support

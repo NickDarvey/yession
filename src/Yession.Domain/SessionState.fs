@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Collab
+
+open Yession.Domain
 
 /// Collaborative session state shapes shared by the Session Process and the Browser
 /// Client. These are the model shapes only; the Yjs/Ylmish encoding that keeps them in

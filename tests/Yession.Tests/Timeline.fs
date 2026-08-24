@@ -7,6 +7,7 @@ module Yession.Tests.Timeline
 open System
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Collab
 open Yession.Domain.Chat
 open Yession.App
 

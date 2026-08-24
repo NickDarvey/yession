@@ -7,6 +7,7 @@ module Yession.Host.Host
 open System
 open Yjs
 open Yession.Domain
+open Yession.Domain.Collab
 open Yession.Domain.Tools
 open Yession.SessionProcess
 
