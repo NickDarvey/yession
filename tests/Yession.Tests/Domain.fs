@@ -232,29 +232,29 @@ let private frameSerializationTests =
                   RepoBranchSwitched { MessageId = messageId; Repo = RepoRef.create "octo/hello" |> expect; Branch = "feature/x"; Created = true; Actor = UserRef (UserId.create "alice" |> expect) }
                   WorkSandboxStarted
                     { MessageId = messageId
-                      Sandbox = SandboxName.create "test" |> expect
+                      Sandbox = SandboxRef.parse "test" |> expect
                       Backend = "srt"
                       Forwarded = [ "github" ]
                       CredentialOwner = Some (UserRef (UserId.create "alice" |> expect))
                       Actor = ActorRef.Agent }
                   WorkSandboxStarted
                     { MessageId = messageId
-                      Sandbox = SandboxName.defaultName
+                      Sandbox = SandboxRef.defaultRef
                       Backend = "host"
                       Forwarded = []
                       CredentialOwner = None
                       Actor = PeerRef peerId }
-                  WorkSandboxStopped { MessageId = messageId; Sandbox = SandboxName.create "test" |> expect; Actor = ActorRef.Agent }
+                  WorkSandboxStopped { MessageId = messageId; Sandbox = SandboxRef.parse "test" |> expect; Actor = ActorRef.Agent }
                   // The shell profile (Plan 25): both cases, because a set and a clear are
                   // one event and the difference between them is the whole payload.
                   ShellProfileSet
                     { MessageId = messageId
-                      Sandbox = SandboxName.defaultName
+                      Sandbox = SandboxRef.defaultRef
                       WorkingDirectory = Some "/repos/octo/hello"
                       Actor = ActorRef.Agent }
                   ShellProfileSet
                     { MessageId = messageId
-                      Sandbox = SandboxName.create "test" |> expect
+                      Sandbox = SandboxRef.parse "test" |> expect
                       WorkingDirectory = None
                       Actor = PeerRef peerId }
                   // Tool use (Plan 16): both argument cases, because they are different
@@ -290,10 +290,28 @@ let private frameSerializationTests =
                       Author = ActorRef.System
                       Body = "old line" })
                 "a line without queueId decodes with QueueId = None"
+
+        testCase "a sandbox persisted before repos could declare one still decodes" <| fun () ->
+            // The scope rides in the SAME string rather than a new field, so a log written
+            // when every sandbox was the session's own reads back as session-owned — the
+            // compatibility is a property of the wire form, not a branch in the decoder.
+            let legacy =
+                """{"type":"workSandboxStarted","payload":{"messageId":"msg-legacy","sandbox":"build","backend":"srt","forwarded":[],"credentialOwner":null,"actor":{"kind":"agent"}}}"""
+            let decoded = Codec.fromString Codec.sessionEvent legacy |> expect
+            Expect.equal
+                decoded
+                (WorkSandboxStarted
+                    { MessageId = MessageId.create "msg-legacy" |> expect
+                      Sandbox = SandboxRef.create SessionOwned (SandboxName.create "build" |> expect)
+                      Backend = "srt"
+                      Forwarded = []
+                      CredentialOwner = None
+                      Actor = ActorRef.Agent })
+                "a bare name is the sandbox the session itself owns"
     ]
 
 let private shellProfileTests =
-    let sandboxNamed name = SandboxName.create name |> expect
+    let sandboxNamed name = SandboxRef.create SessionOwned (SandboxName.create name |> expect)
     let profileSet sandbox cwd : SessionEvent =
         ShellProfileSet
             { MessageId = MessageId.create "msg-1" |> expect
@@ -306,41 +324,41 @@ let private shellProfileTests =
         testCase "the newest set for a sandbox wins" <| fun () ->
             let folded =
                 fold
-                    [ profileSet SandboxName.defaultName (Some "/repos/one")
-                      profileSet SandboxName.defaultName (Some "/repos/two") ]
+                    [ profileSet SandboxRef.defaultRef (Some "/repos/one")
+                      profileSet SandboxRef.defaultRef (Some "/repos/two") ]
             Expect.equal
-                (ShellProfileProjection.workingDirectory SandboxName.defaultName folded)
+                (ShellProfileProjection.workingDirectory SandboxRef.defaultRef folded)
                 (Some "/repos/two")
                 "a profile is replaced, never accumulated"
 
         testCase "a set leaves the other sandboxes alone" <| fun () ->
             let folded =
                 fold
-                    [ profileSet SandboxName.defaultName (Some "/repos/one")
+                    [ profileSet SandboxRef.defaultRef (Some "/repos/one")
                       profileSet (sandboxNamed "test") (Some "/repos/two") ]
             Expect.equal
-                (ShellProfileProjection.workingDirectory SandboxName.defaultName folded)
+                (ShellProfileProjection.workingDirectory SandboxRef.defaultRef folded)
                 (Some "/repos/one")
                 "a path is only a path inside the filesystem that has it"
 
         testCase "a clear returns its sandbox to no profile" <| fun () ->
             let folded =
                 fold
-                    [ profileSet SandboxName.defaultName (Some "/repos/one")
-                      profileSet SandboxName.defaultName None ]
+                    [ profileSet SandboxRef.defaultRef (Some "/repos/one")
+                      profileSet SandboxRef.defaultRef None ]
             Expect.equal
-                (ShellProfileProjection.workingDirectory SandboxName.defaultName folded)
+                (ShellProfileProjection.workingDirectory SandboxRef.defaultRef folded)
                 None
                 "back to wherever the sandbox puts them"
 
         testCase "a cleared sandbox is not listed at all" <| fun () ->
             let folded =
                 fold
-                    [ profileSet SandboxName.defaultName (Some "/repos/one")
+                    [ profileSet SandboxRef.defaultRef (Some "/repos/one")
                       profileSet (sandboxNamed "test") (Some "/repos/two")
-                      profileSet SandboxName.defaultName None ]
+                      profileSet SandboxRef.defaultRef None ]
             Expect.equal
-                (ShellProfileProjection.listed folded |> List.map (fst >> SandboxName.value))
+                (ShellProfileProjection.listed folded |> List.map (fst >> SandboxRef.render))
                 [ "test" ]
                 "\"has a profile\" and \"starts somewhere\" are one question"
 
@@ -352,7 +370,7 @@ let private shellProfileTests =
                 """{"type":"shellProfileSet","payload":{"messageId":"msg-1","sandbox":"default","workingDirectory":"/repos/octo/hello","actor":{"kind":"agent"}}}"""
             Expect.equal
                 (Codec.fromString Codec.sessionEvent pinned |> expect)
-                (profileSet SandboxName.defaultName (Some "/repos/octo/hello"))
+                (profileSet SandboxRef.defaultRef (Some "/repos/octo/hello"))
                 "the durable form decodes to the event"
 
         testCase "a directory under a tree is inside it, and so is the tree itself" <| fun () ->
@@ -379,7 +397,7 @@ let private shellProfileTests =
                   Offset = EventOffset.create 1L |> expect
                   Actor = ActorRef.Agent
                   Timestamp = DateTimeOffset (2026, 8, 22, 0, 0, 0, TimeSpan.Zero)
-                  Event = profileSet SandboxName.defaultName (Some "/repos/octo/hello") }
+                  Event = profileSet SandboxRef.defaultRef (Some "/repos/octo/hello") }
             let proj, _ =
                 ConversationProjection.applyEvents None [ envelope ] ConversationProjection.empty
             match proj.Items with
@@ -393,7 +411,7 @@ let private shellProfileTests =
                 """{"type":"shellProfileSet","payload":{"messageId":"msg-1","sandbox":"default","actor":{"kind":"agent"}}}"""
             Expect.equal
                 (Codec.fromString Codec.sessionEvent pinned |> expect)
-                (profileSet SandboxName.defaultName None)
+                (profileSet SandboxRef.defaultRef None)
                 "an absent directory decodes as None rather than failing the log open"
     ]
 

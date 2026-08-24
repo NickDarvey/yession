@@ -54,7 +54,7 @@ module ShellProfile =
 /// and one session-wide string would be a fact in one of them and a broken shell in the
 /// rest.
 type ShellProfileProjection =
-    { Profiles : Map<SandboxName, ShellProfile> }
+    { Profiles : Map<SandboxRef, ShellProfile> }
 
 module ShellProfileProjection =
 
@@ -72,14 +72,14 @@ module ShellProfileProjection =
             | None -> { Profiles = proj.Profiles |> Map.remove p.Sandbox }
         | _ -> proj
 
-    let tryFind (sandbox: SandboxName) (proj: ShellProfileProjection) : ShellProfile option =
+    let tryFind (sandbox: SandboxRef) (proj: ShellProfileProjection) : ShellProfile option =
         proj.Profiles |> Map.tryFind sandbox
 
     /// Where a shell opened in this sandbox starts, if anywhere — what a spawn asks, and
     /// the only thing it asks.
-    let workingDirectory (sandbox: SandboxName) (proj: ShellProfileProjection) : string option =
+    let workingDirectory (sandbox: SandboxRef) (proj: ShellProfileProjection) : string option =
         proj |> tryFind sandbox |> Option.bind (fun profile -> profile.WorkingDirectory)
 
     /// The sandboxes that have one, in name order — the query's rows.
-    let listed (proj: ShellProfileProjection) : (SandboxName * ShellProfile) list =
-        proj.Profiles |> Map.toList |> List.sortBy (fst >> SandboxName.value)
+    let listed (proj: ShellProfileProjection) : (SandboxRef * ShellProfile) list =
+        proj.Profiles |> Map.toList |> List.sortBy (fst >> SandboxRef.render)

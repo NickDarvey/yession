@@ -275,7 +275,7 @@ and TerminalOpened =
       /// saying an attached serial port is in `default` would be inventing a fact — and the
       /// two consumers both need the difference: the panel says where a terminal is, and
       /// the block runner picks an environment by it.
-      Sandbox : SandboxName option
+      Sandbox : SandboxRef option
       /// Can this terminal's stream be asked for again (Plan 19, step 4)?
       ///
       /// The provider's claim about its own tool, recorded here because a person meets this
@@ -448,7 +448,12 @@ and RepoBranchSwitched =
 
 and WorkSandboxStarted =
     { MessageId : MessageId
-      Sandbox : SandboxName
+      /// Which sandbox, scope included. The wire form is `SandboxRef.render`, and it is
+      /// backward compatible BY CONSTRUCTION rather than by a migration: a session-owned ref
+      /// renders to the bare name every log already holds, and `parse` reads a bare name back
+      /// as session-owned. A log written before repos could declare sandboxes genuinely had
+      /// only session-owned ones, so that is not a guess.
+      Sandbox : SandboxRef
       /// Which backend it came up on, so the record says what confinement it actually
       /// got rather than what the operator configured at some point.
       Backend : string
@@ -466,14 +471,15 @@ and WorkSandboxStarted =
 
 and WorkSandboxStopped =
     { MessageId : MessageId
-      Sandbox : SandboxName
+      Sandbox : SandboxRef
       Actor : ActorRef }
 
 and ShellProfileSet =
     { MessageId : MessageId
       /// Which sandbox's shells this is about. A path is only a path inside the filesystem
-      /// that has it, so the profile is per sandbox rather than per session.
-      Sandbox : SandboxName
+      /// that has it, so the profile is per sandbox rather than per session — and a repo's
+      /// sandbox is a sandbox, so this addresses one the same way everything else does.
+      Sandbox : SandboxRef
       /// Where a shell opened in that sandbox starts. `None` is the CLEAR — back to the
       /// sandbox's own default, which is what every terminal did before this plan.
       WorkingDirectory : string option

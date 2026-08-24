@@ -148,7 +148,7 @@ let private withPreparedTerminal
                     []
                     ShellProfileProjection.empty
             do! prepare terminals
-            match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) (SandboxShell SandboxName.defaultName) name with
+            match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) (SandboxShell SandboxRef.defaultRef) name with
             | Error e -> failwith e
             | Ok id ->
                 do! body terminals id records log (fun () -> reDrains) advance
@@ -764,7 +764,7 @@ let tests =
              withPreparedTerminal
                  (fun terminals ->
                      async {
-                         match! terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some directory) with
+                         match! terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some directory) with
                          | Error e -> failwithf "the profile would not set: %s" e
                          | Ok _ -> ()
                      })

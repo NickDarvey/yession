@@ -145,7 +145,7 @@ let private servicesOver (service: Repos.ReposService) : Commands.CommandService
 /// somebody has already said where terminals start.
 let private servicesProfiledOver (cwd: string) (service: Repos.ReposService) : Commands.CommandServices =
     let profile : ShellProfileProjection =
-        { Profiles = Map.ofList [ SandboxName.defaultName, { WorkingDirectory = Some cwd } ] }
+        { Profiles = Map.ofList [ SandboxRef.defaultRef, { WorkingDirectory = Some cwd } ] }
     { servicesOver service with
         Terminals = fun () -> { SessionTerminals.unavailable with Profiles = fun () -> profile } }
 

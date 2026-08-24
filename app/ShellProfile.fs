@@ -43,7 +43,7 @@ let query (terminals: unit -> SessionTerminals.SessionTerminals) : Queries.Query
                         (terminals ()).Profiles ()
                         |> ShellProfileProjection.listed
                         |> List.map (fun (sandbox, profile) ->
-                            [ "sandbox", CellText (SandboxName.value sandbox)
+                            [ "sandbox", CellText (SandboxRef.render sandbox)
                               "cwd",
                               (match profile.WorkingDirectory with
                                | Some cwd -> CellText cwd

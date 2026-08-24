@@ -160,7 +160,7 @@ let private drainTests =
 // --- The projection --------------------------------------------------------------------
 
 let private opened (id: TerminalId) (title: string) =
-    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = PeerRef ada; Title = title; Sandbox = Some SandboxName.defaultName; Renewable = false }
+    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = PeerRef ada; Title = title; Sandbox = Some SandboxRef.defaultRef; Renewable = false }
 
 let private started (id: TerminalId) (b: string) (command: string) (fromSeq: int) =
     SessionEvent.TerminalBlockStarted
@@ -1690,7 +1690,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 Expect.isTrue (terminals.IsOpen id) "it is open"
                 let! events = eventsOf log
@@ -1708,7 +1708,7 @@ let private managerTests =
                     scriptedEnvironment (fun _ -> [ Stdout, "hello\n"; Stderr, "warn\n" ], 0)
                 let openTranscript, linesOf, _, _, readTranscript = recordingTranscripts ()
                 let terminals, records, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 let entry = entry "a1" id (PeerRef ada) 1.0
                 let mutable startedCalled = 0
@@ -1763,7 +1763,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "total 4\nfile\n" ], 0)
                 let openTranscript, linesOf, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "ls" ignore
                 let output =
@@ -1780,7 +1780,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stderr, "no such file\n" ], 2)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "cat missing" ignore
                 let! events = eventsOf log
@@ -1799,7 +1799,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "\u001b[31mred\r\n" ], 0)
                 let openTranscript, _, readKeyframes, awaitKeyframes, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "first" ignore
                 do! terminals.RunBlock id (entry "a2" id (PeerRef ada) 2.0) "second" ignore
@@ -1829,7 +1829,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id ActorRef.Agent 1.0) "rm -rf build" ignore
                 let! events = eventsOf log
@@ -1849,7 +1849,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, flood ], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "yes" ignore
                 let! events = eventsOf log
@@ -1883,7 +1883,7 @@ let private managerTests =
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 let! _ = terminals.Close id "closed by a peer"
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "make" ignore
@@ -1905,7 +1905,7 @@ let private schedulerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "ok\n" ], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
@@ -1930,7 +1930,7 @@ let private schedulerTests =
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
@@ -1956,7 +1956,7 @@ let private schedulerTests =
                         }
                 let terminals, _, _ =
                     makeTerminalsGated AttachTerminal.unavailable refuseFirst log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
@@ -1993,7 +1993,7 @@ let private schedulerTests =
                         }
                 let terminals, _, _ =
                     makeTerminalsGated AttachTerminal.unavailable recording log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
@@ -2017,7 +2017,7 @@ let private schedulerTests =
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 // The crash window: a block start reached the log, the doc removal did not.
@@ -2174,7 +2174,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 Expect.isError shell "a shell terminal IS a need, so a refused sandbox refuses the open"
                 let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 Expect.isOk device "an attached one needs nothing this session runs"
@@ -2704,7 +2704,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
 
                 match! terminals.Tail (expect shell) None None with
                 | Ok _ -> failwith "a shell's output is its blocks', and reading it twice is two answers to one question"
@@ -2718,7 +2718,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, written, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 match! terminals.Write id ActorRef.Agent "rm -rf /\r" with
                 | Ok () -> failwith "raw bytes into a shell would be the door around the approval gate"
@@ -2736,7 +2736,7 @@ let private viewOf (isOpen: bool) (renewable: bool) : TerminalView =
     { TerminalId = terminalA
       Title = "build"
       OpenedBy = PeerRef ada
-      Sandbox = Some SandboxName.defaultName
+      Sandbox = Some SandboxRef.defaultRef
       Renewable = renewable
       IsOpen = isOpen
       ClosedReason = (if isOpen then None else Some "closed by nick")
@@ -2853,8 +2853,8 @@ let private agentTerminalTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! first = terminals.AgentTerminal SandboxName.defaultName "npm test"
-                let! again = terminals.AgentTerminal SandboxName.defaultName "npm run build"
+                let! first = terminals.AgentTerminal SandboxRef.defaultRef "npm test"
+                let! again = terminals.AgentTerminal SandboxRef.defaultRef "npm run build"
                 Expect.equal again first "the second command lands in the shell the first one used"
             }
 
@@ -2867,8 +2867,8 @@ let private agentTerminalTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let other = SandboxName.create "test" |> expect
-                let! default' = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let other = SandboxRef.parse "test" |> expect
+                let! default' = terminals.AgentTerminal SandboxRef.defaultRef "npm test"
                 let! test = terminals.AgentTerminal other "npm test"
                 Expect.notEqual test default' "a command for `test` cannot land in `default`"
             }
@@ -2881,10 +2881,10 @@ let private agentTerminalTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! first = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let! first = terminals.AgentTerminal SandboxRef.defaultRef "npm test"
                 let id = first |> expect
                 let! _ = terminals.Close id "closed by a peer"
-                let! next = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let! next = terminals.AgentTerminal SandboxRef.defaultRef "npm test"
                 Expect.notEqual next first "a fresh terminal, because the old one has no process"
             }
 
@@ -3037,9 +3037,9 @@ let private shellProfileTests =
                 // a `cd` typed at the prompt would echo into the audit trail on the re-arm
                 // path, need quoting for a path this code did not choose, and fail invisibly.
                 let terminals, _, ptySpawned, _, _ = fixture ()
-                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! set = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 Expect.isOk set "the directory is there, so the profile takes"
-                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 Expect.equal (ptyDirectories ptySpawned) [ Some checkout ] "the shell is spawned in the profile's directory"
             }
 
@@ -3048,8 +3048,8 @@ let private shellProfileTests =
                 // A shell's cwd is state its user is relying on. The one terminal that does
                 // move is the one nobody named, and it moves by being reopened.
                 let terminals, _, ptySpawned, _, _ = fixture ()
-                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 Expect.equal (ptyDirectories ptySpawned) [ None ] "nothing is re-spawned under a terminal already open"
             }
 
@@ -3066,9 +3066,9 @@ let private shellProfileTests =
                     scriptedEnvironment (fun arg -> (if arg = checkout then [ Stdout, probeAnswer checkoutAt ] else []), 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! set = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 Expect.isOk set "this fixture answers the probe with the directory it landed in"
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "pwd" ignore
                 Expect.equal
@@ -3085,7 +3085,7 @@ let private shellProfileTests =
                 // Asked of the SANDBOX, not of this process: under docker the path is inside a
                 // container we cannot see, and under srt the sandbox's read scope is not ours.
                 let terminals, _, _, _, _ = fixture ()
-                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some "/repos/gone")
+                let! set = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some "/repos/gone")
                 match set with
                 | Ok _ -> failwith "a directory that is not there must not become the profile"
                 | Error reason -> Expect.isTrue (reason.Contains "/repos/gone") "the refusal names the path"
@@ -3094,10 +3094,10 @@ let private shellProfileTests =
         testCaseAsync "a refused directory leaves the profile as it was" <|
             async {
                 let terminals, _, _, _, _ = fixture ()
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some "/repos/gone")
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some "/repos/gone")
                 Expect.equal
-                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxRef.defaultRef)
                     (Some checkout)
                     "a refusal changes nothing"
             }
@@ -3108,10 +3108,10 @@ let private shellProfileTests =
         testCaseAsync "a path from the repo verbs goes in as given, and is stored as it came" <|
             async {
                 let terminals, _, _, _, _ = fixture ()
-                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! set = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 Expect.isOk set "the path the repo tools answer with is a path this takes"
                 Expect.equal
-                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxRef.defaultRef)
                     (Some checkout)
                     "one vocabulary, in and out"
             }
@@ -3122,10 +3122,10 @@ let private shellProfileTests =
         testCaseAsync "an absolute path is stored the way a terminal reaches it" <|
             async {
                 let terminals, _, _, _, _ = fixture ()
-                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkoutAt)
+                let! set = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkoutAt)
                 Expect.isOk set "an absolute directory the sandbox has is still a directory it has"
                 Expect.equal
-                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxRef.defaultRef)
                     (Some checkout)
                     "the sandbox's own root never leaves the sandbox"
             }
@@ -3135,7 +3135,7 @@ let private shellProfileTests =
                 // An agent told it set the profile to a path in a vocabulary nothing else uses
                 // is an agent that will hand that path back to the next tool.
                 let terminals, _, _, _, _ = fixture ()
-                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkoutAt)
+                let! set = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkoutAt)
                 let said = set |> expect
                 Expect.isTrue (said.Contains (sprintf "start in %s." checkout)) "the answer names the reachable path"
                 Expect.isFalse (said.Contains checkoutAt) "and not the one only the sandbox can use"
@@ -3144,24 +3144,24 @@ let private shellProfileTests =
         testCaseAsync "a relative path that is nowhere in the sandbox is still refused" <|
             async {
                 let terminals, _, _, _, _ = fixture ()
-                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some "repos/octo/absent")
+                let! set = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some "repos/octo/absent")
                 Expect.isError set "resolving is not the same as accepting"
             }
 
         testCaseAsync "a clear returns new terminals to wherever the sandbox puts them" <|
             async {
                 let terminals, _, ptySpawned, _, _ = fixture ()
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName None
-                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef None
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 Expect.equal (ptyDirectories ptySpawned) [ None ] "back to what every terminal did before there were profiles"
             }
 
         testCaseAsync "a profile set in one sandbox does not move another's terminals" <|
             async {
                 let terminals, _, ptySpawned, _, _ = fixture ()
-                let other = SandboxName.create "test" |> expect
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let other = SandboxRef.parse "test" |> expect
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 let! _ = terminals.Open (PeerRef ada) (SandboxShell other) "build"
                 Expect.equal (ptyDirectories ptySpawned) [ None ] "a path is only a path inside the filesystem that has it"
             }
@@ -3176,7 +3176,7 @@ let private shellProfileTests =
                 let replayed =
                     [ SessionEvent.ShellProfileSet
                         { MessageId = MessageId.create "m-old" |> expect
-                          Sandbox = SandboxName.defaultName
+                          Sandbox = SandboxRef.defaultRef
                           WorkingDirectory = Some checkout
                           Actor = ActorRef.Agent } ]
                     |> List.fold ShellProfileProjection.applyEvent ShellProfileProjection.empty
@@ -3190,7 +3190,7 @@ let private shellProfileTests =
                         readTranscript
                         []
                         replayed
-                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 Expect.equal
                     (ptyDirectories ptySpawned)
                     [ Some checkout ]
@@ -3203,10 +3203,10 @@ let private shellProfileTests =
                 // it: set the profile, run `pwd`, get the old directory, conclude the tool did
                 // nothing. It is the manager's own, so nothing is lost but a shell's history.
                 let terminals, _, _, _, _ = fixture ()
-                let! first = terminals.AgentTerminal SandboxName.defaultName "git status"
+                let! first = terminals.AgentTerminal SandboxRef.defaultRef "git status"
                 let before = first |> expect
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
-                let! next = terminals.AgentTerminal SandboxName.defaultName "git status"
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
+                let! next = terminals.AgentTerminal SandboxRef.defaultRef "git status"
                 Expect.notEqual (next |> expect) before "the next command runs in a shell opened under the new profile"
             }
 
@@ -3215,18 +3215,18 @@ let private shellProfileTests =
                 // It was asked for. Taking somebody's shell away because a default changed is
                 // not a default's business.
                 let terminals, _, _, _, _ = fixture ()
-                let! opened = terminals.OpenAgentTerminal SandboxName.defaultName "tests"
+                let! opened = terminals.OpenAgentTerminal SandboxRef.defaultRef "tests"
                 let id = opened |> expect
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 Expect.isTrue (terminals.IsOpen id) "a named terminal keeps its shell"
             }
 
         testCaseAsync "a terminal a person opened is left alone" <|
             async {
                 let terminals, _, _, _, _ = fixture ()
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "mine"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "mine"
                 let id = opened |> expect
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 Expect.isTrue (terminals.IsOpen id) "a human's shell is not a default's to end"
             }
 
@@ -3238,13 +3238,13 @@ let private shellProfileTests =
                 let environment, _, release = blockingEnvironment ()
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let! opened = terminals.AgentTerminal SandboxRef.defaultRef "npm test"
                 let id = opened |> expect
                 let started, awaitStarted = latch ()
                 Async.StartImmediate (terminals.RunBlock id (entry "a1" id ActorRef.Agent 1.0) "npm test" started)
                 do! awaitStarted
                 Expect.isTrue (terminals.Busy () |> Set.contains (TerminalId.value id)) "the block is running"
-                let! set = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! set = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 Expect.isOk set "the profile still changes"
                 Expect.isTrue (terminals.IsOpen id) "but the running command is not killed for it"
                 release ()
@@ -3256,9 +3256,9 @@ let private shellProfileTests =
                 // that refuses to open because of a DEFAULT is a worse failure than the default
                 // being wrong, so it falls back once and records the reason where people read.
                 let terminals, _, _, linesOf, vanish = fixture ()
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 vanish ()
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 let id = opened |> expect
                 Expect.isTrue (terminals.IsOpen id) "the terminal opens"
                 let printed =
@@ -3274,10 +3274,10 @@ let private shellProfileTests =
                 // has been deleted would send every future terminal somewhere that no longer
                 // exists.
                 let terminals, _, _, _, _ = fixture ()
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 let! _ = terminals.ClearProfilesUnder ActorRef.Agent "repos/octo"
                 Expect.equal
-                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxRef.defaultRef)
                     None
                     "the profile goes with the tree"
             }
@@ -3291,9 +3291,9 @@ let private shellProfileTests =
                 // cleared nothing, and left every future terminal opening into a checkout
                 // that had been deleted.
                 let terminals, _, _, _, _ = fixture ()
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkoutAt)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkoutAt)
                 let! cleared = terminals.ClearProfilesUnder ActorRef.Agent checkout
-                Expect.equal (cleared |> List.map SandboxName.value) [ "default" ] "the tree the repo verb named finds it"
+                Expect.equal (cleared |> List.map SandboxRef.render) [ "default" ] "the tree the repo verb named finds it"
             }
 
         testCaseAsync "it answers with the sandboxes it cleared" <|
@@ -3301,19 +3301,19 @@ let private shellProfileTests =
                 // The caller says so in its own answer, so the model learns its next terminal
                 // moved without having to ask.
                 let terminals, _, _, _, _ = fixture ()
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 let! cleared = terminals.ClearProfilesUnder ActorRef.Agent checkout
-                Expect.equal (cleared |> List.map SandboxName.value) [ "default" ] "the one it cleared, named"
+                Expect.equal (cleared |> List.map SandboxRef.render) [ "default" ] "the one it cleared, named"
             }
 
         testCaseAsync "a profile in a sibling that shares a prefix is left alone" <|
             async {
                 let terminals, _, _, _, _ = fixture ()
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 let! cleared = terminals.ClearProfilesUnder ActorRef.Agent "repos/octo/hell"
                 Expect.isEmpty cleared "a prefix is not a parent"
                 Expect.equal
-                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxRef.defaultRef)
                     (Some checkout)
                     "and the profile still points where it did"
             }
@@ -3321,9 +3321,9 @@ let private shellProfileTests =
         testCaseAsync "the next terminal after a cleared profile opens where the sandbox puts it" <|
             async {
                 let terminals, _, ptySpawned, _, _ = fixture ()
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 let! _ = terminals.ClearProfilesUnder ActorRef.Agent checkout
-                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 Expect.equal (ptyDirectories ptySpawned) [ None ] "nothing is asked for a directory that has gone"
             }
 
@@ -3333,7 +3333,7 @@ let private shellProfileTests =
                 // settings section. Nobody writes a panel; what is pinned is that the rows say
                 // what the manager holds.
                 let terminals, _, _, _, _ = fixture ()
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 let registration = Yession.Host.ShellProfile.query (fun () -> terminals)
                 match! registration.Read () with
                 | Error e -> failwithf "the query failed: %s" e
@@ -3359,11 +3359,11 @@ let private shellProfileTests =
                 // Left alone for a person to fix: a manager that cleared it on one failed spawn
                 // would silently undo a decision nobody revisited.
                 let terminals, _, _, _, vanish = fixture ()
-                let! _ = terminals.SetProfile ActorRef.Agent SandboxName.defaultName (Some checkout)
+                let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 vanish ()
-                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
                 Expect.equal
-                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxName.defaultName)
+                    (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxRef.defaultRef)
                     (Some checkout)
                     "a failed spawn is not a decision"
             }
@@ -3383,7 +3383,7 @@ let private agentVerbTests =
         async {
             let mutable last = Unchecked.defaultof<Result<TerminalId, string>>
             for n in 1 .. 4 do
-                let! opened = terminals.OpenAgentTerminal SandboxName.defaultName (sprintf "job-%d" n)
+                let! opened = terminals.OpenAgentTerminal SandboxRef.defaultRef (sprintf "job-%d" n)
                 last <- opened
             return last
         }
@@ -3392,7 +3392,7 @@ let private agentVerbTests =
         testCaseAsync "a terminal it opens is named for the job, and is its own" <|
             async {
                 let terminals, log = fixture ()
-                let! opened = terminals.OpenAgentTerminal SandboxName.defaultName "tests"
+                let! opened = terminals.OpenAgentTerminal SandboxRef.defaultRef "tests"
                 let id = opened |> expect
                 Expect.isTrue (terminals.OpenedByAgent id) "the agent may close what it opened"
                 let! events = eventsOf log
@@ -3406,7 +3406,7 @@ let private agentVerbTests =
                 // make, "no" on its own is a wall it can only retry.
                 let terminals, _ = fixture ()
                 let! _ = openFour terminals
-                let! fifth = terminals.OpenAgentTerminal SandboxName.defaultName "one more"
+                let! fifth = terminals.OpenAgentTerminal SandboxRef.defaultRef "one more"
                 match fifth with
                 | Ok _ -> failwith "a fifth terminal must not open"
                 | Error reason ->
@@ -3419,7 +3419,7 @@ let private agentVerbTests =
                 let terminals, _ = fixture ()
                 let! fourth = openFour terminals
                 let! _ = terminals.Close (fourth |> expect) "done"
-                let! next = terminals.OpenAgentTerminal SandboxName.defaultName "one more"
+                let! next = terminals.OpenAgentTerminal SandboxRef.defaultRef "one more"
                 Expect.isTrue (Result.isOk next) "the limit counts what is OPEN, not what ever was"
             }
 
@@ -3430,14 +3430,14 @@ let private agentVerbTests =
                 // to ask for.
                 let terminals, _ = fixture ()
                 let! _ = openFour terminals
-                let! general = terminals.AgentTerminal SandboxName.defaultName "git status"
+                let! general = terminals.AgentTerminal SandboxRef.defaultRef "git status"
                 Expect.isTrue (Result.isOk general) "the one door is never closed by the cap"
             }
 
         testCaseAsync "a terminal a person opened is not the agent's" <|
             async {
                 let terminals, _ = fixture ()
-                let! theirs = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "mine"
+                let! theirs = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "mine"
                 Expect.isFalse
                     (terminals.OpenedByAgent (theirs |> expect))
                     "a human typing in their own shell is not the agent's to end"

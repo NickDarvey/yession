@@ -209,7 +209,7 @@ module ConversationProjection =
                     proj.Items
                     @ [ { MessageId = s.MessageId
                           Author = s.Actor
-                          Body = sprintf "started sandbox %s (%s)%s" (SandboxName.value s.Sandbox) s.Backend forwarded
+                          Body = sprintf "started sandbox %s (%s)%s" (SandboxRef.render s.Sandbox) s.Backend forwarded
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
                           Offset = envelope.Offset
@@ -220,7 +220,7 @@ module ConversationProjection =
                     proj.Items
                     @ [ { MessageId = s.MessageId
                           Author = s.Actor
-                          Body = sprintf "stopped sandbox %s" (SandboxName.value s.Sandbox)
+                          Body = sprintf "stopped sandbox %s" (SandboxRef.render s.Sandbox)
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
                           Offset = envelope.Offset
@@ -237,11 +237,11 @@ module ConversationProjection =
                           Body =
                             match p.WorkingDirectory with
                             | Some cwd ->
-                                sprintf "new terminals in %s start in %s" (SandboxName.value p.Sandbox) cwd
+                                sprintf "new terminals in %s start in %s" (SandboxRef.render p.Sandbox) cwd
                             | None ->
                                 sprintf
                                     "new terminals in %s start where the sandbox puts them"
-                                    (SandboxName.value p.Sandbox)
+                                    (SandboxRef.render p.Sandbox)
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
                           Offset = envelope.Offset

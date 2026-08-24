@@ -554,7 +554,7 @@ let private wakeTests =
 
 let private terminalB = TerminalId.create "term-b" |> expect
 
-let private openedIn (id: TerminalId) (sandbox: SandboxName option) =
+let private openedIn (id: TerminalId) (sandbox: SandboxRef option) =
     SessionEvent.TerminalOpened
         { TerminalId = id; OpenedBy = ActorRef.Agent; Title = "work"; Sandbox = sandbox; Renewable = false }
 
@@ -598,7 +598,7 @@ let private vocabularyTests =
             Expect.isNone
                 (AgentWake.pendingReason
                     [ turnStarted "1"
-                      openedIn terminalB (Some SandboxName.defaultName)
+                      openedIn terminalB (Some SandboxRef.defaultRef)
                       blockStartedIn terminalB "b1" false (Some (PeerRef bob))
                       closedNow terminalB ])
                 "a sandbox shell is not a stream"
@@ -616,7 +616,7 @@ let private vocabularyTests =
             Expect.equal
                 (AgentWake.pendingReason
                     [ turnStarted "1"
-                      openedIn terminalB (Some SandboxName.defaultName)
+                      openedIn terminalB (Some SandboxRef.defaultRef)
                       blockStartedIn terminalB "b1" false (Some (PeerRef bob))
                       integrationLost terminalB ]
                  |> Option.map fst)
@@ -631,7 +631,7 @@ let private vocabularyTests =
             Expect.equal
                 (AgentWake.pendingReason
                     [ turnStarted "1"
-                      openedIn terminalB (Some SandboxName.defaultName)
+                      openedIn terminalB (Some SandboxRef.defaultRef)
                       blockStartedIn terminalB "b1" false (Some (PeerRef bob))
                       integrationLost terminalB ]
                  |> Option.map snd)
@@ -645,7 +645,7 @@ let private vocabularyTests =
             Expect.equal
                 (AgentWake.pendingReason
                     [ turnStarted "1"
-                      openedIn terminalB (Some SandboxName.defaultName)
+                      openedIn terminalB (Some SandboxRef.defaultRef)
                       blockStarted "b1" true (Some (PeerRef ada))
                       blockCompleted "b1"
                       blockStartedIn terminalB "b2" false (Some (PeerRef bob))
@@ -676,7 +676,7 @@ let private vocabularyTests =
             // debt, so a wake cannot fire twice for one loss.
             Expect.isNone
                 (AgentWake.pendingReason
-                    [ openedIn terminalB (Some SandboxName.defaultName)
+                    [ openedIn terminalB (Some SandboxRef.defaultRef)
                       blockStartedIn terminalB "b1" false (Some (PeerRef bob))
                       integrationLost terminalB
                       turnStarted "woken" ])
@@ -688,7 +688,7 @@ let private vocabularyTests =
             // somebody rather than as nobody.
             Expect.equal
                 (AgentWake.pendingReason
-                    [ openedIn terminalB (Some SandboxName.defaultName)
+                    [ openedIn terminalB (Some SandboxRef.defaultRef)
                       blockStartedIn terminalB "b1" false (Some (PeerRef bob))
                       turnStarted "later"
                       integrationLost terminalB ]

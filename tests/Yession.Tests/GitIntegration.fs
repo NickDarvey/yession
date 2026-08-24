@@ -321,7 +321,7 @@ let private layoutTests =
         // keep apart.
         testCase "a named sandbox works somewhere the default one does not" <| fun () ->
             let dataDir = "/data/sessions/AAZ"
-            let named = SandboxRef.create SessionOwned (SandboxName.create "review" |> expect)
+            let named = SandboxRef.parse "review" |> expect
             Expect.notEqual
                 (Sandboxes.SessionLayout.workspaceFor dataDir named)
                 (Sandboxes.SessionLayout.workspaceFor dataDir SandboxRef.defaultRef)

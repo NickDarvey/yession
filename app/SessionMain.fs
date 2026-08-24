@@ -159,11 +159,7 @@ let private makeSandboxes
         | SrtBackend -> Some reposDir
         | DockerBackend -> None
     fun log ->
-        // The registry still names sandboxes by `SandboxName` — scoping it is the next step —
-        // so this lifts to the session-owned ref at the boundary. Behaviour is identical:
-        // a session-owned slug IS the bare name.
-        let create (sandbox: SandboxName) (credentialEnv: Map<string, string>) =
-            let sandbox = SandboxRef.create SessionOwned sandbox
+        let create (sandbox: SandboxRef) (credentialEnv: Map<string, string>) =
             // The backend's own container/volume namespace has to differ per sandbox, or two
             // of them under docker would fight over one container name — and now that a repo
             // can declare its own, two REPOS' same-named sandboxes would too. The rule lives
