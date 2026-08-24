@@ -10,6 +10,7 @@ open Thoth.Json
 open Thoth.Json.Net
 #endif
 
+[<RequireQualifiedAccess>]
 type SessionLaunchRequest =
     { SessionId : SessionId }
 

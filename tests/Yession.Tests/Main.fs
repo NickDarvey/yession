@@ -100,6 +100,11 @@ let all =
         // and only its consequence needs a live tier.
         Tag.needs "Test sources" [] (fun () -> TestSources.tests)
         Tag.needs "Emit bodies" [] (fun () -> EmitSources.tests)
+        // The fourth source contract: which record types may share a field set. Cheap tier
+        // for the reason the others are — the fault is a declaration, and a guard on the
+        // declaration fires on the pull request that writes it rather than on whichever
+        // caller inherits the wrong type months later.
+        Tag.needs "Record shapes" [] (fun () -> RecordShapes.tests)
         // The third source contract, and the one that guards a file no F# reads: what a
         // checkout of devenv.lock gives a machine that is not this one.
         Tag.needs "Committed lock" [] (fun () -> LockSource.tests)

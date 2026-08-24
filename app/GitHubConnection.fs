@@ -103,10 +103,10 @@ let targetFor (sessionId: SessionId) (owner: CredentialOwner) (scopeChoice: stri
 /// credential, then the acting human's, then the deployment's. Mirrors
 /// `ClaudeConnection.turnTargets` — including why `LocalScope` is named unconditionally.
 let turnTargets (sessionId: SessionId) (actor: ActorRef) : SecretId list =
-    [ Some { SecretId.Scope = SessionScope sessionId; Name = secretName }
+    [ Some { SecretId.Scope = SessionScope sessionId; SecretId.Name = secretName }
       CredentialOwner.ofActor actor
-      |> Option.map (fun owner -> { SecretId.Scope = CredentialOwner.scope owner; Name = secretName })
-      Some { SecretId.Scope = LocalScope; Name = secretName } ]
+      |> Option.map (fun owner -> { SecretId.Scope = CredentialOwner.scope owner; SecretId.Name = secretName })
+      Some { SecretId.Scope = LocalScope; SecretId.Name = secretName } ]
     |> List.choose id
 
 // --- the device flow, as data ----------------------------------------------------------

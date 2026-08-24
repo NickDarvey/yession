@@ -41,6 +41,7 @@ module SecretScope =
         | LocalScope -> "local"
 
 /// A secret's identity: which scope owns it, and its name within that scope.
+[<RequireQualifiedAccess>]
 type SecretId = { Scope : SecretScope; Name : SecretName }
 
 /// Everything a listing may reveal. There is no value field — a listing cannot leak a

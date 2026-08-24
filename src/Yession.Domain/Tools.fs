@@ -141,6 +141,7 @@ module ToolDescriptor =
 /// two things that must happen to every call — recording it, and redacting what may not be
 /// recorded — are schema-driven and generic. A tool body decodes its own arguments; nothing
 /// on the path to it has to know their shape.
+[<RequireQualifiedAccess>]
 type ToolCall =
     { Namespace : string
       Name : string
@@ -287,6 +288,7 @@ module ToolArguments =
 /// What the audit seam is told when a call starts. The turn and the handle are NOT here:
 /// the log is bound to a turn, and minting the handle is the Session Process's job — the
 /// same rule `MessageId` and `BlockId` already follow.
+[<RequireQualifiedAccess>]
 type ToolUseBegin =
     { Namespace : string
       Name : string

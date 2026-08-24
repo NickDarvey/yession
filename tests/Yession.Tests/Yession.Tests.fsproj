@@ -76,6 +76,7 @@
     <Compile Include="NixSource.fs" />
     <Compile Include="TestSources.fs" />
     <Compile Include="EmitSources.fs" />
+    <Compile Include="RecordShapes.fs" />
     <Compile Include="LockSource.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>

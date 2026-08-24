@@ -99,10 +99,10 @@ let targetFor (sessionId: SessionId) (owner: CredentialOwner) (scopeChoice: stri
 /// resolved. The Manager's readable set is the single authority; a second copy of that
 /// judgement here could only drift from it.
 let turnTargets (sessionId: SessionId) (actor: ActorRef) : SecretId list =
-    [ Some { SecretId.Scope = SessionScope sessionId; Name = secretName }
+    [ Some { SecretId.Scope = SessionScope sessionId; SecretId.Name = secretName }
       CredentialOwner.ofActor actor
-      |> Option.map (fun owner -> { SecretId.Scope = CredentialOwner.scope owner; Name = secretName })
-      Some { SecretId.Scope = LocalScope; Name = secretName } ]
+      |> Option.map (fun owner -> { SecretId.Scope = CredentialOwner.scope owner; SecretId.Name = secretName })
+      Some { SecretId.Scope = LocalScope; SecretId.Name = secretName } ]
     |> List.choose id
 
 // --- the models lookup ------------------------------------------------------------------

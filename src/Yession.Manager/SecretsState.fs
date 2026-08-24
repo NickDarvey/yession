@@ -50,7 +50,7 @@ module SecretsFile =
 
     /// Insert or replace by (Scope, Name). A replaced entry keeps its CreatedAt.
     let upsert (entry: SecretEntry) (file: SecretsFile) : SecretsFile =
-        let id = { Scope = entry.Scope; Name = entry.Name }
+        let id = { SecretId.Scope = entry.Scope; SecretId.Name = entry.Name }
         match tryFind id file with
         | Some existing ->
             { file with
@@ -69,7 +69,7 @@ module SecretsFile =
         file.Entries
         |> List.filter (fun e -> e.Scope = scope)
         |> List.map (fun e ->
-            { Id = { Scope = e.Scope; Name = e.Name }
+            { Id = { SecretId.Scope = e.Scope; SecretId.Name = e.Name }
               CreatedAt = e.CreatedAt
               UpdatedAt = e.UpdatedAt })
 

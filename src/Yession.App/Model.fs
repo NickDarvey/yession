@@ -105,6 +105,7 @@ type ClaudeStatus =
       /// "no agent" prompt must never flash before the client actually knows.
       AgentAvailable : bool option }
 
+[<RequireQualifiedAccess>]
 type ClaudeViewState =
     { Status : ClaudeStatus
       Flow : ClaudeFlowState }
@@ -126,6 +127,7 @@ type GitHubStatus =
     { SessionCredential : ConnectionView option
       MineCredential : ConnectionView option }
 
+[<RequireQualifiedAccess>]
 type GitHubViewState =
     { Status : GitHubStatus
       Flow : GitHubFlowState }

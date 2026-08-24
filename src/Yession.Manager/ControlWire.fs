@@ -67,6 +67,7 @@ module ControlWire =
 
     type SetSecretRequest = { Scope : SecretScope; Name : SecretName; Value : string }
     type ListSecretsRequest = { Scope : SecretScope }
+    [<RequireQualifiedAccess>]
     type DeleteSecretRequest = { Scope : SecretScope; Name : SecretName }
     type ResolveSecretRequest = { Name : SecretName }
     type ListSecretsResponse = { Secrets : SecretMetadata list }
@@ -188,9 +189,11 @@ module ControlWire =
           ClientId : string
           TokenDialect : TokenRequestDialect }
 
+    [<RequireQualifiedAccess>]
     type ConnectionDisconnectRequest = { Target : SecretId }
     type ConnectionDisconnectResponse = { Disconnected : bool }
 
+    [<RequireQualifiedAccess>]
     type ConnectionResolveRequest = { Target : SecretId }
     type ConnectionResolveResponse = { Kind : ConnectionKind; Value : string }
 

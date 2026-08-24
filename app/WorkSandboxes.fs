@@ -39,6 +39,7 @@ type CredentialSource =
 /// Who is asking. The two halves differ for the agent exactly as they do for the repo
 /// verbs: the AGENT is the acting party the event records, the CREDENTIAL owner is the
 /// turn human, because the agent has no scope of its own.
+[<RequireQualifiedAccess>]
 type SandboxCaller =
     { Actor : ActorRef
       Credential : ActorRef }
