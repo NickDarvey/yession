@@ -1,6 +1,7 @@
 namespace Yession.SessionProcess
 
 open Yession.Domain
+open Yession.Domain.Terminals
 open Yession.Domain.Collab
 open Yession.Domain.Chat
 

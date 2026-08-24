@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Terminals
+
+open Yession.Domain
 
 /// The per-terminal transcript: the durable, append-only record of everything a terminal
 /// produced and everything typed into it (Plan 12).

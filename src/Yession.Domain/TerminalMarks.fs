@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Terminals
+
+open Yession.Domain
 
 /// OSC 133 semantic marks: how the Session Process learns where a block starts, where it
 /// ends, and with what code (Plan 13, stage 2d).

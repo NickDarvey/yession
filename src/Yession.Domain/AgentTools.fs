@@ -12,6 +12,7 @@ namespace Yession.Domain
 // is the SDK server's name and the server was already called `yession`.
 
 open System
+open Yession.Domain.Terminals
 open Yession.Domain.Tools
 
 #if FABLE_COMPILER

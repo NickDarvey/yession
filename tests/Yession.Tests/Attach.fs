@@ -20,6 +20,7 @@ module Yession.Tests.Attach
 open Fable.Core
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Terminals
 
 let private expect =
     function

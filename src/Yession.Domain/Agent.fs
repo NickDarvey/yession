@@ -1,6 +1,7 @@
 namespace Yession.Domain
 
 open Yession.Domain.Chat
+open Yession.Domain.Terminals
 open Yession.Domain.Tools
 open Yession.Domain.Access
 

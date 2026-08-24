@@ -29,6 +29,7 @@ module Yession.Host.AttachWs
 
 open Fable.Core
 open Yession.Domain
+open Yession.Domain.Terminals
 
 /// What the connection gave us. `ok = false` means it never opened; everything else is only
 /// meaningful when it did.

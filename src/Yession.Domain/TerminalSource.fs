@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Terminals
+
+open Yession.Domain
 
 // Where a terminal's bytes come from (Plan 16, part D).
 //

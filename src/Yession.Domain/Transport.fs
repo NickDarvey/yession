@@ -1,5 +1,7 @@
 namespace Yession.Domain
 
+open Yession.Domain.Terminals
+
 /// The multiplexed session transport protocol. These are pure protocol shapes shared by
 /// the Session Process and the Browser Client; the actual WebRTC/HTTP carrier is an
 /// adapter that implements a frame channel over these types. State-sync payloads are

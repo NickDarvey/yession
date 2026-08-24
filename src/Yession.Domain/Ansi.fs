@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Terminals
+
+open Yession.Domain
 
 /// Terminal output as styled text. A terminal's bytes are not plain text — they carry
 /// SGR escapes that colour and weight what follows, carriage returns that rewrite the

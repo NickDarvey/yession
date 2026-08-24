@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Terminals
+
+open Yession.Domain
 
 /// Terminals, projected from the event log (Plan 12). Like the conversation, this
 /// is a pure fold over ordered events and nothing else — never the doc, never live
