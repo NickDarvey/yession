@@ -41,7 +41,9 @@ module CredentialOwner =
         match actor with
         | UserRef user -> Some (UserOwner user)
         | PeerRef _ -> None
-        | ActorRef.Agent | SessionProcess | System -> None
+        // Nor a repo's file: what a `forward:` resolves against is the human whose
+        // launch the fold ran under, never the file that asked for it.
+        | ActorRef.Agent | SessionProcess | System | Configured _ -> None
 
     /// A stable one-line rendering for logs ("user:<sub>" / "local"). Never a value.
     let describe (owner: CredentialOwner) : string =

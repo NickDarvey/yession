@@ -210,6 +210,44 @@ module UserId =
         normalize "UserId" raw |> Result.map UserId
     let value (UserId s) = s
 
+/// A GitHub repository, named `owner/repo` (Plan 14). Validated at the boundary so the
+/// clone URL is CONSTRUCTED from it — there is no free-form remote anywhere downstream,
+/// which is what keeps the repo surface free of arbitrary-URL fetches. The charset is
+/// GitHub's own (word characters, `.`/`-`; no leading dot or hyphen abuse is worth
+/// modelling beyond what the API itself enforces), and both halves are length-capped.
+type RepoRef = private RepoRef of owner: string * repo: string
+
+module RepoRef =
+
+    let private segmentOk (maxLen: int) (s: string) : bool =
+        s <> ""
+        && s.Length <= maxLen
+        && s |> Seq.forall (fun c -> Char.IsLetterOrDigit c || c = '-' || c = '_' || c = '.')
+        && s <> "." && s <> ".."
+
+    /// Parse `owner/repo`. A trailing `.git` is stripped rather than refused — it is how
+    /// people paste repo names, and the canonical form should win.
+    let create (raw: string) : Result<RepoRef, string> =
+        let trimmed = (defaultArg (Option.ofObj raw) "").Trim()
+        match trimmed.Split '/' with
+        | [| owner; repo |] ->
+            let repo = if repo.EndsWith ".git" then repo.Substring (0, repo.Length - 4) else repo
+            if segmentOk 39 owner && segmentOk 100 repo then Ok (RepoRef (owner, repo))
+            else Error (sprintf "'%s' is not an owner/repo name" trimmed)
+        | _ -> Error (sprintf "'%s' is not an owner/repo name (expected exactly one '/')" trimmed)
+
+    let owner (RepoRef (o, _)) = o
+    let repo (RepoRef (_, r)) = r
+
+    /// The canonical `owner/repo` rendering — also the codec's wire form.
+    let value (RepoRef (o, r)) = sprintf "%s/%s" o r
+
+    /// The one place a clone URL is spelled.
+    let cloneUrl (ref: RepoRef) : string = sprintf "https://github.com/%s.git" (value ref)
+
+    /// Where the checkout lives under the session's repos directory.
+    let relativePath (RepoRef (o, r)) : string = sprintf "%s/%s" o r
+
 /// Who an event or action is attributed to. `UserRef` is a durable human identity the
 /// Manager verified; `PeerRef` is a client connection — the fallback attribution when no
 /// authentication strategy binds a user to the connection.
@@ -219,6 +257,15 @@ type ActorRef =
     | Agent
     | SessionProcess
     | System
+    /// A repository's own `yession.yaml` (Plan 27), as the party that asked for something.
+    ///
+    /// Not decoration. A file is authored by whoever can push to the repo, which is neither
+    /// the operator nor anybody in the session, and freshly-cloned code is LESS trusted than
+    /// the agent rather than more. So the acts a fold performs are attributed to the file
+    /// that asked for them, and a classifier that wants to treat them differently has the
+    /// fact it needs — as does a person reading the timeline, who would otherwise see the
+    /// session process start sandboxes nobody asked it to.
+    | Configured of RepoRef
 
 module ActorRef =
 
@@ -237,6 +284,7 @@ module ActorRef =
         | Agent -> "agent"
         | SessionProcess -> "process"
         | System -> "system"
+        | Configured repo -> "configured:" + RepoRef.value repo
 
     /// Parse a token back. Total by returning an option: the doc is shared with peers we do
     /// not control, so an unreadable actor is an entry to skip, never a crash.
@@ -255,6 +303,7 @@ module ActorRef =
                     match raw.Substring (0, idx) with
                     | "user" -> (match UserId.create rest with Ok u -> Some (UserRef u) | Error _ -> None)
                     | "peer" -> (match PeerId.create rest with Ok p -> Some (PeerRef p) | Error _ -> None)
+                    | "configured" -> (match RepoRef.create rest with Ok r -> Some (Configured r) | Error _ -> None)
                     | _ -> None
 
 /// On whose authority an act happens, and who is behind it: the three parties an audit asks
@@ -316,44 +365,6 @@ module Authority =
     /// by a `defaultArg` at each site that asks it.
     let effective (authority: Authority) : ActorRef =
         authority.AuthOnBehalfOf |> Option.defaultValue authority.AuthAuthor
-
-/// A GitHub repository, named `owner/repo` (Plan 14). Validated at the boundary so the
-/// clone URL is CONSTRUCTED from it — there is no free-form remote anywhere downstream,
-/// which is what keeps the repo surface free of arbitrary-URL fetches. The charset is
-/// GitHub's own (word characters, `.`/`-`; no leading dot or hyphen abuse is worth
-/// modelling beyond what the API itself enforces), and both halves are length-capped.
-type RepoRef = private RepoRef of owner: string * repo: string
-
-module RepoRef =
-
-    let private segmentOk (maxLen: int) (s: string) : bool =
-        s <> ""
-        && s.Length <= maxLen
-        && s |> Seq.forall (fun c -> Char.IsLetterOrDigit c || c = '-' || c = '_' || c = '.')
-        && s <> "." && s <> ".."
-
-    /// Parse `owner/repo`. A trailing `.git` is stripped rather than refused — it is how
-    /// people paste repo names, and the canonical form should win.
-    let create (raw: string) : Result<RepoRef, string> =
-        let trimmed = (defaultArg (Option.ofObj raw) "").Trim()
-        match trimmed.Split '/' with
-        | [| owner; repo |] ->
-            let repo = if repo.EndsWith ".git" then repo.Substring (0, repo.Length - 4) else repo
-            if segmentOk 39 owner && segmentOk 100 repo then Ok (RepoRef (owner, repo))
-            else Error (sprintf "'%s' is not an owner/repo name" trimmed)
-        | _ -> Error (sprintf "'%s' is not an owner/repo name (expected exactly one '/')" trimmed)
-
-    let owner (RepoRef (o, _)) = o
-    let repo (RepoRef (_, r)) = r
-
-    /// The canonical `owner/repo` rendering — also the codec's wire form.
-    let value (RepoRef (o, r)) = sprintf "%s/%s" o r
-
-    /// The one place a clone URL is spelled.
-    let cloneUrl (ref: RepoRef) : string = sprintf "https://github.com/%s.git" (value ref)
-
-    /// Where the checkout lives under the session's repos directory.
-    let relativePath (RepoRef (o, r)) : string = sprintf "%s/%s" o r
 
 /// The name of one of the session's WorkSandboxes (Plan 15, stage 2). A session used to
 /// have exactly one, so it needed no name; now the agent can ask for a `test` sandbox

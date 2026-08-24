@@ -355,8 +355,8 @@ module TerminalFlip =
     ///     `write_terminal`/`read_terminal`, and what the exception left behind was a wedge —
     ///     an agent command that takes the screen waits for a keystroke nobody is allowed to
     ///     send, so its block never finishes and the queue behind it never moves. Nothing
-    ///     flips to `SessionProcess` or `System`, and that is not policy either: nothing in
-    ///     the session can type as either of them.
+    ///     flips to `SessionProcess`, `System` or a repo's file, and that is not policy
+    ///     either: nothing in the session can type as any of them.
     let propose
         (altScreen: bool)
         (holder: ActorRef option)
@@ -367,7 +367,7 @@ module TerminalFlip =
         | true, None ->
             match runningAuthor with
             | Some (PeerRef _ as author) | Some (UserRef _ as author) | Some (Agent as author) -> FlipToLive author
-            | Some SessionProcess | Some System | None -> FlipNothing
+            | Some SessionProcess | Some System | Some (Configured _) | None -> FlipNothing
         | true, Some _ -> FlipNothing
         | false, Some _ when autoHeld -> FlipToBlock
         | false, _ -> FlipNothing
