@@ -13,6 +13,7 @@ module Yession.Host.Sandboxes
 open Fable.Core
 open Fable.Core.JsInterop
 open Yession.Domain
+open Yession.Domain.Sandboxes
 
 // --- Pure policy assembly ----------------------------------------------------------------
 

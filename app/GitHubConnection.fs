@@ -21,6 +21,7 @@ module Yession.Host.GitHubConnection
 open Fable.Core
 open Fable.Core.JsInterop
 open Yession.Domain
+open Yession.Domain.Sandboxes
 open Yession.Domain.Access
 open Yession.Manager
 open Yession.SessionProcess

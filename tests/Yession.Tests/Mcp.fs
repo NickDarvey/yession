@@ -9,6 +9,7 @@ module Yession.Tests.Mcp
 
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Sandboxes
 open Yession.Domain.Agent
 open Yession.Domain.Tools
 

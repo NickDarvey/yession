@@ -2,6 +2,7 @@ namespace Yession.Manager
 
 open System
 open Yession.Domain
+open Yession.Domain.Sandboxes
 open Yession.Domain.Access
 
 #if FABLE_COMPILER

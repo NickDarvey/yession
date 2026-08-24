@@ -1,6 +1,7 @@
 namespace Yession.Domain.Access
 
 open Yession.Domain
+open Yession.Domain.Sandboxes
 open System
 
 /// Secrets vocabulary (Plan 06). A secret's identity is scope + name; its value never

@@ -3,6 +3,7 @@ module Yession.Tests.Domain
 open System
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Sandboxes
 open Yession.Domain.Agent
 open Yession.Domain.Link
 open Yession.Domain.Repos

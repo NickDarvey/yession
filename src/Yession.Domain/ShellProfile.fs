@@ -1,4 +1,6 @@
-namespace Yession.Domain
+namespace Yession.Domain.Sandboxes
+
+open Yession.Domain
 
 /// The shell profile (Plan 25): one durable fact about a sandbox's terminals — where a
 /// shell opened in it starts. Set by the agent, read by everyone, folded from the event

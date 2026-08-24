@@ -24,6 +24,7 @@ open System
 open Fable.Pyxpecto
 open Yjs
 open Yession.Domain
+open Yession.Domain.Sandboxes
 open Yession.Domain.Agent
 open Yession.Domain.Collab
 open Yession.Domain.Repos

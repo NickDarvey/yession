@@ -12,6 +12,7 @@ module Yession.Host.ShellProfile
 // people get a section on the generated settings surface. Nobody writes a panel.
 
 open Yession.Domain
+open Yession.Domain.Sandboxes
 open Yession.Domain.Tools
 open Yession.SessionProcess
 

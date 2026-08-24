@@ -32,6 +32,7 @@ open System
 open System.Collections.Generic
 open Fable.Core
 open Yession.Domain
+open Yession.Domain.Sandboxes
 open Yession.Domain.Tools
 open Yession.Domain.Repos
 open Yession.SessionProcess

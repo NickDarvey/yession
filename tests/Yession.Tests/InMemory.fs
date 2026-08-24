@@ -13,6 +13,7 @@ module Yession.Tests.InMemory
 open Fable.Pyxpecto
 open Ylmish
 open Yession.Domain
+open Yession.Domain.Sandboxes
 open Yession.Domain.Agent
 open Yession.Domain.Link
 open Yession.Domain.Terminals
