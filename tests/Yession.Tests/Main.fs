@@ -108,6 +108,7 @@ let all =
         Tag.needs "Record shapes" [] (fun () -> RecordShapes.tests)
         // The third source contract, and the one that guards a file no F# reads: what a
         // checkout of devenv.lock gives a machine that is not this one.
+        Tag.needs "Namespace shadowing" [] (fun () -> NamespaceShadowing.tests)
         Tag.needs "Committed lock" [] (fun () -> LockSource.tests)
         // The rich editor rendering E2E stands alone: it needs a browser but NOT the native
         // WebRTC host, so it runs wherever Chromium exists ([Browser]). The full two-peer
