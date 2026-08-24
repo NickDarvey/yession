@@ -156,6 +156,64 @@ let private codecTests =
             Expect.equal (queueIds pA) [ "q-1" ] "the deleted entry is gone on A"
             Expect.equal (queueIds pB) (queueIds pA) "replicas converge after delete"
 
+        // The width a command claims (Plan 13, stage 2b). A client writes it onto the queue
+        // entry and the Session Process reads it back to size the pty before the command runs
+        // — so a field that encodes but does not decode is a width that vanishes with nothing
+        // to show for it: every block still runs, at eighty columns, exactly as before.
+        //
+        // TWO read paths, and they are both pinned here because they are separate code. The
+        // structural read (`ofDoc`) is what boots a session; the decoder is what a running
+        // program observes the doc through, and only a second replica exercises it.
+        testCase "the width a command claims crosses the sync boundary" <| fun () ->
+            let doc = Y.Doc.Create ()
+            let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            let terminal = TerminalId.create "term-a" |> expect
+            let queueId = QueueId.create "q-term" |> expect
+            p.Dispatch (user (TerminalViewportMsg (terminal, { Cols = 132; Rows = 43 })))
+            p.Dispatch (user (EnsureTerminalDraftMsg (terminal, ada, queueId)))
+            p.Dispatch (user (SendTerminalDraftMsg (terminal, ada)))
+
+            let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
+            Expect.equal
+                (decoded.Pending |> Map.tryFind queueId |> Option.bind (fun entry -> entry.Size))
+                (Some { Cols = 132; Rows = 43 })
+                "the doc carries the width its author was looking at"
+
+        testCase "a peer reading the doc sees the width its author claimed" <| fun () ->
+            let docA = Y.Doc.Create ()
+            let docB = Y.Doc.Create ()
+            docA.clientID <- 1.0
+            docB.clientID <- 2.0
+            let pA = Harness.run (App.makeProgram docA (ClientModel.init (peer "ada" "Ada")))
+            let pB = Harness.run (App.makeProgram docB (ClientModel.init (peer "grace" "Grace")))
+            let terminal = TerminalId.create "term-a" |> expect
+            let queueId = QueueId.create "q-term" |> expect
+            pA.Dispatch (user (TerminalViewportMsg (terminal, { Cols = 132; Rows = 43 })))
+            pA.Dispatch (user (EnsureTerminalDraftMsg (terminal, ada, queueId)))
+            pA.Dispatch (user (SendTerminalDraftMsg (terminal, ada)))
+            syncBoth docA docB
+
+            Expect.equal
+                ((pB.Model ()).Synced.Pending |> Map.tryFind queueId |> Option.bind (fun entry -> entry.Size))
+                (Some { Cols = 132; Rows = 43 })
+                "Grace's replica reads Ada's width, not her own and not a default"
+
+        testCase "a command that claimed no width reads back as none, never as a zero terminal" <| fun () ->
+            // The agent's commands, and anyone whose terminals column has never been opened.
+            // A size is text in the doc, so the empty one has to decode to NO claim: as a
+            // `{ Cols = 0; Rows = 0 }` it would be a resize to a terminal with no columns.
+            let doc = Y.Doc.Create ()
+            let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            let terminal = TerminalId.create "term-a" |> expect
+            let queueId = QueueId.create "q-term" |> expect
+            p.Dispatch (user (EnsureTerminalDraftMsg (terminal, ada, queueId)))
+            p.Dispatch (user (SendTerminalDraftMsg (terminal, ada)))
+
+            let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
+            match decoded.Pending |> Map.tryFind queueId with
+            | Some entry -> Expect.isNone entry.Size "no viewport, no claim"
+            | None -> failwith "the command was not queued at all"
+
         testCase "the collaborative title round-trips through the codec" <| fun () ->
             let doc = Y.Doc.Create ()
             let registry = BodyRegistry doc
