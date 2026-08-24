@@ -42,7 +42,19 @@ type EnvironmentSpec =
       Image : ContainerImage option
       Build : ContainerBuildSpec option
       Mounts : ContainerMount list
-      EnvironmentVariables : Map<string, EnvironmentVariableRef> }
+      EnvironmentVariables : Map<string, EnvironmentVariableRef>
+      /// The sandbox's own process — compose's `command` (Plan 27).
+      ///
+      /// `None` is what every sandbox has had until now: the container idles and exists
+      /// only to be `exec`'d into. `Some` makes it a service, and inherits the semantics
+      /// that go with one — the sandbox lives exactly as long as the process does, so a
+      /// command that exits takes its terminals with it. That is docker's own behaviour
+      /// and not a policy invented here.
+      ///
+      /// DOCKER ONLY. A container has a `Cmd`; a host or srt sandbox is a confinement
+      /// around spawns, with no process of its own to replace, so asking for one there is
+      /// refused rather than ignored (`Sandboxes.forBackend`).
+      Command : string option }
 
 module EnvironmentSpec =
 
@@ -52,7 +64,8 @@ module EnvironmentSpec =
           Image = None
           Build = None
           Mounts = []
-          EnvironmentVariables = Map.empty }
+          EnvironmentVariables = Map.empty
+          Command = None }
 
 // --- Environment UI state, projected from events (Step 12) ---------------------------
 

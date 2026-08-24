@@ -550,7 +550,14 @@ module DockerSandbox =
                                       "Labels", box (createObj [ "yession-session", box name ])
                                       "Env", box env
                                       "WorkingDir", box workspaceTarget
-                                      "Cmd", box [| "tail"; "-f"; "/dev/null" |]
+                                      // The sandbox's own process when it declared one, and
+                                      // otherwise the idle command that has always kept the
+                                      // container up for `exec` to reach.
+                                      "Cmd",
+                                      box (
+                                          match spec.Command with
+                                          | Some command -> [| "sh"; "-c"; command |]
+                                          | None -> [| "tail"; "-f"; "/dev/null" |])
                                       "HostConfig",
                                       box (
                                           createObj
@@ -1413,8 +1420,18 @@ module AgentSandbox =
 /// at boot — fail closed, never a silent fallback to a weaker backend.
 let forBackend (backend: SandboxBackend) (name: string) (spec: EnvironmentSpec) : Result<CreateSandbox, string> =
     let ambient = ambientEnv ()
-    match backend with
-    | HostBackend -> Ok (HostSandbox.create ())
-    | DockerBackend -> Ok (DockerSandbox.create name spec)
-    | SrtBackend ->
+    match backend, spec.Command with
+    // A container has a `Cmd` to replace; a host or srt sandbox is a confinement around
+    // spawns with no process of its own. Refused rather than ignored, because a sandbox
+    // that silently did not run what it was asked to run is worse than one that says so —
+    // the same stance `check` takes on a capability this box cannot host.
+    | (HostBackend | SrtBackend), Some command ->
+        Error (
+            sprintf
+                "this session's work sandbox is %s, which has no process of its own to run '%s' as — a `cmd` needs the docker backend"
+                (SandboxBackend.describe backend)
+                command)
+    | HostBackend, None -> Ok (HostSandbox.create ())
+    | DockerBackend, _ -> Ok (DockerSandbox.create name spec)
+    | SrtBackend, None ->
         SrtSandbox.toolsFrom ambient |> Result.map SrtSandbox.create
