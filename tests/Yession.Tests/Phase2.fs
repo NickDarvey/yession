@@ -677,6 +677,103 @@ let private environmentProjectionTests =
             Expect.equal s5 (EnvironmentFailed "no image") "failure surfaces"
     ]
 
+// What the environment RECORDS, as opposed to what it does. Pure: an in-memory log and a
+// `CreateSandbox` that answers without touching the machine, so this runs in the cheap tier
+// rather than beside the lifecycle suites that genuinely need a host.
+let private environmentRecordingTests =
+    testList "What a start attempt records" [
+        // The fold that asks for a repo's sandboxes re-runs after every repo verb, so a
+        // declaration the operator's ceiling refuses used to record three events every time
+        // anyone touched a repo — identical reasons, unbounded, about a session in which
+        // nothing had changed. Regress the suppression and this is the case that goes red.
+        testCaseAsync "a refusal the log already ends with is not recorded a second time" <|
+            async {
+                let sessionId = SessionId.create "refused-1" |> expect
+                let log =
+                    Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+                let refusing : CreateSandbox = fun _ -> async { return Error "the ceiling is closed" }
+                let environment =
+                    Yession.SessionProcess.SessionEnvironment.create
+                        log refusing preparedEmptyPolicy "scripted" "env-refused-1"
+
+                let! first = environment.Ensure None "the fold asked"
+                Expect.equal first (EnvironmentUnavailable "the ceiling is closed") "it cannot start"
+                let! afterFirst = environmentEventsOf log
+                Expect.equal
+                    afterFirst
+                    [ "need"; "start-requested"; "start-failed" ]
+                    "the first refusal is news, and says the whole story"
+
+                let! second = environment.Ensure None "the fold asked again"
+                Expect.equal second (EnvironmentUnavailable "the ceiling is closed") "still cannot start"
+                let! afterSecond = environmentEventsOf log
+                Expect.equal afterSecond afterFirst "and the second changed nothing, so it said nothing"
+            }
+
+        // The other half, and the half that keeps the suppression from becoming a cache of
+        // refusals: what is compared is the REASON, so an outcome that moved is recorded the
+        // first time it differs. This is what a credential signed in mid-session, or a daemon
+        // that came back, looks like from here.
+        testCaseAsync "a refusal that differs from the last one is recorded" <|
+            async {
+                let sessionId = SessionId.create "refused-2" |> expect
+                let log =
+                    Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+                let mutable said = "the ceiling is closed"
+                let refusing : CreateSandbox = fun _ -> async { return Error said }
+                let environment =
+                    Yession.SessionProcess.SessionEnvironment.create
+                        log refusing preparedEmptyPolicy "scripted" "env-refused-2"
+
+                let! _ = environment.Ensure None "the fold asked"
+                said <- "no credential to forward"
+                let! _ = environment.Ensure None "the fold asked again"
+
+                let! events = environmentEventsOf log
+                Expect.equal
+                    events
+                    [ "need"; "start-requested"; "start-failed"
+                      "need"; "start-requested"; "start-failed" ]
+                    "a different reason is a different thing to say"
+            }
+
+        // A refusal is only stale while it is the last word. Once the environment comes up,
+        // the log no longer ends with that failure — so a later one is news again, and that
+        // is why the comparison is against the last OUTCOME rather than against every
+        // failure the log has ever held.
+        testCaseAsync "a failure after the environment has started is recorded again" <|
+            async {
+                let recorder = SandboxRecorder ()
+                let sessionId = SessionId.create "refused-3" |> expect
+                let log =
+                    Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+                let mutable up = false
+                let flaky : CreateSandbox =
+                    fun policy ->
+                        if up then scriptedSandbox recorder echoSandboxScript policy
+                        else async { return Error "not yet" }
+                let environment =
+                    Yession.SessionProcess.SessionEnvironment.create
+                        log flaky preparedEmptyPolicy "scripted" "env-refused-3"
+
+                let! _ = environment.Ensure None "too early"
+                up <- true
+                let! _ = environment.Ensure None "now"
+                do! environment.Stop ()
+                up <- false
+                let! _ = environment.Ensure None "and down again"
+
+                let! events = environmentEventsOf log
+                Expect.equal
+                    events
+                    [ "need"; "start-requested"; "start-failed"
+                      "need"; "start-requested"; "started"
+                      "stop-requested"; "stopped"
+                      "need"; "start-requested"; "start-failed" ]
+                    "the start in between makes the second failure news"
+            }
+    ]
+
 let private lazyLifecycleTests =
     testList "Lazy environment lifecycle" [
         testCaseAsync "a conversational one-shot does not start an environment (E2E-1)" <|
@@ -1226,6 +1323,7 @@ let tests =
         promiseAwaitTests
         sandboxPolicyTests
         environmentProjectionTests
+        environmentRecordingTests
         testEnvTests
         testWaitTests
         commandFoldTests

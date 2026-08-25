@@ -65,32 +65,88 @@ module SessionEnvironment =
                 return ()
             }
 
+        /// What the log already says became of this environment — a failure reason when the
+        /// last thing recorded about it was a start that failed, `None` when it started,
+        /// stopped, or was never attempted.
+        ///
+        /// Read from the log rather than remembered in a field, and that is the whole point:
+        /// `WorkSandboxes` builds a FRESH environment for every start it attempts and keeps
+        /// only the ones that came up, so a failed attempt's object — and any memory it could
+        /// have held — is discarded before the next attempt asks. The log is the only thing
+        /// that survives it. It is also what makes a process restart quiet rather than
+        /// re-announcing everything, which is the same rule `SessionMain` computes the MCP
+        /// declaration delta by.
+        ///
+        /// Only the events carrying an environment id count, which excludes the need itself:
+        /// a need is somebody ASKING, not something that became of the environment.
+        let lastFailure () : Async<string option> =
+            async {
+                let! page = log.Read None Int32.MaxValue
+                return
+                    page.Events
+                    |> List.choose (fun e ->
+                        match e.Event with
+                        | EnvironmentStarted s when s.EnvironmentId = environmentId -> Some None
+                        | EnvironmentStopped s when s.EnvironmentId = environmentId -> Some None
+                        | EnvironmentStartFailed f when f.EnvironmentId = environmentId -> Some (Some f.Reason)
+                        | _ -> None)
+                    |> List.tryLast
+                    |> Option.flatten
+            }
+
         let ensure (agentTurnId: AgentTurnId option) (reason: string) : Async<EnsureEnvironmentResult> =
             async {
-                do! append (EnvironmentNeedIdentified { Reason = reason; AgentTurnId = agentTurnId })
+                let need () = append (EnvironmentNeedIdentified { Reason = reason; AgentTurnId = agentTurnId })
                 match running with
                 | Some _ ->
-                    // Already running: the environment is preserved across needs.
+                    // Already running: the environment is preserved across needs, and the
+                    // need is still recorded. That record is the point — an environment
+                    // being REUSED rather than started a second time is only visible
+                    // because the second need is in the log beside the first start.
+                    do! need ()
                     return EnvironmentAvailable
                 | None ->
-                    do! append (EnvironmentStartRequested
-                                    { EnvironmentId = environmentId
-                                      SpecSummary = specSummary })
+                    // Attempted before anything is recorded, so that a repeat of a failure
+                    // the log already ends with can be left unsaid. The successful sequence
+                    // is unchanged — need, start-requested, started, in that order — because
+                    // what moved is when they are written, not what they say or their order.
                     let! prepared =
                         async {
                             match! preparePolicy () with
                             | Error reason -> return Error reason
                             | Ok policy -> return! createSandbox policy
                         }
+                    let requested () =
+                        append (EnvironmentStartRequested
+                                    { EnvironmentId = environmentId
+                                      SpecSummary = specSummary })
                     match prepared with
                     | Ok sandbox ->
                         running <- Some sandbox
+                        do! need ()
+                        do! requested ()
                         do! append (EnvironmentStarted
                                         { EnvironmentId = environmentId
                                           ContainerRef = sandbox.Ref })
                         return EnvironmentAvailable
                     | Error reason ->
-                        do! append (EnvironmentStartFailed { EnvironmentId = environmentId; Reason = reason })
+                        // A refusal the log already ends with is not news. Without this, an
+                        // ask that cannot start records three events EVERY time it is made —
+                        // and the fold that asks re-runs after every repo verb, so a
+                        // declaration over the operator's ceiling grew the log without bound
+                        // while changing nothing about the session.
+                        //
+                        // The attempt itself still happens, which is what keeps this from
+                        // becoming a cache of refusals: a credential signed in mid-session, a
+                        // daemon that came back, an operator who widened the ceiling and
+                        // restarted — each of those changes the outcome, and a changed
+                        // outcome is recorded the first time it differs.
+                        match! lastFailure () with
+                        | Some said when said = reason -> ()
+                        | _ ->
+                            do! need ()
+                            do! requested ()
+                            do! append (EnvironmentStartFailed { EnvironmentId = environmentId; Reason = reason })
                         return EnvironmentUnavailable reason
             }
 
