@@ -1,6 +1,7 @@
 namespace Yession.Domain
 
 open System
+open Yession.Domain.Link
 open Yession.Domain.Repos
 
 /// The generic envelope wrapping every persisted event. The wire format is a boundary
@@ -131,16 +132,7 @@ type SessionEvent =
 and [<RequireQualifiedAccess>] SessionCreated =
     { SessionId : SessionId }
 
-and PeerJoined =
-    { PeerId : PeerId
-      DisplayName : string
-      /// The Manager-verified user behind this connection, when the authentication
-      /// strategy attributed one. None = unattributed access (trust-localhost) —
-      /// the connection is identified only by its peer.
-      User : UserId option }
 
-and PeerLeft =
-    { PeerId : PeerId }
 
 and MessageSent =
     { MessageId : MessageId
