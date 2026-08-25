@@ -355,7 +355,17 @@ module ConfigFile =
     /// and it is refused here, where the person who wrote both is standing and can pick
     /// another name, rather than resolved at read time by a precedence rule.
     let private sandboxes : Decoder<Map<SandboxName, SandboxDecl>> =
-        Decode.keyValuePairs sandbox
+        // Decoded a field at a time rather than with `keyValuePairs`, for the PATH. That
+        // combinator decodes each value without putting its key on the path, so every
+        // refusal inside any sandbox came back as `$.sandboxes.workdir` — the same address
+        // whichever sandbox wrote it. Reading `Decode.field name` per key costs one fold and
+        // makes the refusal say `$.sandboxes.dev.workdir`, which is the difference between
+        // fixing a file with two sandboxes in it and fixing one with ten.
+        Decode.keys
+        |> Decode.andThen (fun raws ->
+            raws
+            |> List.map (fun raw -> Decode.field raw sandbox |> Decode.map (fun decl -> raw, decl))
+            |> List.fold (fun acc one -> Decode.map2 (fun xs x -> xs @ [ x ]) acc one) (Decode.succeed []))
         |> Decode.andThen (fun pairs ->
             let named =
                 pairs

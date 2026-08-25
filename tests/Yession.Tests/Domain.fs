@@ -848,6 +848,21 @@ let private configTests =
             | Ok _ -> failwith "expected a refusal"
             | Error e -> Expect.isTrue (e.Contains "YESSION_LAUNCH") "it names the variable it refused"
 
+        // A file with one sandbox in it can only mean one thing by `$.sandboxes.env`. A file
+        // with ten cannot, and the address was the same for all of them — so the refusal
+        // named a key without naming which sandbox wrote it.
+        testCase "a refusal is addressed to the sandbox that caused it" <| fun () ->
+            match ConfigFile.parse """
+                    { "version": 1,
+                      "sandboxes": { "dev": { "workdir": "." },
+                                     "gate": { "env": { "YESSION_LAUNCH": "x" } } } }""" with
+            | Ok _ -> failwith "expected a refusal"
+            | Error e ->
+                // The refusal itself goes in the message: a bare `expected true` about a
+                // string nobody can see is the failure that costs a second run to read.
+                Expect.isTrue (e.Contains "sandboxes.gate") (sprintf "the path names the sandbox at fault, said: %s" e)
+                Expect.isFalse (e.Contains "sandboxes.dev") (sprintf "and not the one that was fine, said: %s" e)
+
         testCase "an ordinary variable still passes" <| fun () ->
             // The guard above must not have made `env` useless.
             let file =
