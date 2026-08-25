@@ -316,7 +316,7 @@ let private markTests =
         testCase "the rc payload carries the nonce and reads $? first" <| fun () ->
             // Two properties of the emitted shell, both of which are silent when wrong.
             for shell in [ "bash"; "zsh" ] do
-                let rc = Marks.rcFor shell nonce |> Option.get
+                let rc = (Marks.rcFor shell nonce |> Option.get).Rc
                 Expect.isTrue (rc.Contains ("y=" + nonce)) (sprintf "%s marks carry the nonce" shell)
                 Expect.isTrue (rc.Contains "__y_code=$?") (sprintf "%s captures $? as the first statement" shell)
                 Expect.isTrue (rc.Contains "command -p") (sprintf "%s resolves binaries off a clobbered PATH" shell)
@@ -327,6 +327,16 @@ let private markTests =
             Expect.isNone (Marks.rcFor "fish" nonce) "fish is not one of the three yet"
             Expect.isNone (Marks.rcFor "" nonce) "and neither is nothing"
             Expect.isSome (Marks.rcFor "sh" nonce) "a POSIX sh rides its marks in PS1"
+
+        testCase "a dialect declares whether it marks a command's start" <| fun () ->
+            // What the drain gates block-completion on and the integration detector gates
+            // arming on. Wrong for a dialect and either a working shell is reported lost, or a
+            // stale prompt-cycle `D` closes the first block early.
+            for shell in [ "bash"; "zsh" ] do
+                Expect.isTrue (Marks.rcFor shell nonce |> Option.get).MarksCommandStart
+                    (sprintf "%s has a preexec hook to hang C on" shell)
+            Expect.isFalse (Marks.rcFor "sh" nonce |> Option.get).MarksCommandStart
+                "a POSIX sh has none: its marks ride in PS1, which renders after the command"
     ]
 
 // --- The headless emulator (Plan 13, stage 2b) -------------------------------------------

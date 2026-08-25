@@ -551,6 +551,12 @@ module SessionTerminals =
           /// (Plan 16, part D) — its process is somebody else's, in nothing we run.
           Sandbox : SandboxRef option
           mutable Shell : PtyHandle option
+          /// Whether this terminal's shell dialect marks a command's START (Plan 13, stage
+          /// 2f). Set when the shell opens, beside `Shell` and for the same reason — neither
+          /// is known until then. The drain reads it to tell this block's completing `D` from
+          /// a leftover rc/startup prompt cycle, and the integration detector to arm only
+          /// where a start-mark could actually go missing.
+          mutable MarksCommandStart : bool
           /// Whether the last output chunk this terminal captured ended in `\r` — the carry
           /// `Onlcr.normalize` needs to leave a CRLF split across two reads alone. Mutable
           /// for the same reason `Shell` is: it is a property of the live capture, not of
@@ -1124,7 +1130,8 @@ module SessionTerminals =
                 let nonce = mintNonce ()
                 match Marks.rcFor shell.Name nonce with
                 | None -> return ()
-                | Some rc ->
+                | Some instrumentation ->
+                    let rc = instrumentation.Rc
                     let carry = ref ""
                     let ready = ref false
                     let onOutput (data: string) =
@@ -1151,12 +1158,17 @@ module SessionTerminals =
                                     if pending.ContainsKey key then sawCommandStart.Add key |> ignore
                                 | MarkCommandDone code ->
                                     match pending.TryGetValue key with
-                                    | true, (complete, _, _) ->
+                                    | true, (complete, _, _) when
+                                        not current.MarksCommandStart || sawCommandStart.Contains key ->
                                         pending.Remove key |> ignore
                                         complete code
-                                    // A `D` with no block open is the shell's own prompt
-                                    // cycle — at startup, or after a peer typed something in
-                                    // live mode. Not ours to act on.
+                                    // A `D` with no block open is the shell's own prompt cycle
+                                    // — at startup, or after a peer typed something in live
+                                    // mode. And a `D` before THIS block's `C`, on a dialect
+                                    // that marks command start, is a leftover prompt cycle from
+                                    // the rc bootstrap (bash types several lines after `PS1` is
+                                    // armed, each ending in a `PROMPT_COMMAND` `D`) — not this
+                                    // block's completion. Either way, not ours to act on.
                                     | _ -> ()
                             // Nothing before the first prompt mark reaches the transcript.
                             // What arrives then is the shell's own startup and the echo of
@@ -1218,6 +1230,7 @@ module SessionTerminals =
                     | Error _ -> return ()
                     | Ok pty ->
                         terminal.Shell <- Some pty
+                        terminal.MarksCommandStart <- instrumentation.MarksCommandStart
                         // TYPED into the shell rather than written to a file it is launched
                         // with. No temp file to place inside a sandbox this Process cannot
                         // reach, no second spawn to set one up, and it works for any shell
@@ -1264,6 +1277,7 @@ module SessionTerminals =
                             // path, which answers a smaller question completely.
                             pty.Kill ()
                             terminal.Shell <- None
+                            terminal.MarksCommandStart <- false
                             rearmers.Remove key |> ignore
             }
 
@@ -1340,6 +1354,7 @@ module SessionTerminals =
                           Emulator = openEmulator 80 24
                           Sandbox = sandbox
                           Shell = None
+                          MarksCommandStart = false
                           OutputEndedCr = false }
                     // In the live map BEFORE the shell starts: the pty's output callback finds
                     // the terminal by id, and bytes can arrive the instant it spawns.
@@ -1600,36 +1615,56 @@ module SessionTerminals =
                                     // per-terminal and a later block repopulates it, so a detector
                                     // keyed on it would be asking about the wrong command.
                                     let mutable settled = false
-                                    let complete = Async.FromContinuations (fun (cont, _, _) ->
-                                        pending.[key] <-
-                                            ((fun code ->
-                                                 settled <- true
-                                                 cont code),
-                                             (fun () -> written),
-                                             (fun extra ->
-                                                 dropped <- dropped + extra
-                                                 written <- written + extra)))
-                                    sawCommandStart.Remove key |> ignore
-                                    pty.Write (writeFor command)
-                                    // The integration detector (Plan 13, stage 2f), armed beside
-                                    // the block rather than awaited: a lost shell must not make
-                                    // this block wait, because the block is precisely what can no
-                                    // longer be bounded. It stays open, which is the honest
-                                    // rendering of "we no longer know when this finished".
-                                    Async.StartImmediate (
-                                        async {
-                                            do! Async.Sleep integrationWindowMs
-                                            if not (sawCommandStart.Contains key)
-                                               && not settled
-                                               && not (Set.contains key lost) then
-                                                lost <- Set.add key lost
-                                                do!
-                                                    append
-                                                        (SessionEvent.TerminalIntegrationLost
-                                                            { TerminalId = terminalId; BlockId = Some blockId })
-                                                reDrain ()
-                                        })
-                                    let! code = complete
+                                    // `pending` is registered — and the command written — INSIDE
+                                    // the continuation, so the two happen in this order: listen,
+                                    // then type. Registering after the write (the shape this
+                                    // replaced) left a window in which the command's own `C`
+                                    // arrived while `pending` was still empty, so it was never
+                                    // recorded in `sawCommandStart`; then a later prompt's `D`
+                                    // found a pending block with no start seen. On a dialect that
+                                    // marks command start that `D` is now dropped and the block
+                                    // hangs; on one that does not it completes the block early on
+                                    // a prompt cycle that was not its command. Listening first
+                                    // closes the window: no mark this command triggers can arrive
+                                    // before we are ready for it.
+                                    let! code =
+                                        Async.FromContinuations (fun (cont, _, _) ->
+                                            pending.[key] <-
+                                                ((fun code ->
+                                                     settled <- true
+                                                     cont code),
+                                                 (fun () -> written),
+                                                 (fun extra ->
+                                                     dropped <- dropped + extra
+                                                     written <- written + extra))
+                                            sawCommandStart.Remove key |> ignore
+                                            pty.Write (writeFor command)
+                                            // The integration detector (Plan 13, stage 2f), armed
+                                            // beside the block rather than awaited: a lost shell
+                                            // must not make this block wait, because the block is
+                                            // precisely what can no longer be bounded. It stays
+                                            // open, the honest rendering of "we no longer know
+                                            // when this finished".
+                                            //
+                                            // Armed only where the dialect emits `C` at all. The
+                                            // detector IS "a start mark that did not arrive", so
+                                            // under a dialect with no preexec to hang one on it
+                                            // would fire on every command slower than the window
+                                            // and hold the queue behind a working shell.
+                                            if terminal.MarksCommandStart then
+                                                Async.StartImmediate (
+                                                  async {
+                                                      do! Async.Sleep integrationWindowMs
+                                                      if not (sawCommandStart.Contains key)
+                                                         && not settled
+                                                         && not (Set.contains key lost) then
+                                                          lost <- Set.add key lost
+                                                          do!
+                                                              append
+                                                                  (SessionEvent.TerminalIntegrationLost
+                                                                      { TerminalId = terminalId; BlockId = Some blockId })
+                                                          reDrain ()
+                                                  }))
                                     return (if code = 0 then CommandSucceeded 0 else CommandFailed code)
                                 }
                             | None ->

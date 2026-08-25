@@ -668,7 +668,7 @@ let tests =
                 // codes. An emitter and a parser that agree only with each other would pass
                 // every cheap-tier case and close no block at all in production.
                 let nonce = "probe-nonce"
-                let rc = Marks.rcFor "bash" nonce |> Option.get
+                let rc = (Marks.rcFor "bash" nonce |> Option.get).Rc
                 let dir = mkdtemp nodeFs nodeOs
                 let rcPath = dir + "/yrc"
                 writeFile nodeFs rcPath rc
@@ -725,14 +725,25 @@ let tests =
             // that proves blocks really moved onto one shared shell. Under stage 1 each block
             // was its own process, so `cd` died with it; here the second block is typed into
             // the same shell the first one changed.
+            //
+            // It also pins the bash startup race: block one must not complete on a leftover
+            // rc prompt-cycle `D`, or block two runs before `cd` took effect. Block two prints
+            // `IN:$PWD` — the shell expands `$PWD`, so the directory appears in block two's
+            // OUTPUT but in no command line (block one's `cd <dir>` echo carries the path too,
+            // which is why asserting on the bare path would pass on block one alone). Only block
+            // two actually having run in the cd'd directory produces `IN:<dir>`. Polled with
+            // `until`, because the record populates as the bytes arrive, not when RunBlock
+            // returns — the same wait the profile case below uses.
             withLiveTerminal "cd" (fun terminals id records _ _ _ ->
                 async {
                     let ada = PeerRef (PeerId.create "ada" |> expect)
-                    do! terminals.RunBlock id (queueEntry id ada "1") "cd /tmp" ignore
-                    do! terminals.RunBlock id (queueEntry id ada "2") "pwd" ignore
-                    let printed = records |> Seq.map (fun r -> r.Data) |> String.concat ""
-                    Expect.isTrue (printed.Contains "/tmp")
-                        (sprintf "the second block saw the first block's directory, got: %s" printed)
+                    let dir = mkdtemp nodeFs nodeOs
+                    do! terminals.RunBlock id (queueEntry id ada "1") ("cd " + dir) ignore
+                    do! terminals.RunBlock id (queueEntry id ada "2") "echo \"IN:$PWD\"" ignore
+                    let printed () = records |> Seq.map (fun r -> r.Data) |> String.concat ""
+                    let! saw = until 5000 (fun () -> (printed ()).Contains ("IN:" + dir))
+                    Expect.isTrue saw
+                        (sprintf "the second block ran in the first block's directory %s, got: %s" dir (printed ()))
                 })
 
         testCaseAsync "a command is sized before it is written, not after" <|
