@@ -1398,10 +1398,10 @@ module Codec =
                             { Seq = get.Required.Field "seq" Decode.int
                               Cols =
                                 get.Optional.Field "cols" Decode.int
-                                |> Option.defaultValue TerminalSize.default'.Cols
+                                |> Option.defaultValue Size.default'.Cols
                               Rows =
                                 get.Optional.Field "rows" Decode.int
-                                |> Option.defaultValue TerminalSize.default'.Rows
+                                |> Option.defaultValue Size.default'.Rows
                               Screen = get.Required.Field "screen" Decode.string }))
                 | "input" ->
                     Decode.map2

@@ -167,7 +167,7 @@ and AgentTurnStarted =
 /// Why a turn exists when nobody spoke (Plan 20, stage 2).
 ///
 /// Attribution, never payload: the substance of what happened arrives through the same door
-/// every turn's does — `TerminalBlockDigest` for terminal work, the tool roster for a roster
+/// every turn's does — `BlockDigest` for terminal work, the tool roster for a roster
 /// change — so a wake carries the REASON and nothing else. A reason that carried results
 /// would be a second channel into the agent's context, free to disagree with the first.
 ///

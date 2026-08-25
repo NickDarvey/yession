@@ -10,7 +10,7 @@ open Yession.Domain
 /// resources are unions: the next Manager-owned resource adds cases, not mechanisms.
 
 /// Manager-verified caller attributes.
-type AuthzSubject =
+type Subject =
     { /// The launch making the call. None for future non-session callers (e.g. a
       /// logged-in management UI acting directly for a user).
       Session : SessionId option
@@ -37,7 +37,7 @@ type SecretAction =
     /// This is the ONLY read the policy knows — there is no value-returning route.
     | InjectSecret
 
-type AuthzResource =
+type Resource =
     | SecretResource of SecretId
     | SecretCollection of SecretScope
 
@@ -57,14 +57,14 @@ type ConnectionAction =
     | ResolveCredential
     | DisconnectCredential
 
-type AuthzAction =
+type Action =
     | SecretAction of SecretAction
     | ConnectionAction of ConnectionAction
 
-type AuthzRequest =
-    { Subject : AuthzSubject
-      Action : AuthzAction
-      Resource : AuthzResource }
+type Request =
+    { Subject : Subject
+      Action : Action
+      Resource : Resource }
 
 type Decision =
     | Permit
@@ -81,7 +81,7 @@ module Policy =
     /// Local-scoped CONNECTION credentials belong to a launch the Manager granted
     /// unattributed access; generic secrets have no local rule at all, so they deny.
     /// Anything not explicitly permitted is denied.
-    let authorize (request: AuthzRequest) : Decision =
+    let authorize (request: Request) : Decision =
         let ownSession (owner: SessionId) =
             match request.Subject.Session with
             | Some caller when caller = owner -> Permit

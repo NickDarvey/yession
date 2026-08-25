@@ -183,7 +183,7 @@ let private completed (id: TerminalId) (b: string) (result: CommandResult) (toSe
     SessionEvent.TerminalBlockCompleted { TerminalId = id; BlockId = block b; Result = result; ToSeq = toSeq }
 
 let private fold events =
-    events |> List.fold TerminalProjection.applyEvent TerminalProjection.empty
+    events |> List.fold Projection.applyEvent Projection.empty
 
 let private projectionTests =
     testList "Terminal projection" [
@@ -195,7 +195,7 @@ let private projectionTests =
                       started terminalA "1" "make" 0
                       completed terminalA "1" (CommandSucceeded 0) 4 ]
             Expect.equal (proj.Terminals |> List.map (fun t -> t.Title)) [ "build"; "logs" ] "open order is kept"
-            let a = TerminalProjection.tryFind terminalA proj |> Option.get
+            let a = Projection.tryFind terminalA proj |> Option.get
             Expect.equal (a.Blocks |> List.map (fun b -> b.Command)) [ "make" ] "the block is there"
             Expect.equal a.Blocks.Head.Status (BlockFinished (CommandSucceeded 0)) "with its exit code"
             Expect.equal a.Blocks.Head.ToSeq (Some 4) "and the transcript range it produced"
@@ -207,11 +207,11 @@ let private projectionTests =
                       started terminalA "1" "make" 0
                       completed terminalA "1" (CommandFailed 2) 9
                       SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "session restarted" } ]
-            let a = TerminalProjection.tryFind terminalA proj |> Option.get
+            let a = Projection.tryFind terminalA proj |> Option.get
             Expect.isFalse a.IsOpen "it is closed"
             Expect.equal a.ClosedReason (Some "session restarted") "with the reason recorded"
             Expect.equal (List.length a.Blocks) 1 "and its history intact"
-            Expect.isEmpty (TerminalProjection.openTerminals proj) "it is not in the open list"
+            Expect.isEmpty (Projection.openTerminals proj) "it is not in the open list"
 
         testCase "the fold is idempotent, so overlapping event pages are safe" <| fun () ->
             let events = [ opened terminalA "build"; started terminalA "1" "make" 0 ]
@@ -219,8 +219,8 @@ let private projectionTests =
             let twice = fold (events @ events)
             Expect.equal (List.length twice.Terminals) 1 "a replayed open is not a second terminal"
             Expect.equal
-                (List.length (TerminalProjection.tryFind terminalA twice |> Option.get).Blocks)
-                (List.length (TerminalProjection.tryFind terminalA once |> Option.get).Blocks)
+                (List.length (Projection.tryFind terminalA twice |> Option.get).Blocks)
+                (List.length (Projection.tryFind terminalA once |> Option.get).Blocks)
                 "and a replayed block start is not a second block"
 
         testCase "a truncation is a stated gap in the record" <| fun () ->
@@ -229,7 +229,7 @@ let private projectionTests =
                     [ opened terminalA "build"
                       SessionEvent.TerminalTranscriptTruncated
                           { TerminalId = terminalA; BlockId = Some (block "1"); DroppedBytes = 512 } ]
-            Expect.equal (TerminalProjection.tryFind terminalA proj |> Option.get).DroppedBytes 512 "the loss is counted"
+            Expect.equal (Projection.tryFind terminalA proj |> Option.get).DroppedBytes 512 "the loss is counted"
     ]
 
 // --- OSC 133 marks and their integrity (Plan 13, stage 2d) -------------------------------
@@ -243,7 +243,7 @@ let private mark (body: string) = "]133;" + body + ";y=" + nonce + ""
 /// printed. Same bytes, no nonce.
 let private foreign (body: string) = "]133;" + body + ""
 
-let private scan1 (data: string) = TerminalMarks.scan nonce "" data
+let private scan1 (data: string) = Marks.scan nonce "" data
 
 let private markTests =
     testList "Terminal marks" [
@@ -283,10 +283,10 @@ let private markTests =
             let whole = mark "D;7"
             let first = whole.Substring (0, 8)
             let second = whole.Substring 8
-            let marks1, out1, carry1 = TerminalMarks.scan nonce "" ("x" + first)
+            let marks1, out1, carry1 = Marks.scan nonce "" ("x" + first)
             Expect.isEmpty marks1 "the first half is not a mark yet"
             Expect.equal out1 "x" "and the fragment is not emitted as output"
-            let marks2, out2, carry2 = TerminalMarks.scan nonce carry1 (second + "y")
+            let marks2, out2, carry2 = Marks.scan nonce carry1 (second + "y")
             Expect.equal marks2 [ MarkCommandDone 7 ] "the halves join into one mark"
             Expect.equal out2 "y" "with only the real output around it"
             Expect.equal carry2 "" "and nothing left hanging"
@@ -316,7 +316,7 @@ let private markTests =
         testCase "the rc payload carries the nonce and reads $? first" <| fun () ->
             // Two properties of the emitted shell, both of which are silent when wrong.
             for shell in [ "bash"; "zsh" ] do
-                let rc = (TerminalMarks.rcFor shell nonce |> Option.get).Rc
+                let rc = (Marks.rcFor shell nonce |> Option.get).Rc
                 Expect.isTrue (rc.Contains ("y=" + nonce)) (sprintf "%s marks carry the nonce" shell)
                 Expect.isTrue (rc.Contains "__y_code=$?") (sprintf "%s captures $? as the first statement" shell)
                 Expect.isTrue (rc.Contains "command -p") (sprintf "%s resolves binaries off a clobbered PATH" shell)
@@ -324,18 +324,18 @@ let private markTests =
                     Expect.isTrue (line.StartsWith " ") (sprintf "%s keeps its bootstrap out of history: %s" shell line)
 
         testCase "a shell we cannot instrument says so rather than guessing" <| fun () ->
-            Expect.isNone (TerminalMarks.rcFor "fish" nonce) "fish is not one of the three yet"
-            Expect.isNone (TerminalMarks.rcFor "" nonce) "and neither is nothing"
-            Expect.isSome (TerminalMarks.rcFor "sh" nonce) "a POSIX sh rides its marks in PS1"
+            Expect.isNone (Marks.rcFor "fish" nonce) "fish is not one of the three yet"
+            Expect.isNone (Marks.rcFor "" nonce) "and neither is nothing"
+            Expect.isSome (Marks.rcFor "sh" nonce) "a POSIX sh rides its marks in PS1"
 
         testCase "a dialect declares whether it marks a command's start" <| fun () ->
             // What the drain gates block-completion on and the integration detector gates
             // arming on. Wrong for a dialect and either a working shell is reported lost, or a
             // stale prompt-cycle `D` closes the first block early.
             for shell in [ "bash"; "zsh" ] do
-                Expect.isTrue (TerminalMarks.rcFor shell nonce |> Option.get).MarksCommandStart
+                Expect.isTrue (Marks.rcFor shell nonce |> Option.get).MarksCommandStart
                     (sprintf "%s has a preexec hook to hang C on" shell)
-            Expect.isFalse (TerminalMarks.rcFor "sh" nonce |> Option.get).MarksCommandStart
+            Expect.isFalse (Marks.rcFor "sh" nonce |> Option.get).MarksCommandStart
                 "a POSIX sh has none: its marks ride in PS1, which renders after the command"
     ]
 
@@ -403,15 +403,15 @@ let private emulatorTests =
             // column is shut. `None` has to mean "leave it alone" rather than "use the
             // default", or every agent command would drag a shared terminal back to 80x24
             // under whoever had just widened it.
-            Expect.equal (TerminalSize.parse "") None "nothing is not a size"
-            Expect.equal TerminalSize.default' { Cols = 80; Rows = 24 } "and what a terminal opens at is 80x24"
+            Expect.equal (Size.parse "") None "nothing is not a size"
+            Expect.equal Size.default' { Cols = 80; Rows = 24 } "and what a terminal opens at is 80x24"
 
         testCase "an unusable size is refused, never rounded into a broken terminal" <| fun () ->
             // The size rides an entry in a doc shared with peers we do not control, and a
             // zero-column terminal is not a small terminal — it is one nothing can render.
-            Expect.isFalse (TerminalSize.isValid { Cols = 0; Rows = 24 }) "no columns is not a size"
-            Expect.isFalse (TerminalSize.isValid { Cols = 80; Rows = -1 }) "nor are negative rows"
-            Expect.isTrue (TerminalSize.isValid TerminalSize.default') "the default is always valid"
+            Expect.isFalse (Size.isValid { Cols = 0; Rows = 24 }) "no columns is not a size"
+            Expect.isFalse (Size.isValid { Cols = 80; Rows = -1 }) "nor are negative rows"
+            Expect.isTrue (Size.isValid Size.default') "the default is always valid"
 
         testCase "a size round-trips through the record a transcript writes it as" <| fun () ->
             // The two halves of this run in different processes — the Session Process writes
@@ -419,18 +419,18 @@ let private emulatorTests =
             // composing that terminal's screen — so the format is only ever right if one of
             // them cannot drift from the other.
             let size = { Cols = 132; Rows = 43 }
-            Expect.equal (TerminalSize.format size) "132x43" "the asciicast `r` payload"
-            Expect.equal (TerminalSize.parse (TerminalSize.format size)) (Some size) "and it reads back"
+            Expect.equal (Size.format size) "132x43" "the asciicast `r` payload"
+            Expect.equal (Size.parse (Size.format size)) (Some size) "and it reads back"
 
         testCase "a resize payload that is not a size is skipped, never guessed at" <| fun () ->
             // A transcript is replayed by clients that did not write it, so an unreadable
             // record is one to step over — the alternative is a screen reshaped to a number
             // nobody wrote.
-            Expect.equal (TerminalSize.parse "") None "nothing is not a size"
-            Expect.equal (TerminalSize.parse "80") None "one dimension is not a size"
-            Expect.equal (TerminalSize.parse "80x24x2") None "nor are three"
-            Expect.equal (TerminalSize.parse "eighty x twenty-four") None "nor words"
-            Expect.equal (TerminalSize.parse "0x24") None "nor a dimension nothing can render"
+            Expect.equal (Size.parse "") None "nothing is not a size"
+            Expect.equal (Size.parse "80") None "one dimension is not a size"
+            Expect.equal (Size.parse "80x24x2") None "nor are three"
+            Expect.equal (Size.parse "eighty x twenty-four") None "nor words"
+            Expect.equal (Size.parse "0x24") None "nor a dimension nothing can render"
 
         testCaseAsync "the no-op emulator answers everything without keeping a screen" <|
             async {
@@ -481,7 +481,7 @@ let private rejectionTests =
                       started terminalA "1" "make" 0
                       completed terminalA "1" (CommandSucceeded 0) 3
                       rejectedEvent terminalA "a1" "2" bob (Some "not on prod") ]
-            let view = TerminalProjection.tryFind terminalA proj |> Option.get
+            let view = Projection.tryFind terminalA proj |> Option.get
             Expect.equal (view.Blocks |> List.map (fun b -> b.Command)) [ "make"; "rm -rf /" ] "beside what did run"
             let refusal = view.Blocks |> List.last
             Expect.equal refusal.Status (BlockRejected (PeerRef bob, Some "not on prod")) "named, with the reason"
@@ -492,7 +492,7 @@ let private rejectionTests =
             let events = [ opened terminalA "build"; rejectedEvent terminalA "a1" "2" bob None ]
             let twice = fold (events @ events)
             Expect.equal
-                (List.length (TerminalProjection.tryFind terminalA twice |> Option.get).Blocks)
+                (List.length (Projection.tryFind terminalA twice |> Option.get).Blocks)
                 1
                 "a replayed refusal is not a second block"
 
@@ -535,7 +535,7 @@ let private leaseTests =
             // Folded in that order, a reader never sees two holders — and never none.
             let proj = fold [ opened terminalA "build"; yield! events ]
             Expect.equal
-                (TerminalProjection.tryFind terminalA proj |> Option.bind (fun t -> t.Lease))
+                (Projection.tryFind terminalA proj |> Option.bind (fun t -> t.Lease))
                 (Some (PeerRef bob))
                 "the projection agrees"
 
@@ -573,7 +573,7 @@ let private leaseTests =
                       SessionEvent.TerminalLeaseReleased
                         { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob); ToSeq = 0 } ]
             Expect.equal
-                (TerminalProjection.tryFind terminalA proj |> Option.bind (fun t -> t.Lease))
+                (Projection.tryFind terminalA proj |> Option.bind (fun t -> t.Lease))
                 (Some (PeerRef bob))
                 "bob still holds it"
 
@@ -584,7 +584,7 @@ let private leaseTests =
                       SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef ada; FromSeq = 0 }
                       SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "closed by a peer" } ]
             Expect.equal
-                (TerminalProjection.tryFind terminalA proj |> Option.bind (fun t -> t.Lease))
+                (Projection.tryFind terminalA proj |> Option.bind (fun t -> t.Lease))
                 None
                 "a closed terminal has no stdin to hold"
     ]
@@ -622,7 +622,7 @@ let private retentionTests =
             transcript.Append { At = 0.0; Kind = TranscriptOutput; Data = "still here" } |> ignore
             let proj = fold [ opened terminalA "build"; SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "closed by a peer" } ]
             Expect.equal
-                (TerminalProjection.tryFind terminalA proj |> Option.map (fun t -> t.IsOpen))
+                (Projection.tryFind terminalA proj |> Option.map (fun t -> t.IsOpen))
                 (Some false)
                 "the terminal is closed"
             Expect.isSome (store.BoundsAfter terminalA None) "and its recording is still served"
@@ -631,7 +631,7 @@ let private retentionTests =
                 [ "still here" ]
                 "with every record it held"
             Expect.equal
-                (TerminalProjection.tryFind terminalA proj |> Option.map (fun t -> t.DroppedBytes))
+                (Projection.tryFind terminalA proj |> Option.map (fun t -> t.DroppedBytes))
                 (Some 0)
                 "and nothing counted as lost"
 
@@ -648,7 +648,7 @@ let private retentionTests =
                       SessionEvent.TerminalTranscriptTruncated
                         { TerminalId = terminalA; BlockId = None; DroppedBytes = 4096 } ]
             Expect.equal
-                (TerminalProjection.tryFind terminalA proj |> Option.map (fun t -> t.DroppedBytes))
+                (Projection.tryFind terminalA proj |> Option.map (fun t -> t.DroppedBytes))
                 (Some 4106)
                 "both losses accumulate on the one number a reader looks at"
     ]
@@ -694,7 +694,7 @@ let private integrationTests =
                     [ opened terminalA "build"
                       SessionEvent.TerminalIntegrationLost { TerminalId = terminalA; BlockId = Some (block "1") } ]
             Expect.isTrue
-                (TerminalProjection.tryFind terminalA lost |> Option.map (fun t -> t.IntegrationLost) |> Option.defaultValue false)
+                (Projection.tryFind terminalA lost |> Option.map (fun t -> t.IntegrationLost) |> Option.defaultValue false)
                 "every client sees it, because it is an event rather than a screen"
             let repaired =
                 fold
@@ -702,7 +702,7 @@ let private integrationTests =
                       SessionEvent.TerminalIntegrationLost { TerminalId = terminalA; BlockId = None }
                       SessionEvent.TerminalIntegrationRestored { TerminalId = terminalA } ]
             Expect.isFalse
-                (TerminalProjection.tryFind terminalA repaired |> Option.map (fun t -> t.IntegrationLost) |> Option.defaultValue true)
+                (Projection.tryFind terminalA repaired |> Option.map (fun t -> t.IntegrationLost) |> Option.defaultValue true)
                 "and stops seeing it once somebody re-armed"
     ]
 
@@ -771,7 +771,7 @@ let private flipTests =
     testList "Alt-screen flip policy" [
         testCase "a peer's block entering the alt screen hands them the terminal" <| fun () ->
             Expect.equal
-                (TerminalFlip.propose true None false (Some (PeerRef ada)))
+                (Flip.propose true None false (Some (PeerRef ada)))
                 (FlipToLive (PeerRef ada))
                 "the author of the command is the person who now needs the keyboard"
 
@@ -780,29 +780,29 @@ let private flipTests =
             // a wedge: a block waiting for a keystroke nobody was allowed to send never
             // finishes, so the terminal is busy for ever and its queue never moves.
             Expect.equal
-                (TerminalFlip.propose true None false (Some ActorRef.Agent))
+                (Flip.propose true None false (Some ActorRef.Agent))
                 (FlipToLive ActorRef.Agent)
                 "the agent wrote the command, so the agent needs the keyboard"
 
         testCase "nothing flips to a party that cannot type" <| fun () ->
             // Not a policy: there is no surface anywhere that sends keystrokes as the process
             // or as the system, so a lease here would be held by nobody.
-            Expect.equal (TerminalFlip.propose true None false (Some ActorRef.SessionProcess)) FlipNothing "nor the process"
-            Expect.equal (TerminalFlip.propose true None false (Some ActorRef.System)) FlipNothing "nor the system"
-            Expect.equal (TerminalFlip.propose true None false None) FlipNothing "nor with no block at all"
+            Expect.equal (Flip.propose true None false (Some ActorRef.SessionProcess)) FlipNothing "nor the process"
+            Expect.equal (Flip.propose true None false (Some ActorRef.System)) FlipNothing "nor the system"
+            Expect.equal (Flip.propose true None false None) FlipNothing "nor with no block at all"
 
         testCase "detection never overrides a lease somebody is holding" <| fun () ->
             Expect.equal
-                (TerminalFlip.propose true (Some (PeerRef bob)) false (Some (PeerRef ada)))
+                (Flip.propose true (Some (PeerRef bob)) false (Some (PeerRef ada)))
                 FlipNothing
                 "ada's command does not take the terminal out from under bob"
 
         testCase "detection only gives back what detection took" <| fun () ->
             // Leaving `vim` must not yank the keyboard from a peer who took the terminal by
             // hand and happened to run an editor in it.
-            Expect.equal (TerminalFlip.propose false (Some (PeerRef ada)) true None) FlipToBlock "auto-held goes back"
-            Expect.equal (TerminalFlip.propose false (Some (PeerRef ada)) false None) FlipNothing "asked-for does not"
-            Expect.equal (TerminalFlip.propose false None false None) FlipNothing "and an unheld terminal is a no-op"
+            Expect.equal (Flip.propose false (Some (PeerRef ada)) true None) FlipToBlock "auto-held goes back"
+            Expect.equal (Flip.propose false (Some (PeerRef ada)) false None) FlipNothing "asked-for does not"
+            Expect.equal (Flip.propose false None false None) FlipNothing "and an unheld terminal is a no-op"
     ]
 
 let private leaseGateTests =
@@ -839,7 +839,7 @@ let private leaseGateTests =
 
 // --- The two waits (Plan 13, stage 3b) ---------------------------------------------------
 
-let private blockOf (status: TerminalBlockStatus) : TerminalBlock =
+let private blockOf (status: BlockStatus) : Block =
     { BlockId = block "1"
       QueueId = Some (queue "a1")
       Authority = Authority.agentFor (PeerRef ada)
@@ -855,7 +855,7 @@ let private waitingOn (hold: TerminalQueueDrain.TerminalHold option) : TerminalC
 
 /// The observation of a request whose block exists — running or finished — with nothing left
 /// in the queue. `interactive` is whether detection holds the terminal.
-let private observing (status: TerminalBlockStatus) (interactive: bool) : TerminalCommandWait.Observation =
+let private observing (status: BlockStatus) (interactive: bool) : TerminalCommandWait.Observation =
     { Block = Some (blockOf status); InQueue = false; IsHead = false; Hold = None; Interactive = interactive }
 
 let private waitTests =
@@ -998,7 +998,7 @@ let private readsBack (text: string) : TerminalId -> int -> int option -> string
     fun _ _ _ -> text
 
 let private digestOf events =
-    fold events |> TerminalDigest.build (readsBack "") (TerminalDigest.window events)
+    fold events |> Digest.build (readsBack "") (Digest.window events)
 
 let private digestTests =
     testList "Terminal digest" [
@@ -1053,15 +1053,15 @@ let private digestTests =
         testCase "output is capped from the FRONT, and the loss is stated" <| fun () ->
             // Keeping the tail is the whole point: a build's verdict is its last lines,
             // and a cap that kept the head would hand the agent the part it can guess.
-            let long = String.replicate (TerminalDigest.tailCap + 500) "x"
+            let long = String.replicate (Digest.tailCap + 500) "x"
             let events = [ opened terminalA "build"; turnStarted "1"; started terminalA "1" "make" 0 ]
-            let digest = fold events |> TerminalDigest.build (readsBack long) (TerminalDigest.window events)
-            Expect.equal digest.Head.OutputTail.Length TerminalDigest.tailCap "the tail is capped"
+            let digest = fold events |> Digest.build (readsBack long) (Digest.window events)
+            Expect.equal digest.Head.OutputTail.Length Digest.tailCap "the tail is capped"
             Expect.equal digest.Head.Elided 500 "and what was dropped is counted, not silently elided"
 
         testCase "output that fits is not elided at all" <| fun () ->
             let events = [ opened terminalA "build"; turnStarted "1"; started terminalA "1" "make" 0 ]
-            let digest = fold events |> TerminalDigest.build (readsBack "ok\n") (TerminalDigest.window events)
+            let digest = fold events |> Digest.build (readsBack "ok\n") (Digest.window events)
             Expect.equal digest.Head.OutputTail "ok\n" "it arrives whole"
             Expect.equal digest.Head.Elided 0 "with nothing claimed to be missing"
 
@@ -1837,7 +1837,7 @@ let private managerTests =
                 | None -> failwith "the second block recorded no keyframe"
                 Expect.equal
                     (keyframes |> List.map (fun k -> k.Cols, k.Rows))
-                    (keyframes |> List.map (fun _ -> TerminalSize.default'.Cols, TerminalSize.default'.Rows))
+                    (keyframes |> List.map (fun _ -> Size.default'.Cols, Size.default'.Rows))
                     "each one carries the geometry the range actually ran under"
             }
 
@@ -2606,7 +2606,7 @@ let private sourceTests =
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
                 say "root@box:~# "
-                let pattern = TerminalPattern.compile "[#$>] $" |> expect
+                let pattern = Pattern.compile "[#$>] $" |> expect
                 let! first = terminals.Tail id (Some 0) None
                 let first = first |> expect
                 Expect.stringContains first.Text "#" "the prompt has been handed over"
@@ -2630,7 +2630,7 @@ let private sourceTests =
                 let! first = terminals.Tail id (Some 0) None
                 let first = first |> expect
                 say "U-Boot 2024.01\n"
-                let pattern = TerminalPattern.compile "U-Boot \\d+\\.\\d+" |> expect
+                let pattern = Pattern.compile "U-Boot \\d+\\.\\d+" |> expect
                 let! found =
                     terminals.Tail
                         id
@@ -2831,18 +2831,18 @@ let private affordanceTests =
         // loosened test reads as coverage for.
 
         testCase "the kill is offered exactly while the terminal is open" <| fun () ->
-            let afforded (view: TerminalView) = (TerminalAffordances.ofView true view).CanKill
+            let afforded (view: TerminalView) = (Affordances.ofView true view).CanKill
             Expect.isTrue (afforded (viewOf true false)) "a running terminal can be killed"
             Expect.isFalse (afforded (viewOf false false)) "a closed one has nothing left to kill"
 
         testCase "the rewind is offered exactly while a live terminal has something recorded" <| fun () ->
-            let afforded recorded view = (TerminalAffordances.ofView recorded view).CanRewind
+            let afforded recorded view = (Affordances.ofView recorded view).CanRewind
             Expect.isTrue (afforded true (viewOf true false)) "live, and there is something behind it"
             Expect.isFalse (afforded false (viewOf true false)) "a DVR with nothing recorded has nothing to do"
             Expect.isFalse (afforded true (viewOf false false)) "and a closed terminal is replayed, not rewound"
 
         testCase "the replay is offered exactly where a closed terminal's recording survives" <| fun () ->
-            let afforded recorded view = (TerminalAffordances.ofView recorded view).CanReplay
+            let afforded recorded view = (Affordances.ofView recorded view).CanReplay
             Expect.isTrue (afforded true (viewOf false false)) "closed, with its recording"
             // The stated gap: the per-terminal cap ate it. Offering a player over nothing
             // would be indistinguishable from a terminal that printed nothing.
@@ -2850,7 +2850,7 @@ let private affordanceTests =
             Expect.isFalse (afforded true (viewOf true false)) "and a live terminal is not a recording yet"
 
         testCase "attaching again is offered exactly on a closed stream whose provider allows it" <| fun () ->
-            let afforded (view: TerminalView) = (TerminalAffordances.ofView true view).CanReattach
+            let afforded (view: TerminalView) = (Affordances.ofView true view).CanReattach
             Expect.isTrue (afforded (viewOf false true)) "closed, and asking again is safe"
             Expect.isFalse (afforded (viewOf false false)) "a shell terminal has no provider to ask"
             Expect.isFalse (afforded (viewOf true true)) "and a stream still running needs no second one"
@@ -2861,7 +2861,7 @@ let private affordanceTests =
         // nobody asked.
         testCase "attaching again survives a recording the cap ate" <| fun () ->
             Expect.isTrue
-                ((TerminalAffordances.ofView false (viewOf false true)).CanReattach)
+                ((Affordances.ofView false (viewOf false true)).CanReattach)
                 "the way back is about the stream, not about what was kept of it"
 
         testCase "the recording is the only read exactly where a closed terminal ran nothing" <| fun () ->
@@ -2870,7 +2870,7 @@ let private affordanceTests =
             // recording is somewhere you go. A terminal with none has no such read: a device
             // whose source could never be instrumented, or a shell that only ever held a
             // lease, is entirely in its recording, and an empty block list is not a read.
-            let afforded recorded view = (TerminalAffordances.ofView recorded view).ReplayIsTheRead
+            let afforded recorded view = (Affordances.ofView recorded view).ReplayIsTheRead
             let ran =
                 { viewOf false false with
                     Blocks =
@@ -2892,7 +2892,7 @@ let private affordanceTests =
             // appeared only while somebody was typing — so a serial port nobody had taken
             // rendered an empty block list beside a stream arriving the whole time, and the
             // only way to see anything was to claim the keyboard.
-            let afforded view = (TerminalAffordances.ofView true view).ScreenIsTheRead
+            let afforded view = (Affordances.ofView true view).ScreenIsTheRead
             let device = { viewOf true false with Sandbox = None }
             Expect.isTrue (afforded device) "an open stream with no blocks is its screen"
             Expect.isFalse (afforded (viewOf true false)) "a shell's read is the blocks it is about to have"
@@ -2902,7 +2902,7 @@ let private affordanceTests =
             // Why the rule asks the BLOCKS as well as the sandbox. A source that declared
             // `instrument` has no sandbox either, so the sandbox alone would take the block
             // read away from exactly the source that has one.
-            let afforded view = (TerminalAffordances.ofView true view).ScreenIsTheRead
+            let afforded view = (Affordances.ofView true view).ScreenIsTheRead
             let instrumented =
                 { viewOf true false with
                     Sandbox = None

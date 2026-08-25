@@ -81,7 +81,7 @@ module AgentTurn =
         // What the terminals did since the previous turn (Plan 13, stage 3a). Built by the
         // caller from the same log page the conversation came from, so the two describe
         // the same instant.
-        (terminals: TerminalBlockDigest list)
+        (terminals: BlockDigest list)
         // Which model this turn runs on, read from the session's collaborative register at
         // the same instant the page above it was (`None` = the provider's own default). A
         // value rather than a thunk, so the whole context pack describes ONE moment: a turn

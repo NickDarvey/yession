@@ -112,7 +112,7 @@ module private ToolArgs =
                 // Compiled HERE, so a pattern outside the subset is an answer to this call
                 // rather than something discovered part-way through a wait that then has to
                 // explain itself.
-                TerminalPattern.compile source
+                Pattern.compile source
                 |> Result.map (fun compiled ->
                     terminal, from, Some { Until = MatchPattern (compiled, source); TimeoutSeconds = timeout })
 
@@ -229,7 +229,7 @@ module AgentTools =
             match target with
             | Error e -> return ToolAnswer.text (sprintf "not a sandbox: %s" e)
             | Ok target ->
-                match! capabilities.ExecuteCommand { Command = command; Target = target; Background = background } with
+                match! capabilities.Terminals.Execute { Command = command; Target = target; Background = background } with
                 | Ok outcome -> return { Text = renderOutcome outcome; Block = outcome.Block; Stream = None }
                 | Error reason -> return ToolAnswer.text (sprintf "could not run the command: %s" reason)
         }
@@ -271,7 +271,7 @@ module AgentTools =
             match QueueId.create handle with
             | Error e -> return ToolAnswer.text (sprintf "not a command handle: %s" e)
             | Ok handle ->
-                match! capabilities.CheckPending handle with
+                match! capabilities.Terminals.CheckPending handle with
                 | Ok (PendingTerminal outcome) -> return { Text = renderOutcome outcome; Block = outcome.Block; Stream = None }
                 | Ok (PendingCommand outcome) -> return ToolAnswer.text (renderCommandOutcome outcome)
                 | Error reason -> return ToolAnswer.text (sprintf "could not read that command: %s" reason)
@@ -282,7 +282,7 @@ module AgentTools =
     /// do that, not to see a protocol failure and try a third thing.
     let private writeTerminal (capabilities: AgentCapabilities) (id: TerminalId) (data: string) : Async<string> =
         async {
-            match! capabilities.WriteTerminal id data with
+            match! capabilities.Terminals.Write id data with
             | Ok answer -> return answer
             | Error reason -> return sprintf "could not type into terminal %s: %s" (TerminalId.value id) reason
         }
@@ -297,7 +297,7 @@ module AgentTools =
         (waitFor: TerminalWait option)
         : Async<string> =
         async {
-            match! capabilities.ReadTerminal id from waitFor with
+            match! capabilities.Terminals.Read id from waitFor with
             | Error reason -> return sprintf "could not read terminal %s: %s" (TerminalId.value id) reason
             | Ok tail when tail.Text = "" && tail.Length = 0 ->
                 return sprintf "terminal %s has said nothing" (TerminalId.value id)
@@ -337,7 +337,7 @@ module AgentTools =
             match SecretName.create name with
             | Error e -> return sprintf "invalid secret name: %s" e
             | Ok secretName ->
-                match! capabilities.SetSecret secretName value with
+                match! capabilities.Secrets.Set secretName value with
                 | Ok metadata ->
                     return
                         sprintf
@@ -349,7 +349,7 @@ module AgentTools =
 
     let private listSecrets (capabilities: AgentCapabilities) () : Async<string> =
         async {
-            match! capabilities.ListSecrets () with
+            match! capabilities.Secrets.List () with
             | Error e -> return sprintf "could not list secrets: %s" e
             | Ok [] -> return "no secrets stored for this session"
             | Ok listed ->
@@ -364,7 +364,7 @@ module AgentTools =
             match SecretName.create name with
             | Error e -> return sprintf "invalid secret name: %s" e
             | Ok secretName ->
-                match! capabilities.DeleteSecret secretName with
+                match! capabilities.Secrets.Delete secretName with
                 | Ok true -> return sprintf "deleted secret '%s'" name
                 | Ok false -> return sprintf "no secret named '%s'" name
                 | Error e -> return sprintf "could not delete secret: %s" e
@@ -373,7 +373,7 @@ module AgentTools =
     let private addRepo (capabilities: AgentCapabilities) (raw: string) : Async<string> =
         withRepo raw (fun repo ->
             async {
-                match! capabilities.AddRepo repo with
+                match! capabilities.Repos.Add repo with
                 | Ok outcome -> return renderCommandOutcome outcome
                 | Error e -> return sprintf "could not add the repo: %s" e
             })
@@ -381,7 +381,7 @@ module AgentTools =
     let private removeRepo (capabilities: AgentCapabilities) (raw: string) (force: bool) : Async<string> =
         withRepo raw (fun repo ->
             async {
-                match! capabilities.RemoveRepo repo force with
+                match! capabilities.Repos.Remove repo force with
                 | Ok outcome -> return renderCommandOutcome outcome
                 | Error e -> return sprintf "could not remove the repo: %s" e
             })
@@ -389,7 +389,7 @@ module AgentTools =
     let private switchBranch (capabilities: AgentCapabilities) (raw: string) (branch: string) (create: bool) : Async<string> =
         withRepo raw (fun repo ->
             async {
-                match! capabilities.SwitchRepoBranch repo branch create with
+                match! capabilities.Repos.SwitchBranch repo branch create with
                 | Ok outcome -> return renderCommandOutcome outcome
                 | Error e -> return sprintf "could not switch branch: %s" e
             })
@@ -397,7 +397,7 @@ module AgentTools =
     let private fetchRepo (capabilities: AgentCapabilities) (raw: string) : Async<string> =
         withRepo raw (fun repo ->
             async {
-                match! capabilities.FetchRepo repo with
+                match! capabilities.Repos.Fetch repo with
                 | Ok said -> return said
                 | Error e -> return sprintf "could not fetch: %s" e
             })
@@ -417,7 +417,7 @@ module AgentTools =
                 // The tool's vocabulary is a name and some credentials; everything else a
                 // sandbox can be is the file's to say, so the declaration is an empty one
                 // with the forwarding filled in.
-                match! capabilities.StartWorkSandbox name { SandboxDecl.empty with Forward = forward } with
+                match! capabilities.Sandboxes.Start name { SandboxDecl.empty with Forward = forward } with
                 | Ok outcome -> return renderCommandOutcome outcome
                 | Error e -> return sprintf "could not start the sandbox: %s" e
             })
@@ -425,7 +425,7 @@ module AgentTools =
     let private stopWorkSandbox (capabilities: AgentCapabilities) (raw: string) : Async<string> =
         withSandbox raw (fun name ->
             async {
-                match! capabilities.StopWorkSandbox name with
+                match! capabilities.Sandboxes.Stop name with
                 | Ok outcome -> return renderCommandOutcome outcome
                 | Error e -> return sprintf "could not stop the sandbox: %s" e
             })
@@ -439,14 +439,14 @@ module AgentTools =
         let cwd = cwd |> Option.map (fun path -> path.Trim ()) |> Option.filter (fun path -> path <> "")
         withSandbox raw (fun name ->
             async {
-                match! capabilities.SetShellProfile name cwd with
+                match! capabilities.Sandboxes.SetShellProfile name cwd with
                 | Ok outcome -> return renderCommandOutcome outcome
                 | Error e -> return sprintf "could not set the shell profile: %s" e
             })
 
     let private readQuery (capabilities: AgentCapabilities) (def: QueryDef) () : Async<string> =
         async {
-            match! capabilities.ReadQuery def.Name with
+            match! capabilities.Queries.Read def.Name with
             | Ok value -> return QueryValue.describe def.Shape value
             | Error e -> return sprintf "could not read %s: %s" (QueryName.value def.Name) e
         }
@@ -507,7 +507,7 @@ module AgentTools =
                           match sandbox with
                           | Error e -> return ToolAnswer.text (sprintf "not a sandbox: %s" e) |> Ok
                           | Ok sandbox ->
-                              match! capabilities.OpenTerminal name sandbox with
+                              match! capabilities.Terminals.Open name sandbox with
                               | Ok id ->
                                   return
                                       Ok (ToolAnswer.text (sprintf "opened terminal %s for %s" (TerminalId.value id) name))
@@ -526,7 +526,7 @@ module AgentTools =
                           match TerminalId.create raw with
                           | Error e -> return Ok (ToolAnswer.text (sprintf "not a terminal id: %s" e))
                           | Ok id ->
-                              match! capabilities.CloseTerminal id with
+                              match! capabilities.Terminals.Close id with
                               | Ok () -> return Ok (ToolAnswer.text (sprintf "closed terminal %s" raw))
                               | Error reason -> return Ok (ToolAnswer.text reason)
                   })
@@ -537,7 +537,7 @@ module AgentTools =
               []
               (fun _ ->
                   async {
-                      match! capabilities.ListTerminals () with
+                      match! capabilities.Terminals.List () with
                       | Error reason -> return Ok (ToolAnswer.text reason)
                       | Ok [] -> return Ok (ToolAnswer.text "no terminals are open")
                       | Ok terminals ->
@@ -679,13 +679,13 @@ module AgentTools =
               (ofRepo (fetchRepo capabilities))
 
           tool "repo_status" "A repo checkout's git status (porcelain, with branch header)." repoArg
-              (ofRepo (inspectRepo capabilities.RepoStatus))
+              (ofRepo (inspectRepo capabilities.Repos.Status))
 
           tool "repo_log" "The last 30 commits of a repo checkout, one line each." repoArg
-              (ofRepo (inspectRepo capabilities.RepoLog))
+              (ofRepo (inspectRepo capabilities.Repos.Log))
 
           tool "repo_diff" "The uncommitted diff of a repo checkout (capped; use a terminal for the full thing)." repoArg
-              (ofRepo (inspectRepo capabilities.RepoDiff))
+              (ofRepo (inspectRepo capabilities.Repos.Diff))
 
           tool
               "start_work_sandbox"
@@ -730,7 +730,7 @@ module AgentTools =
     /// the humans, with no third place to keep in step. `readOnlyHint` is what makes one a
     /// query rather than a command, and it is MCP's own marker, not ours.
     let private queryTools (capabilities: AgentCapabilities) : (ToolDescriptor * (string -> Async<Result<ToolAnswer, string>>)) list =
-        capabilities.Queries
+        capabilities.Queries.Declared
         |> List.map (fun def ->
             { ToolDescriptor.create Namespace (QueryName.value def.Name) (QueryDef.toolDescription def) ToolSchema.none with
                 ReadOnly = true

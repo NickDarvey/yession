@@ -24,7 +24,7 @@ module SessionCommands =
     /// source of truth about a durable fact — and then two code paths to keep agreeing.
     let handle
         (requestInterrupt: PeerId -> AgentTurnId -> Result<unit, string>)
-        (openTerminal: ActorRef -> TerminalSource -> string -> Async<Result<TerminalId, string>>)
+        (openTerminal: ActorRef -> Source -> string -> Async<Result<TerminalId, string>>)
         (closeTerminal: TerminalId -> string -> Async<Result<unit, string>>)
         (takeLease: TerminalId -> ActorRef -> Async<Result<unit, string>>)
         (releaseLease: TerminalId -> ActorRef -> Async<Result<unit, string>>)

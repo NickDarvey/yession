@@ -10,7 +10,7 @@ open Yession.Domain.Terminals
 ///
 /// This is a view-level merge, not a fold that competes with the two it merges.
 /// `ConversationProjection` stays exactly what it was — it is the agent's context, and the
-/// agent already gets block outcomes through `TerminalDigest` — and `TerminalProjection`
+/// agent already gets block outcomes through `Digest` — and `Projection`
 /// stays the terminals' own structure. Both are folds of the SAME ordered event log, which
 /// is what makes combining them a sort by `EventOffset` rather than a reconciliation of two
 /// clocks.
@@ -30,7 +30,7 @@ open Yession.Domain.Terminals
 /// One stretch of live mode: from the moment an actor took a terminal's stdin to the moment
 /// that lease ended.
 ///
-/// Assembled here rather than projected into `TerminalProjection` because it is not a fact
+/// Assembled here rather than projected into `Projection` because it is not a fact
 /// about a terminal's current state — a terminal has ONE lease and it is either held or not.
 /// A stretch is a fact about the past, and it is the past that the chat shows.
 type TerminalStretch =
@@ -80,14 +80,14 @@ module TerminalStretch =
 /// One thing in the chat, in the order it happened.
 ///
 /// A block is carried by ID rather than by value, and that is the whole reason a chip
-/// "mutates in place" for free: the timeline holds WHERE it goes, `TerminalProjection` holds
+/// "mutates in place" for free: the timeline holds WHERE it goes, `Projection` holds
 /// what it currently says, and a block that starts running and later exits 1 moves the
 /// second without touching the first.
 type TimelineItem =
     /// Something someone said.
     | TimelineMessage of ConversationItem
     /// A command someone ran, or one someone refused, at the offset it STARTED. Carried by
-    /// id and resolved against `TerminalProjection`, which is why a chip mutates in place for
+    /// id and resolved against `Projection`, which is why a chip mutates in place for
     /// free: the timeline holds where it goes, the projection holds what it currently says.
     | TimelineBlock of EventOffset * TerminalId * BlockId
     /// A stretch of live mode, at the offset it concluded.
@@ -110,7 +110,7 @@ module TimelineItem =
         | TimelineStretch stretch -> stretch.Offset
         | TimelineToolUse (offset, _) -> offset
 
-/// What a task card says about one of its commands — coarser than `TerminalBlockStatus`, and
+/// What a task card says about one of its commands — coarser than `BlockStatus`, and
 /// coarser on purpose. A card is read at a glance to answer three questions: is anything
 /// wrong, is anything still going, is it finished. The exact exit code is on the line itself
 /// and in the block behind it; a card that counted `exit 2` separately from `timed out` would

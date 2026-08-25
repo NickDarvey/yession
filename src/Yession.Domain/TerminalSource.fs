@@ -158,7 +158,7 @@ module StreamOffer =
             | _ -> Error (sprintf "'%s' is not a url this session can dial" url)
 
 /// Where one terminal's bytes come from.
-type TerminalSource =
+type Source =
     /// A shell in one of this session's named WorkSandboxes — instrumentable, resizable,
     /// exit codes. Opening one IS a need, so it ensures that sandbox exists. The name rides
     /// the case rather than a parallel argument, because "which sandbox" is only a question
@@ -173,7 +173,7 @@ type TerminalSource =
     /// panel has to know.
     | Attached of StreamOffer
 
-module TerminalSource =
+module Source =
 
     let capabilities =
         function

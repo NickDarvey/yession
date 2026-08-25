@@ -263,7 +263,7 @@ module TerminalCommandWait =
     type Observation =
         { /// The block this request started, once it has. Joined to the request by the
           /// `QueueId` the block events carry.
-          Block : TerminalBlock option
+          Block : Block option
           /// Whether the request is still sitting in the doc's queue.
           InQueue : bool
           /// Whether it is the terminal's HEAD — the only entry a drain can start. An entry
@@ -510,7 +510,7 @@ module SessionTerminals =
         { Executable : string
           /// Arguments before the command line itself.
           Arguments : string list
-          /// Which instrumentation dialect this shell speaks — the key `TerminalMarks.rcFor`
+          /// Which instrumentation dialect this shell speaks — the key `Marks.rcFor`
           /// is asked for. A name we do not know means no instrumentation, and therefore a
           /// terminal that keeps the per-block path.
           Name : string
@@ -581,7 +581,7 @@ module SessionTerminals =
 
     /// Transcript lines `Tail` counts back from the end of a live terminal (Plan 19). Lines
     /// rather than characters because that is what a range read is addressed by; the
-    /// character bound is `TerminalDigest.tailCap`, applied after.
+    /// character bound is `Digest.tailCap`, applied after.
     let private tailWindow = 500
 
     /// The longest a read may be held waiting for a device to speak (Plan 25). The same
@@ -634,7 +634,7 @@ module SessionTerminals =
           /// caller who does not care passes explicitly. An `Attached` source ensures
           /// nothing: a session that only talks to a serial port should not start a
           /// container.
-          Open : ActorRef -> TerminalSource -> string -> Async<Result<TerminalId, string>>
+          Open : ActorRef -> Source -> string -> Async<Result<TerminalId, string>>
           /// The AGENT's terminal in one WorkSandbox, opened on first use (Plan 15, stage 2).
           ///
           /// Here rather than in the composition root, where it used to live, because it is a
@@ -888,7 +888,7 @@ module SessionTerminals =
         let keptOutput = Collections.Generic.Dictionary<string, int> ()
         /// The size last applied to each pty, so the block-mode register watcher can run on
         /// every doc update without resizing a terminal that has not changed size.
-        let appliedSize = Collections.Generic.Dictionary<string, TerminalSize> ()
+        let appliedSize = Collections.Generic.Dictionary<string, Size> ()
         /// Terminals whose current block has seen its `C` mark. The detector's input: the
         /// shell emits `C` when it STARTS a command, so its absence is about instrumentation
         /// rather than about how long the command runs.
@@ -1059,7 +1059,7 @@ module SessionTerminals =
                 let size =
                     match appliedSize.TryGetValue (TerminalId.value id) with
                     | true, applied -> applied
-                    | _ -> TerminalSize.default'
+                    | _ -> Size.default'
                 Async.StartImmediate (
                     async {
                         let! screen = terminal.Emulator.Serialize ()
@@ -1099,7 +1099,7 @@ module SessionTerminals =
 
         /// What the alternate screen proposes, applied. Detection never overrides a lease
         /// somebody asked for, and only ever gives back what detection itself took —
-        /// `TerminalFlip.propose` is where both rules live.
+        /// `Flip.propose` is where both rules live.
         let flip (id: TerminalId) (altScreen: bool) : Async<unit> =
             async {
                 let key = TerminalId.value id
@@ -1109,7 +1109,7 @@ module SessionTerminals =
                     match runningAuthor.TryGetValue key with
                     | true, actor -> Some actor
                     | _ -> None
-                match TerminalFlip.propose altScreen holder autoHeld author with
+                match Flip.propose altScreen holder autoHeld author with
                 | FlipToLive by ->
                     do! applyLease (TerminalLeases.take id by true (clock ()) (markKeyframe id) leases)
                 | FlipToBlock -> do! applyLease (TerminalLeases.autoRelease id (seqNow id) leases)
@@ -1128,7 +1128,7 @@ module SessionTerminals =
             async {
                 let key = TerminalId.value id
                 let nonce = mintNonce ()
-                match TerminalMarks.rcFor shell.Name nonce with
+                match Marks.rcFor shell.Name nonce with
                 | None -> return ()
                 | Some instrumentation ->
                     let rc = instrumentation.Rc
@@ -1138,7 +1138,7 @@ module SessionTerminals =
                         match live.TryGetValue key with
                         | false, _ -> ()
                         | true, current ->
-                            let marks, clean, rest = TerminalMarks.scan nonce carry.Value data
+                            let marks, clean, rest = Marks.scan nonce carry.Value data
                             carry.Value <- rest
                             for m in marks do
                                 match m with
@@ -1297,7 +1297,7 @@ module SessionTerminals =
         // Mutually recursive with `closeTerminal`, because a stream that ends closes its own
         // terminal and the watcher for that is armed at open. One direction only in practice:
         // closing never opens anything.
-        let rec openTerminal (openedBy: ActorRef) (source: TerminalSource) (title: string) : Async<Result<TerminalId, string>> =
+        let rec openTerminal (openedBy: ActorRef) (source: Source) (title: string) : Async<Result<TerminalId, string>> =
             async {
                 // A SHELL terminal is a need, and the need is identified before the terminal
                 // exists — so a failed environment start is reported as a failed open
@@ -1305,7 +1305,7 @@ module SessionTerminals =
                 // does not have refuses HERE, for the same reason: better no terminal than
                 // one whose every command fails. An ATTACHED terminal is not a need at
                 // all: its bytes come from somewhere this session does not run.
-                let sandbox = TerminalSource.needsSandbox source
+                let sandbox = Source.needsSandbox source
                 let! ensured =
                     match sandbox with
                     | Some name -> (environmentFor name).Ensure None "a terminal was opened"
@@ -1359,9 +1359,9 @@ module SessionTerminals =
                     // In the live map BEFORE the shell starts: the pty's output callback finds
                     // the terminal by id, and bytes can arrive the instant it spawns.
                     live.[TerminalId.value id] <- terminal
-                    appliedSize.[TerminalId.value id] <- TerminalSize.default'
+                    appliedSize.[TerminalId.value id] <- Size.default'
                     terminal.Emulator.OnAltScreen (fun alt -> Async.StartImmediate (flip id alt))
-                    sources.[TerminalId.value id] <- TerminalSource.capabilities source
+                    sources.[TerminalId.value id] <- Source.capabilities source
                     match source with
                     | SandboxShell name -> do! openShell id terminal name
                     | Attached _ ->
@@ -1400,7 +1400,7 @@ module SessionTerminals =
                     // the only way back was pressing Kill on something already dead.
                     match dialledHandle with
                     | Some handle ->
-                        let capabilities = TerminalSource.capabilities source
+                        let capabilities = Source.capabilities source
                         // A stream ends once, and this acts once. `Exited` PROMISES to resolve
                         // exactly once, so the flag is not that promise restated — it is the
                         // guard for a handle that breaks it. Closing a terminal kills its
@@ -1422,7 +1422,7 @@ module SessionTerminals =
                                 if not ending && isOpen id then
                                     ending <- true
                                     do!
-                                        closeTerminal id (TerminalSource.endedReason capabilities outcome)
+                                        closeTerminal id (Source.endedReason capabilities outcome)
                                         |> Async.Ignore
                             })
                     | None -> ()
@@ -1488,19 +1488,19 @@ module SessionTerminals =
         /// (The drain already holds the queue for a leased terminal, so the last is a guard
         /// against a race rather than a path — and it stays because the rule is the terminal's,
         /// not the drain's.)
-        let applySize (id: TerminalId) (size: TerminalSize) : unit =
+        let applySize (id: TerminalId) (size: Size) : unit =
             let key = TerminalId.value id
             let unchanged =
                 match appliedSize.TryGetValue key with
                 | true, current -> current = size
                 | _ -> false
-            if unchanged || not (TerminalSize.isValid size) || not (canResize key) || Map.containsKey key leases then ()
+            if unchanged || not (Size.isValid size) || not (canResize key) || Map.containsKey key leases then ()
             else
                 match live.TryGetValue key with
                 | true, terminal ->
                     terminal.Shell |> Option.iter (fun pty -> pty.Resize size.Cols size.Rows)
                     terminal.Emulator.Resize size.Cols size.Rows
-                    emit id terminal TranscriptResize (TerminalSize.format size)
+                    emit id terminal TranscriptResize (Size.format size)
                     appliedSize.[key] <- size
                 | _ -> ()
 
@@ -1911,7 +1911,7 @@ module SessionTerminals =
                         // `Through` is the length.
                         let start = max 0 (length - tailWindow)
                         let printed = readTranscript id start None |> Transcript.printed
-                        let elided = max 0 (printed.Length - TerminalDigest.tailCap)
+                        let elided = max 0 (printed.Length - Digest.tailCap)
                         return
                             Ok
                                 { Text = (if elided > 0 then printed.Substring elided else printed)
@@ -1950,7 +1950,7 @@ module SessionTerminals =
             // A source that declared no size is not resized and does not pretend to have
             // been: a serial line has no rows, and telling it it has 24 would be inventing a
             // fact the emulator would then draw against.
-            if not (TerminalSize.isValid { Cols = cols; Rows = rows }) || not (canResize (TerminalId.value id)) then false
+            if not (Size.isValid { Cols = cols; Rows = rows }) || not (canResize (TerminalId.value id)) then false
             else
                 match heldPty id by with
                 | Some pty ->
@@ -1962,7 +1962,7 @@ module SessionTerminals =
                         // A resize IS output-side history, not a keystroke: asciicast records
                         // it (`[t, "r", "COLSxROWS"]`) because a replay that does not know the
                         // screen changed shape redraws everything after it wrongly.
-                        emit id terminal TranscriptResize (TerminalSize.format { Cols = cols; Rows = rows })
+                        emit id terminal TranscriptResize (Size.format { Cols = cols; Rows = rows })
                     | _ -> ()
                     appliedSize.[key] <- { Cols = cols; Rows = rows }
                     true
@@ -2267,7 +2267,7 @@ module SessionTerminals =
                     let size =
                         match appliedSize.TryGetValue (TerminalId.value id) with
                         | true, applied -> applied
-                        | _ -> TerminalSize.default'
+                        | _ -> Size.default'
                     let! screen = terminal.Emulator.Serialize ()
                     return Some { Seq = seq; Cols = size.Cols; Rows = size.Rows; Screen = screen }
                 }
@@ -2437,7 +2437,7 @@ module TerminalCommands =
     let create
         (doc: Yjs.Y.Doc)
         (terminals: SessionTerminals.SessionTerminals)
-        (projection: unit -> TerminalProjection)
+        (projection: unit -> Projection)
         (syncedOf: unit -> Result<SyncedSessionState, Ylmish.Codec.Error list>)
         (readOutput: TerminalId -> int -> int option -> string)
         /// The session's agent terminal, opened on first use with `reason` as its TITLE — so
@@ -2450,8 +2450,8 @@ module TerminalCommands =
         : TerminalCommands =
 
         /// Every block in the session, keyed by the request it came from. The join between a
-        /// handle and its outcome, and the reason `TerminalBlock` carries its `QueueId`.
-        let blockFor (handle: QueueId) : (TerminalId * TerminalBlock) option =
+        /// handle and its outcome, and the reason `Block` carries its `QueueId`.
+        let blockFor (handle: QueueId) : (TerminalId * Block) option =
             (projection ()).Terminals
             |> List.tryPick (fun terminal ->
                 terminal.Blocks
@@ -2500,7 +2500,7 @@ module TerminalCommands =
                 match block with
                 | Some b -> readOutput terminal b.FromSeq b.ToSeq
                 | None -> ""
-            let elided = max 0 (output.Length - TerminalDigest.tailCap)
+            let elided = max 0 (output.Length - Digest.tailCap)
             { Terminal = terminal
               Handle = handle
               Block = block |> Option.map (fun b -> b.BlockId)

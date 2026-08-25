@@ -199,7 +199,7 @@ let startFull
         // append. The Process is the log's only writer, so this is complete and ordered by
         // construction — and it is what `execute_command`'s wait observes, which is why the
         // wait holds no state of its own.
-        let mutable terminalProjection = TerminalProjection.empty
+        let mutable terminalProjection = Projection.empty
         // Anything that could change a waiting command's outcome: an appended event, a doc
         // update. One signal for both, because a waiter does not care which happened — it
         // re-reads and decides.
@@ -225,7 +225,7 @@ let startFull
                         async {
                             recordAttribution event
                             let! appended = inner.Append actor event
-                            terminalProjection <- TerminalProjection.applyEvent terminalProjection event
+                            terminalProjection <- Projection.applyEvent terminalProjection event
                             broadcastEventsAvailable appended.Offset
                             notifyChanged ()
                             return appended
@@ -243,7 +243,7 @@ let startFull
             replayed.Events |> List.choose (fun e -> TerminalQueueDrain.consumedOf e.Event) |> Set.ofList
         let replayedTerminals =
             replayed.Events
-            |> List.fold (fun proj e -> TerminalProjection.applyEvent proj e.Event) TerminalProjection.empty
+            |> List.fold (fun proj e -> Projection.applyEvent proj e.Event) Projection.empty
         terminalProjection <- replayedTerminals
         // Where a shell opened in each sandbox starts (Plan 25), from the same replay — which
         // is what makes a restarted session open its next terminal where the last one started.
@@ -313,8 +313,8 @@ let startFull
                             TerminalSnapshot (
                                 terminal,
                                 { Seq = 0
-                                  Cols = TerminalSize.default'.Cols
-                                  Rows = TerminalSize.default'.Rows
+                                  Cols = Size.default'.Cols
+                                  Rows = Size.default'.Rows
                                   Screen = "" })))))
 
         let terminals =
@@ -347,7 +347,7 @@ let startFull
                 // The gate on every block (Plan 23). The bypass until an AI-driven
                 // classifier exists; this root supplies it and computes nothing.
                 Classifier.approveAll
-                (replayedTerminals |> TerminalProjection.openTerminals |> List.map (fun t -> t.TerminalId))
+                (replayedTerminals |> Projection.openTerminals |> List.map (fun t -> t.TerminalId))
                 replayedProfiles
 
         // The agent's ONE execution path (Plan 13, stage 3b). It queues a command where
@@ -462,98 +462,84 @@ let startFull
                   IsOpen = terminals.IsOpen }
 
         let capabilitiesFor (turnId: AgentTurnId) (turnActor: ActorRef) : AgentCapabilities =
-            { // Bound to THIS turn's actor (Plan 20), which is what a queued command records
-              // as the authority it borrows and what a WOKEN turn later resolves its own from.
-              // The agent cannot name it: an acting party that could choose whose credential
-              // it runs on is not gated by one.
-              ExecuteCommand = fun request -> terminalCommands.Execute request (Authority.agentFor turnActor)
-              CheckPending = checkPending
-              // The terminal verbs a person already has (Plan 20, stage 3), reaching the same
-              // manager the list's buttons do. One implementation, two surfaces.
-              OpenTerminal =
-                fun name sandbox ->
-                    terminals.OpenAgentTerminal (defaultArg sandbox SandboxRef.defaultRef) name
-              CloseTerminal =
-                fun id ->
-                    async {
-                        // A person typing in their own shell is not the agent's to end. The
-                        // list gives THEM the same verb over the agent's terminals, which is
-                        // the asymmetry worth having: a human can always stop the machine.
-                        if not (terminals.OpenedByAgent id) then
-                            return Error "that terminal is not yours — it belongs to someone in this session"
-                        else return! terminals.Close id "the agent finished with it"
-                    }
-              ListTerminals =
-                fun () ->
-                    async {
-                        let busy = terminals.Busy ()
-                        return
-                            Ok
-                                (TerminalProjection.openTerminals terminalProjection
-                                 |> List.map (fun view ->
-                                     { Terminal = view.TerminalId
-                                       Name = view.Title
-                                       Sandbox = view.Sandbox
-                                       Mine = terminals.OpenedByAgent view.TerminalId
-                                       Busy = Set.contains (TerminalId.value view.TerminalId) busy }))
-                    }
-              // The agent's hand in a terminal that has no blocks (Plan 19). It takes the
-              // lease like a peer, so a human watching sees who is typing and can take it
-              // back — which is the whole reason this is a terminal verb rather than a
-              // provider's own write tool.
-              WriteTerminal =
-                fun id data ->
-                    async {
-                        match! terminals.Write id ActorRef.Agent data with
-                        | Ok () -> return Ok (sprintf "typed into terminal %s; you now hold it" (TerminalId.value id))
-                        | Error reason -> return Error reason
-                    }
-              // `write_terminal`'s other half, and it lives beside it in the terminal
-              // manager: the rule that admits one admits the other, and the composition root
-              // is not where a bound belongs.
-              ReadTerminal = terminals.Tail
+            { Terminals =
+                // Bound to THIS turn's actor (Plan 20), which is what a queued command records
+                // as the authority it borrows and what a WOKEN turn later resolves its own
+                // from. The agent cannot name it: an acting party that could choose whose
+                // credential it runs on is not gated by one.
+                { Execute = fun request -> terminalCommands.Execute request (Authority.agentFor turnActor)
+                  CheckPending = checkPending
+                  // The terminal verbs a person already has (Plan 20, stage 3), reaching the
+                  // same manager the list's buttons do. One implementation, two surfaces.
+                  Open =
+                    fun name sandbox ->
+                        terminals.OpenAgentTerminal (defaultArg sandbox SandboxRef.defaultRef) name
+                  Close =
+                    fun id ->
+                        async {
+                            // A person typing in their own shell is not the agent's to end.
+                            // The list gives THEM the same verb over the agent's terminals,
+                            // which is the asymmetry worth having: a human can always stop
+                            // the machine.
+                            if not (terminals.OpenedByAgent id) then
+                                return Error "that terminal is not yours — it belongs to someone in this session"
+                            else return! terminals.Close id "the agent finished with it"
+                        }
+                  List =
+                    fun () ->
+                        async {
+                            let busy = terminals.Busy ()
+                            return
+                                Ok
+                                    (Projection.openTerminals terminalProjection
+                                     |> List.map (fun view ->
+                                         { Terminal = view.TerminalId
+                                           Name = view.Title
+                                           Sandbox = view.Sandbox
+                                           Mine = terminals.OpenedByAgent view.TerminalId
+                                           Busy = Set.contains (TerminalId.value view.TerminalId) busy }))
+                        }
+                  // The agent's hand in a terminal that has no blocks (Plan 19). It takes the
+                  // lease like a peer, so a human watching sees who is typing and can take it
+                  // back — which is the whole reason this is a terminal verb rather than a
+                  // provider's own write tool.
+                  Write =
+                    fun id data ->
+                        async {
+                            match! terminals.Write id ActorRef.Agent data with
+                            | Ok () -> return Ok (sprintf "typed into terminal %s; you now hold it" (TerminalId.value id))
+                            | Error reason -> return Error reason
+                        }
+                  // `write_terminal`'s other half, and it lives beside it in the terminal
+                  // manager: the rule that admits one admits the other, and the composition
+                  // root is not where a bound belongs.
+                  Read = terminals.Tail }
               RunGated = commandGate.Run
-              SetSecret =
+              Secrets =
                 match secretsCapabilities with
-                | Some secrets -> secrets.SetSecret
-                | None -> AgentCapabilities.none.SetSecret
-              ListSecrets =
-                match secretsCapabilities with
-                | Some secrets -> secrets.ListSecrets
-                | None -> AgentCapabilities.none.ListSecrets
-              DeleteSecret =
-                match secretsCapabilities with
-                | Some secrets -> secrets.DeleteSecret
-                | None -> AgentCapabilities.none.DeleteSecret
+                | Some secrets ->
+                    { Set = secrets.SetSecret
+                      List = secrets.ListSecrets
+                      Delete = secrets.DeleteSecret }
+                | None -> AgentCapabilities.none.Secrets
               // The repo verbs (Plan 14) are denials HERE and rebound per turn by
-              // SessionMain's dispatching wrapper — the token is the TURN ACTOR's, and
-              // only the dispatcher knows who that is.
-              AddRepo = AgentCapabilities.none.AddRepo
-              RemoveRepo = AgentCapabilities.none.RemoveRepo
-              SwitchRepoBranch = AgentCapabilities.none.SwitchRepoBranch
-              FetchRepo = AgentCapabilities.none.FetchRepo
-              RepoStatus = AgentCapabilities.none.RepoStatus
-              RepoLog = AgentCapabilities.none.RepoLog
-              RepoDiff = AgentCapabilities.none.RepoDiff
-              // Likewise the query surface (Plan 15): the registry is composed in
-              // SessionMain, so a Host started without it declares nothing rather than
-              // declaring queries it cannot answer.
+              // SessionMain's dispatching wrapper — the token is the TURN ACTOR's, and only
+              // the dispatcher knows who that is. Likewise the query surface (Plan 15) and
+              // the sandbox commands (Plan 15, stage 2): the registry is composed in
+              // SessionMain, and the credential a forwarding start resolves belongs to the
+              // turn actor. A Host started without them declares nothing rather than
+              // declaring what it cannot answer.
+              Repos = AgentCapabilities.none.Repos
               Queries = AgentCapabilities.none.Queries
-              ReadQuery = AgentCapabilities.none.ReadQuery
-              // The sandbox commands (Plan 15, stage 2) are denials HERE and rebound per
-              // turn by SessionMain, for the repo verbs' reason: the credential a
-              // forwarding start resolves belongs to the TURN ACTOR, and only the
-              // dispatcher knows who that is.
-              StartWorkSandbox = AgentCapabilities.none.StartWorkSandbox
-              StopWorkSandbox = AgentCapabilities.none.StopWorkSandbox
-              SetShellProfile = AgentCapabilities.none.SetShellProfile
-              RecordToolUse = toolUseLogFor turnId
-              // Snapshotted HERE, which is what makes a turn's tool list stable: a set
-              // change mid-turn lands on the next turn, never underneath the model. Each is
-              // decorated so a stream a provider offers becomes a terminal (Plan 19) — over
-              // the REGISTRY rather than inside the client, so the seam sits where every
-              // call already passes, beside the audit's.
-              ForeignTools = mcpConnections.Registries () |> List.map streamAttacher.Decorate }
+              Sandboxes = AgentCapabilities.none.Sandboxes
+              Tools =
+                { Record = toolUseLogFor turnId
+                  // Snapshotted HERE, which is what makes a turn's tool list stable: a set
+                  // change mid-turn lands on the next turn, never underneath the model. Each
+                  // is decorated so a stream a provider offers becomes a terminal (Plan 19) —
+                  // over the REGISTRY rather than inside the client, so the seam sits where
+                  // every call already passes, beside the audit's.
+                  Foreign = mcpConnections.Registries () |> List.map streamAttacher.Decorate } }
 
         // The queue drain and turn scheduler (Phase 3) — the real machinery lives in
         // `Scheduler` (shared with the property harness); the Host wires it to this

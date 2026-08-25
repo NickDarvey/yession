@@ -539,6 +539,61 @@ let private sandboxPolicyTests =
             Expect.equal (Map.tryFind "PATH" docker.Env) None "a docker image supplies its own base env"
             Expect.equal (Map.tryFind "TOKEN" docker.Env) (Some "t") "only the spec's variables inject"
 
+        // A repo's `workdir` is validated in two places before it gets here — the decoder
+        // refuses an absolute path, `toRequest` clamps it at the checkout — and for a while
+        // the policy then dropped it, so all that validation guarded a key with no effect.
+        // Regress `WorkingDirectory` back to `workspace` and this is the case that goes red.
+        testCase "a sandbox that declared where it starts, starts there" <| fun () ->
+            let declared =
+                { EnvironmentSpec.defaults with
+                    WorkingDirectory = Some "/data/s/workspace/repos/octo/hello" }
+            let policy =
+                Sandboxes.policyFor
+                    SrtBackend
+                    Map.empty
+                    Map.empty
+                    (Some "/data/s/workspace")
+                    (Some "/data/s/workspace/repos")
+                    declared
+                |> expect
+            Expect.equal
+                policy.WorkingDirectory
+                (Some "/data/s/workspace/repos/octo/hello")
+                "the checkout it asked for, not the workspace around it"
+
+        // The other half of the same change, and the half that could have broken quietly:
+        // the workspace is still where it may WRITE. A sandbox that starts in its checkout
+        // writing only inside that checkout would be a build that cannot reach its own
+        // sibling repos.
+        testCase "declaring where a sandbox starts does not narrow where it may write" <| fun () ->
+            let declared =
+                { EnvironmentSpec.defaults with
+                    WorkingDirectory = Some "/data/s/workspace/repos/octo/hello" }
+            let policy =
+                Sandboxes.policyFor
+                    SrtBackend
+                    Map.empty
+                    Map.empty
+                    (Some "/data/s/workspace")
+                    (Some "/data/s/workspace/repos")
+                    declared
+                |> expect
+            Expect.equal
+                policy.WritePaths
+                [ "/data/s/workspace"; "/data/s/workspace/repos" ]
+                "the workspace and the repos dir, exactly as before"
+
+        // What the change above COSTS, stated so it cannot move without a red test: a
+        // relative spawn is resolved against the policy's root, so in a sandbox that
+        // declared one, `.` is the checkout. That is the intended reading — a terminal and
+        // a one-shot in the same sandbox must agree about where they are — and it is the
+        // only thing about existing spawns this change moves.
+        testCase "a relative spawn in a declared sandbox resolves against what it declared" <| fun () ->
+            Expect.equal
+                (SandboxPath.resolvedFrom (Some "/data/s/workspace/repos/octo/hello") (Some "app"))
+                (Some "/data/s/workspace/repos/octo/hello/app")
+                "relative to the checkout the sandbox declared, not to the workspace"
+
         // The one place a path in this session's vocabulary becomes an absolute one. Every
         // backend's spawn asks this and nothing else does the arithmetic itself — which is
         // what keeps `repos/octo/hello` meaning the same directory in the timeline, in a
@@ -665,8 +720,8 @@ let private lazyLifecycleTests =
                 let taskAgent : RunAgent =
                     fun _ capabilities _signal onChunk ->
                         async {
-                            let! first = capabilities.ExecuteCommand (CommandRequest.ofCommand "true")
-                            let! second = capabilities.ExecuteCommand (CommandRequest.ofCommand "true")
+                            let! first = capabilities.Terminals.Execute (CommandRequest.ofCommand "true")
+                            let! second = capabilities.Terminals.Execute (CommandRequest.ofCommand "true")
                             match first, second with
                             | Ok _, Ok _ ->
                                 onChunk { Text = "environment is up" }
@@ -693,7 +748,7 @@ let private lazyLifecycleTests =
                 // which reuses a terminal it already has and is therefore no need at all.
                 a.Connection.OpenTerminal "ada's"
                 do! a.Runner.WaitFor (fun model ->
-                        (TerminalProjection.openTerminals model.Terminals |> List.length) = 2)
+                        (Projection.openTerminals model.Terminals |> List.length) = 2)
 
                 Expect.equal recorder.Created 1 "exactly one sandbox created across two needs"
                 let! envEvents = environmentEventsOf managed.Host.Log
@@ -925,7 +980,7 @@ let private commandTests =
                 let devAgent : RunAgent =
                     fun _ capabilities _signal onChunk ->
                         async {
-                            match! capabilities.ExecuteCommand (CommandRequest.ofCommand "echo hello from the env") with
+                            match! capabilities.Terminals.Execute (CommandRequest.ofCommand "echo hello from the env") with
                             | Ok outcome when outcome.Status = TerminalCommandRan (CommandSucceeded 0) ->
                                 onChunk { Text = "ran it" }
                                 return AgentCompleted ("ran it", None)
@@ -1038,7 +1093,7 @@ let private acceptanceE2eTests =
                 let devAgent : RunAgent =
                     fun _ capabilities _signal onChunk ->
                         async {
-                            let! _ = capabilities.ExecuteCommand (CommandRequest.ofCommand "echo made progress")
+                            let! _ = capabilities.Terminals.Execute (CommandRequest.ofCommand "echo made progress")
                             onChunk { Text = "done" }
                             return AgentCompleted ("done", None)
                         }

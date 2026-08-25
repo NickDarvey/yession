@@ -668,7 +668,7 @@ let tests =
                 // codes. An emitter and a parser that agree only with each other would pass
                 // every cheap-tier case and close no block at all in production.
                 let nonce = "probe-nonce"
-                let rc = (TerminalMarks.rcFor "bash" nonce |> Option.get).Rc
+                let rc = (Marks.rcFor "bash" nonce |> Option.get).Rc
                 let dir = mkdtemp nodeFs nodeOs
                 let rcPath = dir + "/yrc"
                 writeFile nodeFs rcPath rc
@@ -683,7 +683,7 @@ let tests =
                 | Error e -> failwith e
                 | Ok sandbox ->
                     let spawnPty = Option.get sandbox.SpawnPty
-                    let marks = ResizeArray<TerminalMark> ()
+                    let marks = ResizeArray<Mark> ()
                     let mutable carry = ""
                     let mutable clean = ""
                     let exec =
@@ -692,7 +692,7 @@ let tests =
                           Env = Map.empty
                           WorkingDirectory = None }
                     match! spawnPty exec 80 24 (fun data ->
-                              let found, output, rest = TerminalMarks.scan nonce carry data
+                              let found, output, rest = Marks.scan nonce carry data
                               marks.AddRange found
                               carry <- rest
                               clean <- clean + output) with

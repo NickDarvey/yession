@@ -269,7 +269,20 @@ let policyFor
                   AllowedDomains =
                     ceiling |> Option.map (fun allowed -> match net with [] -> allowed | asked -> asked)
                   Env = env
-                  WorkingDirectory = workspace
+                  // What the sandbox ASKED to start in, and the workspace only when it asked
+                  // for nothing. `toRequest` has already resolved this against the checkout
+                  // as the sandbox SEES it (`ReposService.CheckoutOf` is backend-aware), so
+                  // there is nothing left here to resolve — only to honour.
+                  //
+                  // It used to be `workspace` outright, which made a repo's `workdir` a key
+                  // the decoder validated strictly and the policy then dropped: a file that
+                  // read as applied and was not. The tell was that `ensure` reported the
+                  // difference correctly — "it starts in repos/foo/bar" — about a sandbox
+                  // whose `pwd` was the workspace, so the product asserted something untrue.
+                  //
+                  // The write root stays the workspace either way (`WritePaths` above): a
+                  // sandbox that starts in its checkout still writes where it always did.
+                  WorkingDirectory = spec.WorkingDirectory |> Option.orElse workspace
                   Filesystem = Confined }
 
 /// A one-line description of the backend + spec for the start-requested event.
@@ -619,10 +632,13 @@ module DockerSandbox =
                     match imageResult with
                     | Error reason -> return Error reason
                     | Ok image ->
+                        // `policyFor` has already folded the spec's working directory in,
+                        // so the policy is the single answer to "where does this start".
+                        // This used to ask the spec again when the policy said nothing —
+                        // which was the only thing keeping `workdir` alive under docker,
+                        // and by accident: docker is the backend that passes no workspace.
                         let workspaceTarget =
-                            policy.WorkingDirectory
-                            |> Option.orElse spec.WorkingDirectory
-                            |> Option.defaultValue "/workspace"
+                            policy.WorkingDirectory |> Option.defaultValue "/workspace"
                         // Always attach the sandbox's named workspace volume, unless an
                         // explicit mount already claims the workspace path.
                         let hasWorkspaceMount = container.Mounts |> List.exists (fun m -> m.Target = workspaceTarget)

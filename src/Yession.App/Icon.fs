@@ -91,7 +91,7 @@ module Icon =
     let pivotRight = strokedAt "1.1" "w-4 h-4" pivotRightPath
 
     /// The terminal list's row verbs. Each is rendered only where the terminal's state
-    /// affords it (`TerminalAffordances`), so the icon a row wears is itself the statement
+    /// affords it (`Affordances`), so the icon a row wears is itself the statement
     /// of what that terminal can do — which is why none of them needs a word beside it.
     let rewind = stroked "w-3.5 h-3.5" rewindPath
     let stop = stroked "w-3.5 h-3.5" stopPath

@@ -148,6 +148,41 @@ let private offendersAmong (surfaces: Surface list) =
 
 let private offenders () = offendersAmong scanned.Value
 
+// --- The other way an opened scope wins silently ------------------------------------------
+//
+// The rule above is about a namespace beside a MODULE. This one is about two feature
+// namespaces beside each other, and it is stricter for a reason: the domain is split so that
+// a file opens the two or three slices it needs, and nothing makes it open them in a
+// particular order. If `Yession.Domain.Terminals` and `Yession.Domain.Chat` both exported a
+// `Projection`, a file opening both would get whichever was opened LAST, with no diagnostic —
+// and the two are not interchangeable.
+//
+// So: no two domain namespaces may export the same name at all. Not "may share a name but not
+// a member", which is the module rule — a namespace is opened for its CONTENTS, so the whole
+// export list is what lands in front of the file.
+//
+// This is what makes the short names affordable. `TerminalProjection` and `AuthzSubject` were
+// prefixed to clear a flat namespace of 267 types; inside a slice they disambiguate nothing,
+// and they came off once each slice had a namespace. What stops `Projection` and `Subject`
+// from being ambiguous is not luck, it is that nothing else in the domain is called either —
+// and that is only true for as long as something checks.
+let private domainNamespaces (surfaces: Surface list) =
+    surfaces
+    |> List.filter (fun s -> s.IsNamespace && s.Full.StartsWith "Yession.Domain.")
+
+let private sharedExportsAmong (surfaces: Surface list) =
+    domainNamespaces surfaces
+    |> List.collect (fun s -> s.Members |> List.map (fun m -> m, s.Full))
+    |> List.groupBy fst
+    |> List.filter (fun (_, owners) -> (owners |> List.map snd |> List.distinct |> List.length) > 1)
+    |> List.map (fun (name, owners) ->
+        sprintf
+            "  `%s` is exported by %s"
+            name
+            (owners |> List.map snd |> List.distinct |> List.sort |> String.concat " and "))
+
+let private sharedExports () = sharedExportsAmong scanned.Value
+
 // Assembled with escapes rather than written down the page, for the reason `RecordShapes`
 // assembles its fixtures: spelled out as real lines, they would be real declarations in a
 // real scanned file, and this suite would read its own fixtures back as product code.
@@ -191,6 +226,31 @@ let tests =
             Expect.isEmpty
                 (offendersAmong (merge (readOne namespaceFixture @ readOne disjointModuleFixture)))
                 "sharing the name is not the fault; the reference falls through to the module and the build is clean"
+
+        testCase "the reader sees every feature namespace of the domain" <| fun () ->
+            // Anti-vacuity for the rule below, which passes trivially if the filter matches
+            // nothing.
+            Expect.isTrue
+                (List.length (domainNamespaces scanned.Value) >= 8)
+                (sprintf
+                    "found only %d Yession.Domain.* namespaces — the rule below would be checking almost nothing"
+                    (List.length (domainNamespaces scanned.Value)))
+
+        testCase "two feature namespaces exporting one name is reported" <| fun () ->
+            let a = surfacesIn "a.fs" "namespace Yession.Domain.Alpha\ntype Projection = { Rows : int }"
+            let b = surfacesIn "b.fs" "namespace Yession.Domain.Beta\ntype Projection = { Items : int }"
+            Expect.equal
+                (List.length (sharedExportsAmong (merge (a @ b))))
+                1
+                "a file opening both would get whichever was opened last, and the two are not interchangeable"
+
+        testCase "no two feature namespaces of the domain export the same name" <| fun () ->
+            let found = sharedExports ()
+            Expect.isEmpty
+                found
+                (sprintf
+                    "a file opens the slices it needs, in no particular order, so a name exported twice resolves to whichever was opened last with nothing said:\n%s\nRename one of them, or put the shared concept in the kernel where there is one of it"
+                    (String.concat "\n" found))
 
         testCase "no namespace shares a member with a module of the same short name" <| fun () ->
             let found = offenders ()

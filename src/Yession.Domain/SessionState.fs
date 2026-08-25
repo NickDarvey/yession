@@ -81,7 +81,7 @@ type PendingAct =
       /// The size rides the ACT rather than sitting in a register beside the terminal, and
       /// that is the whole of the policy. A shared register has to answer "whose viewport
       /// wins", and every answer is wrong somewhere: smallest-wins is tmux's worst
-      /// inheritance (see `TerminalSize`), and any other pick makes the width depend on who
+      /// inheritance (see `Size`), and any other pick makes the width depend on who
       /// happened to be connected. A command has one author, and the output belongs to them.
       ///
       /// It matters more here than in live mode because block geometry is not ephemeral.
@@ -92,7 +92,7 @@ type PendingAct =
       /// `None` is an act with no viewport to speak for: the agent's commands, and a person
       /// whose terminals column is shut. It makes no claim, so the terminal keeps the width it
       /// had — which is the last human's, or the 80x24 it opened at. No constant to defend.
-      Size : TerminalSize option }
+      Size : Size option }
 
 /// The name of the top-level `Y.XmlFragment` root that holds a draft/queue body. Stable across
 /// peers so every replica's `BodyRegistry` and editor bind to the same fragment (root types

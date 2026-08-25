@@ -38,9 +38,9 @@ type internal PatternInst =
     | PatternMatch
 
 /// One compiled pattern. Opaque: what a caller does with it is ask whether text matches.
-type TerminalPattern = internal { Program : PatternInst list }
+type Pattern = internal { Program : PatternInst list }
 
-module TerminalPattern =
+module Pattern =
 
     // --- parsing ----------------------------------------------------------------------
     //
@@ -260,7 +260,7 @@ module TerminalPattern =
     let MaxLength = 512
 
     /// Compile a pattern, or say — by name — which construct put it outside the subset.
-    let compile (pattern: string) : Result<TerminalPattern, string> =
+    let compile (pattern: string) : Result<Pattern, string> =
         if String.IsNullOrEmpty pattern then Error "an empty pattern"
         elif pattern.Length > MaxLength then
             Error (sprintf "a pattern longer than %d characters" MaxLength)
@@ -295,7 +295,7 @@ module TerminalPattern =
     /// this linear: a `Split` adds both branches to the same set rather than trying one and
     /// coming back. A state already in the set is not added twice, so the set cannot outgrow
     /// the program however the pattern nests.
-    let matchesWithin (budget: int) (compiled: TerminalPattern) (text: string) : Result<bool, string> =
+    let matchesWithin (budget: int) (compiled: Pattern) (text: string) : Result<bool, string> =
         let program = Array.ofList compiled.Program
         let count = program.Length
         let mutable steps = 0
@@ -342,5 +342,5 @@ module TerminalPattern =
         else Ok matched
 
     /// The ordinary way to ask, with the budget a correct simulation cannot reach.
-    let matches (compiled: TerminalPattern) (text: string) : Result<bool, string> =
+    let matches (compiled: Pattern) (text: string) : Result<bool, string> =
         matchesWithin (budgetFor (List.length compiled.Program) text.Length) compiled text

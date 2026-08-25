@@ -236,7 +236,7 @@ let private promptOf (context: AgentContextPack) : string =
         match context.Terminals with
         | [] -> ""
         | blocks ->
-            let render (block: TerminalBlockDigest) =
+            let render (block: BlockDigest) =
                 let outcome =
                     match block.Status with
                     | BlockRunning -> "still running"
@@ -324,12 +324,12 @@ let private invokeOf (registry: ToolRegistry) : string -> string -> string -> JS
 let registryFor (capabilities: AgentCapabilities) : ToolRegistry =
     let own = AgentTools.registry capabilities
     let merged =
-        match ToolRegistry.mergeAll (own :: capabilities.ForeignTools) with
+        match ToolRegistry.mergeAll (own :: capabilities.Tools.Foreign) with
         | Ok registry -> registry
         | Error reason ->
             eprintfn "mcp: two registries claim one namespace (%s); using the session's own tools" reason
             own
-    merged |> ToolUseLog.wrap capabilities.RecordToolUse
+    merged |> ToolUseLog.wrap capabilities.Tools.Record
 
 /// The Claude Agent SDK–backed `RunAgent`, over this session's data directory (the CLI's
 /// scratch HOME hangs off it) and parameterized by the turn's credential:
