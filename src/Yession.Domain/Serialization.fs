@@ -1,5 +1,6 @@
 namespace Yession.Domain
 
+open Yession.Domain.Repos
 open System
 open Yession.Domain.Agent
 open Yession.Domain.Link
