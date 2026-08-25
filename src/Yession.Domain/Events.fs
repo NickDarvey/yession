@@ -1,6 +1,7 @@
 namespace Yession.Domain
 
 open System
+open Yession.Domain.Repos
 
 /// The generic envelope wrapping every persisted event. The wire format is a boundary
 /// concern handled in Serialization.fs; this is the in-memory domain shape.
@@ -420,31 +421,6 @@ and TerminalTranscriptTruncated =
       /// gap in an audit trail is a stated fact, never a silent one.
       DroppedBytes : int }
 
-and RepoAdded =
-    { /// The timeline note's identity, minted by the Process at append time — which is
-      /// what lets the conversation projection fold this without inventing ids.
-      MessageId : MessageId
-      Repo : RepoRef
-      /// The branch the clone landed on (the remote's default).
-      Branch : string
-      /// Who brought it in — the panel's human or the agent. Carried on the payload
-      /// because the projection reads events, not envelopes, and "who added this repo"
-      /// is the fact the shared-trust disclosure hangs off.
-      Actor : ActorRef }
-
-and RepoRemoved =
-    { MessageId : MessageId
-      Repo : RepoRef
-      Actor : ActorRef }
-
-and RepoBranchSwitched =
-    { MessageId : MessageId
-      Repo : RepoRef
-      Branch : string
-      /// True when the switch created the branch (`-b`), false when it checked out an
-      /// existing one — one event, because it is one act at the panel and one verb.
-      Created : bool
-      Actor : ActorRef }
 
 and WorkSandboxStarted =
     { MessageId : MessageId
