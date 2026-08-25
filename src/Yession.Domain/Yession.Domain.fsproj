@@ -18,6 +18,7 @@
     <Compile Include="LinkFacts.fs" />
     <Compile Include="ToolsFacts.fs" />
     <Compile Include="SandboxesFacts.fs" />
+    <Compile Include="ChatFacts.fs" />
     <Compile Include="Events.fs" />
     <!-- Terminal output as styled text, and the durable transcript that records it.
          Both depend only on Identity/Events, and neither knows what a session is. -->
