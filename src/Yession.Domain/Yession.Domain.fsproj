@@ -10,6 +10,7 @@
          event-feed transport (and available to any other flaky port). -->
     <Compile Include="Resilience.fs" />
     <Compile Include="Identity.fs" />
+    <Compile Include="Running.fs" />
     <!-- A feature's FACTS sit below the event spine, because `SessionEvent` names them;
          the projections that fold that union sit above it. So a feature spans Events.fs
          rather than living on one side of it, and its field labels stay out of the
@@ -20,6 +21,7 @@
     <Compile Include="SandboxesFacts.fs" />
     <Compile Include="ChatFacts.fs" />
     <Compile Include="AgentFacts.fs" />
+    <Compile Include="TerminalsFacts.fs" />
     <Compile Include="Events.fs" />
     <!-- Terminal output as styled text, and the durable transcript that records it.
          Both depend only on Identity/Events, and neither knows what a session is. -->
