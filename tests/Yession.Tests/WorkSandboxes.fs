@@ -455,6 +455,80 @@ let private timelineTests =
             match proj.Items with
             | [ item ] -> Expect.equal item.Body "started sandbox test (host)" "no forwarding clause"
             | other -> failwithf "expected one note, got %A" other
+
+        // The start above and this are the two outcomes of one declaration. Until this note
+        // existed only the first reached the timeline, so a file with a typo in it read
+        // exactly like a file nobody had written.
+        testCase "a declaration that could not start reads as a sentence too" <| fun () ->
+            let hello = RepoRef.create "octo/hello" |> expect
+            let envelope : EventEnvelope<SessionEvent> =
+                { EventId = EventId.fresh ()
+                  SessionId = sessionId
+                  Offset = EventOffset.create 3L |> expect
+                  Actor = ActorRef.Configured hello
+                  Timestamp = fixedClock ()
+                  Event =
+                    SessionEvent.RepoConfigRefused
+                        { RepoConfigRefused.MessageId = MessageId.create "msg-3" |> expect
+                          RepoConfigRefused.Repo = hello
+                          RepoConfigRefused.Sandbox = Some (sandbox "test")
+                          RepoConfigRefused.Reason = "YESSION_SESSION_WORK_NET is empty"
+                          RepoConfigRefused.Actor = ActorRef.Configured hello } }
+            let proj, _ = ConversationProjection.applyEvents None [ envelope ] ConversationProjection.empty
+            match proj.Items with
+            | [ item ] ->
+                Expect.equal
+                    item.Body
+                    "could not start sandbox test — YESSION_SESSION_WORK_NET is empty"
+                    "the refusal, whole, in the words it already used"
+                Expect.equal item.Kind ConversationItemKind.ActNote "an act, like the start it is the counterpart of"
+                Expect.equal item.Author (ActorRef.Configured hello) "attributed to the file that asked"
+            | other -> failwithf "expected one note, got %A" other
+
+        // A file that could not be READ has no declaration to name, and its reason already
+        // says which repo and where in the file. Anything in front of it would be a second
+        // copy of what it says.
+        testCase "an unreadable file speaks for itself, with no sandbox to name" <| fun () ->
+            let hello = RepoRef.create "octo/hello" |> expect
+            let envelope : EventEnvelope<SessionEvent> =
+                { EventId = EventId.fresh ()
+                  SessionId = sessionId
+                  Offset = EventOffset.create 4L |> expect
+                  Actor = ActorRef.Configured hello
+                  Timestamp = fixedClock ()
+                  Event =
+                    SessionEvent.RepoConfigRefused
+                        { RepoConfigRefused.MessageId = MessageId.create "msg-4" |> expect
+                          RepoConfigRefused.Repo = hello
+                          RepoConfigRefused.Sandbox = None
+                          RepoConfigRefused.Reason = "yession.yaml in octo/hello: unknown key: workdirr"
+                          RepoConfigRefused.Actor = ActorRef.Configured hello } }
+            let proj, _ = ConversationProjection.applyEvents None [ envelope ] ConversationProjection.empty
+            match proj.Items with
+            | [ item ] ->
+                Expect.equal item.Body "yession.yaml in octo/hello: unknown key: workdirr" "said as it stands"
+            | other -> failwithf "expected one note, got %A" other
+
+        // The wire form, both ways. `sandbox` is the field that can be absent, and a note
+        // about a file rather than a declaration is the case that exercises it.
+        testCase "a refusal round-trips, with and without a sandbox to name" <| fun () ->
+            let hello = RepoRef.create "octo/hello" |> expect
+            for named in [ Some (sandbox "test"); None ] do
+                let envelope : EventEnvelope<SessionEvent> =
+                    { EventId = EventId.fresh ()
+                      SessionId = sessionId
+                      Offset = EventOffset.create 5L |> expect
+                      Actor = ActorRef.Configured hello
+                      Timestamp = fixedClock ()
+                      Event =
+                        SessionEvent.RepoConfigRefused
+                            { RepoConfigRefused.MessageId = MessageId.create "msg-5" |> expect
+                              RepoConfigRefused.Repo = hello
+                              RepoConfigRefused.Sandbox = named
+                              RepoConfigRefused.Reason = "the ceiling is closed"
+                              RepoConfigRefused.Actor = ActorRef.Configured hello } }
+                let json = Codec.toString Codec.sessionEventEnvelope envelope
+                Expect.equal (Codec.fromString Codec.sessionEventEnvelope json |> expect) envelope "unchanged by the wire"
     ]
 
 let tests =

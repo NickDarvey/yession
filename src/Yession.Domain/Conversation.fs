@@ -216,6 +216,27 @@ module ConversationProjection =
                           Kind = ConversationItemKind.ActNote
                           Offset = envelope.Offset
                           Woke = None } ] }
+        // The other outcome of a declaration, beside the start above. Said in the refusal's
+        // own words rather than summarised: the `repo_config` query is showing that same
+        // sentence, and two renderings of one refusal are two things free to disagree.
+        | SessionEvent.RepoConfigRefused r ->
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = r.MessageId
+                          Author = r.Actor
+                          Body =
+                            match r.Sandbox with
+                            | Some sandbox ->
+                                sprintf "could not start sandbox %s — %s" (SandboxRef.render sandbox) r.Reason
+                            // The file itself. Its reason already names the repo and the
+                            // path inside the file, so anything in front of it would be a
+                            // second copy of what it says.
+                            | None -> r.Reason
+                          Status = Complete
+                          Kind = ConversationItemKind.ActNote
+                          Offset = envelope.Offset
+                          Woke = None } ] }
         | SessionEvent.WorkSandboxStopped s ->
             { proj with
                 Items =

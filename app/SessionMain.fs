@@ -744,7 +744,7 @@ Async.StartImmediate (
         workSandboxes <- host.Sandboxes
         terminals <- host.Terminals
         repoSandboxes <-
-            RepoSandboxes.create reposDir (fun () -> reposService) (fun () -> workSandboxes) host.RunGated
+            RepoSandboxes.create reposDir (fun () -> reposService) (fun () -> workSandboxes) host.RunGated log
         // How each gated command is carried out, handed to the gate the Host owns. Here —
         // and not closed over a turn — because the table is built from the services, and the
         // services are composed here.
