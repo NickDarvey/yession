@@ -39,6 +39,34 @@ type TerminalMark =
     /// `D;<code>` — the command finished, with this exit status.
     | MarkCommandDone of exitCode: int
 
+/// One shell's instrumentation: the text to type at it, and whether its marks report a
+/// command's START.
+///
+/// The `MarksCommandStart` bit travels WITH the text because the thing that knows a dialect
+/// has no `preexec` is the dialect. Two consumers need it, and a caller deciding it by shell
+/// name is a caller that can get it wrong somewhere no cheap test reaches:
+///
+///   * The drain completes a block on a `D`. bash arms `PS1`/`PROMPT_COMMAND` and then types
+///     several more rc lines (`__y_armed=1`, `trap … DEBUG`), each ending in a prompt cycle
+///     whose `PROMPT_COMMAND` emits a `D`. The open-probe returns on the first `A`, so those
+///     stale `D`s are still in flight when the first real block runs — and a `D` accepted
+///     without this block's `C` closes it early, with an exit code that is not the command's.
+///     Requiring a start-mark first is what tells this block's completion from a leftover
+///     prompt. A dialect with no `C` (POSIX sh) has nothing to wait for and completes on `D`
+///     alone — which is safe there, because its single rc line leaves exactly one prompt and
+///     the probe consumes it.
+///   * The integration detector is "a start-mark that did not arrive". A dialect that never
+///     emits one must not arm it, or every command slower than the window reports a working
+///     shell as lost.
+type ShellInstrumentation =
+    { /// The rc lines, as text typed at the shell's prompt.
+      Rc : string
+      /// Does this dialect emit `C` when a command STARTS? bash and zsh have a preexec hook —
+      /// real, or emulated with a DEBUG trap — and do. A POSIX `sh` has none: its marks ride
+      /// in `PS1`, which the shell expands when it prints a PROMPT, which is after the command
+      /// and never before it. So there is nothing to hang a `C` on.
+      MarksCommandStart : bool }
+
 module TerminalMarks =
 
     [<Literal>]
@@ -164,41 +192,60 @@ module TerminalMarks =
     /// before it overwrites `$?`, and then every block reports the status of our own
     /// bookkeeping rather than of the command — which would be worse than no mark at all,
     /// because it looks like an answer.
-    let rcFor (shell: string) (nonce: string) : string option =
+    let rcFor (shell: string) (nonce: string) : ShellInstrumentation option =
         let promptStart = emit nonce "A"
         let commandStart = emit nonce "C"
         let commandDone = emit nonce "D;%d"
         match shell with
         | "bash" ->
-            // bash has no `preexec`; the DEBUG trap is the standard emulation, guarded so it
-            // fires once per submitted command rather than once per word. It also fires while
-            // the shell starts up, which shows as one spurious C/D pair before any command —
-            // dropped by the same rule that drops a duplicate.
-            Some (
-                String.concat "\n"
-                    [ " __y_pre() { [ -n \"$__y_armed\" ] && { command -p printf '" + commandStart + "'; unset __y_armed; }; }"
-                      " __y_post() { __y_code=$?; command -p printf '" + commandDone + "' \"$__y_code\"; __y_armed=1; }"
-                      " PROMPT_COMMAND='__y_post'"
-                      " PS1='\\[" + promptStart + "\\]'\"$PS1\""
-                      " __y_armed=1"
-                      " trap '__y_pre' DEBUG" ])
+            // bash has no `preexec`; the DEBUG trap is the standard emulation. Two guards
+            // keep it from marking anything but a real command's start. `__y_armed` fires it
+            // once per submitted line rather than once per word. And the `$BASH_COMMAND` case
+            // skips the trap when the command it is about to run is `__y_post` — the prompt
+            // hook itself, which the trap fires for on EVERY prompt, idle ones included.
+            // Without that skip an idle prompt emitted a spurious `C`/`D` pair (the trap ran,
+            // `__y_armed` was still set from the last `__y_post`, so out went a `C`), and the
+            // drain — which completes a block on the `D` that follows its `C` — could not tell
+            // that pair from a real command's. A block still pending when such a pair landed
+            // closed early, on a prompt cycle that was not its command. With the skip an idle
+            // prompt emits `D`/`A` alone, and the drain drops that `D` for want of a `C`.
+            // (`case`/`trap`/`$BASH_COMMAND` are POSIX-and-bash portable — no PS0, so no bash
+            // ≥ 4.4 floor.)
+            Some
+                { Rc =
+                    String.concat "\n"
+                        [ " __y_pre() { case \"$BASH_COMMAND\" in __y_post) return;; esac; [ -n \"$__y_armed\" ] && { command -p printf '" + commandStart + "'; unset __y_armed; }; }"
+                          " __y_post() { __y_code=$?; command -p printf '" + commandDone + "' \"$__y_code\"; __y_armed=1; }"
+                          " PROMPT_COMMAND='__y_post'"
+                          " PS1='\\[" + promptStart + "\\]'\"$PS1\""
+                          " __y_armed=1"
+                          " trap '__y_pre' DEBUG" ]
+                  MarksCommandStart = true }
         | "zsh" ->
             // zsh has real hooks. They are APPENDED to whatever the image's shell already
             // registered, never substituted: replacing a shell's existing hooks breaks the
             // shell (Warp special-cases powerlevel10k for exactly this).
-            Some (
-                String.concat "\n"
-                    [ " __y_pre() { command -p printf '" + commandStart + "'; }"
-                      " __y_post() { __y_code=$?; command -p printf '" + commandDone + "' \"$__y_code\"; }"
-                      " autoload -Uz add-zsh-hook"
-                      " add-zsh-hook preexec __y_pre"
-                      " add-zsh-hook precmd __y_post"
-                      " PS1='" + promptStart + "'\"$PS1\"" ])
+            Some
+                { Rc =
+                    String.concat "\n"
+                        [ " __y_pre() { command -p printf '" + commandStart + "'; }"
+                          " __y_post() { __y_code=$?; command -p printf '" + commandDone + "' \"$__y_code\"; }"
+                          " autoload -Uz add-zsh-hook"
+                          " add-zsh-hook preexec __y_pre"
+                          " add-zsh-hook precmd __y_post"
+                          " PS1='" + promptStart + "'\"$PS1\"" ]
+                  MarksCommandStart = true }
         | "sh"
         | "dash" ->
             // A bare POSIX shell has NO prompt hook, so the marks ride inside PS1, which the
             // shell re-expands before each prompt. This is the shakiest of the three — there
             // is no `preexec` to hang `C` on at all — and it is exactly why the probe decides
             // by observation rather than by shell name.
-            Some (" PS1='$(command -p printf \"" + commandDone + "\" $?)" + promptStart + "'")
+            //
+            // `MarksCommandStart = false`: with no preexec there is no `C`, so the drain
+            // completes this dialect's blocks on `D` alone and the integration detector stays
+            // disarmed here.
+            Some
+                { Rc = " PS1='$(command -p printf \"" + commandDone + "\" $?)" + promptStart + "'"
+                  MarksCommandStart = false }
         | _ -> None
