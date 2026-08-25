@@ -1,5 +1,6 @@
 namespace Yession.Domain
 
+open Yession.Domain.Chat
 open Yession.Domain.Sandboxes
 open Yession.Domain.Repos
 open System
