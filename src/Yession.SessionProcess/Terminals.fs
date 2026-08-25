@@ -1140,6 +1140,32 @@ module SessionTerminals =
                         | true, current ->
                             let marks, clean, rest = Marks.scan nonce carry.Value data
                             carry.Value <- rest
+                            // Clean output is written BEFORE the marks are acted on, and the
+                            // order is load-bearing. A command's output precedes the `D` that
+                            // ends its block in the byte stream, and both can arrive in one
+                            // read — so `Marks.scan` hands them back together. Acting on the
+                            // `D` first captured `toSeq = NextSeq()` before this output was
+                            // appended, and the block's own last line landed one past its
+                            // recorded range: `read_terminal_block` and the mounted page, which
+                            // render a block by `[FromSeq, ToSeq)`, showed it empty. Writing
+                            // the output first puts it inside the range the `D` then closes.
+                            //
+                            // It also keeps the bootstrap out of the transcript exactly as
+                            // before: the chunk that carries the first `A` is still gated by a
+                            // `ready` that is false until that `A` is acted on below.
+                            if clean <> "" && ready.Value then
+                                // Per-block output accounting lives with the pending block,
+                                // because on a pty the stream belongs to the TERMINAL and the
+                                // cap is a property of the block.
+                                match pending.TryGetValue key with
+                                | true, (_, written, note) ->
+                                    let room = blockOutputCap - written ()
+                                    if room <= 0 then note clean.Length
+                                    else
+                                        let kept = if clean.Length <= room then clean else clean.Substring (0, room)
+                                        note (clean.Length - kept.Length)
+                                        emit id current TranscriptOutput kept
+                                | _ -> emit id current TranscriptOutput clean
                             for m in marks do
                                 match m with
                                 | MarkPromptStart -> ready.Value <- true
@@ -1170,23 +1196,6 @@ module SessionTerminals =
                                     // armed, each ending in a `PROMPT_COMMAND` `D`) — not this
                                     // block's completion. Either way, not ours to act on.
                                     | _ -> ()
-                            // Nothing before the first prompt mark reaches the transcript.
-                            // What arrives then is the shell's own startup and the echo of
-                            // the bootstrap we just typed — it belongs to no block, and
-                            // recording it would put our instrumentation in the audit trail.
-                            if clean <> "" && ready.Value then
-                                // Per-block output accounting lives with the pending block,
-                                // because on a pty the stream belongs to the TERMINAL and the
-                                // cap is a property of the block.
-                                match pending.TryGetValue key with
-                                | true, (_, written, note) ->
-                                    let room = blockOutputCap - written ()
-                                    if room <= 0 then note clean.Length
-                                    else
-                                        let kept = if clean.Length <= room then clean else clean.Substring (0, room)
-                                        note (clean.Length - kept.Length)
-                                        emit id current TranscriptOutput kept
-                                | _ -> emit id current TranscriptOutput clean
                     // The profile is applied by the SPAWN, never as a `cd` typed at the
                     // prompt (Plan 25). A typed one would echo into the transcript on the
                     // re-arm path below — which re-types this bootstrap into whatever shell

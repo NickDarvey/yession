@@ -337,6 +337,15 @@ let private markTests =
                     (sprintf "%s has a preexec hook to hang C on" shell)
             Expect.isFalse (Marks.rcFor "sh" nonce |> Option.get).MarksCommandStart
                 "a POSIX sh has none: its marks ride in PS1, which renders after the command"
+
+        testCase "a POSIX sh emits both its marks through printf" <| fun () ->
+            // The one that was silently wrong on every box that ships. PS1 is expanded by the
+            // SHELL, and interpreting a `\033` in a prompt is a bash extension dash lacks — so
+            // a mark left as literal text never reached us from Debian's `/bin/sh`, the probe
+            // never saw its `A`, and every terminal there fell back to a process per block.
+            let rc = (Marks.rcFor "sh" nonce |> Option.get).Rc
+            Expect.isFalse (rc.Contains "\\007'") "no mark is left outside the printf for the shell to expand"
+            Expect.equal (rc.Split("printf").Length - 1) 1 "and both ride in the one command substitution"
     ]
 
 // --- The headless emulator (Plan 13, stage 2b) -------------------------------------------

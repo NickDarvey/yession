@@ -242,10 +242,21 @@ module Marks =
             // is no `preexec` to hang `C` on at all — and it is exactly why the probe decides
             // by observation rather than by shell name.
             //
+            // BOTH marks go through `printf`, in one command substitution, and that is the
+            // whole of what makes this dialect work anywhere. PS1 is expanded by the SHELL,
+            // and interpreting a `\033` written into a prompt is a bash extension: dash does
+            // not have it, and dash is `/bin/sh` on Debian and Ubuntu. So an `A` left as
+            // literal text arrived there as the eight characters `\033]133;A;…`, the probe
+            // never saw its mark, and every terminal on such a host fell back — silently — to
+            // a process per block, which carries no `cd` and no variable into the next one.
+            // `printf` interprets the octal in every POSIX shell, which is exactly why `D`
+            // reached us from dash all along and `A` never did. `D` before `A`: the previous
+            // command's output ends before this prompt begins, the order FTCS gives them.
+            //
             // `MarksCommandStart = false`: with no preexec there is no `C`, so the drain
             // completes this dialect's blocks on `D` alone and the integration detector stays
             // disarmed here.
             Some
-                { Rc = " PS1='$(command -p printf \"" + commandDone + "\" $?)" + promptStart + "'"
+                { Rc = " PS1='$(command -p printf \"" + commandDone + promptStart + "\" $?)'"
                   MarksCommandStart = false }
         | _ -> None

@@ -75,7 +75,14 @@ let private runOnPty (executable: string) (arguments: string list) : Async<Resul
 /// setting that decides how a terminal opens (Plan 25's shell profile) can be established.
 /// It is a hook rather than a second fixture because a test that opened its own second
 /// terminal would collide with the fixture's single minted id.
-let private withPreparedTerminal
+///
+/// `shell` is which shell the manager composes. It is a parameter rather than a constant
+/// because production composes `TerminalShell.posix` (dash on Debian/Ubuntu and this repo's
+/// own container) while this fixture defaulted to `bash` — so the suite proved stage 2d's
+/// properties under the one dialect nothing ships, and a `/bin/sh` that never emitted its
+/// prompt mark went unnoticed through every green run.
+let private withShellTerminal
+    (shell: SessionTerminals.TerminalShell)
     (prepare: SessionTerminals.SessionTerminals -> Async<unit>)
     (name: string)
     (body: SessionTerminals.SessionTerminals
@@ -137,7 +144,7 @@ let private withPreparedTerminal
                         |> Seq.map snd
                         |> List.ofSeq)
                     Yession.Host.Emulator.openEmulator
-                    SessionTerminals.TerminalShell.bash
+                    shell
                     at
                     (fun () -> TerminalId.create ("term-" + name) |> expect)
                     (let mutable n = 0 in fun () -> n <- n + 1; BlockId.create (sprintf "b-%d" n) |> expect)
@@ -159,8 +166,18 @@ let private withPreparedTerminal
                 do! sandbox.Dispose ()
     }
 
+let private withPreparedTerminal prepare name body =
+    withShellTerminal SessionTerminals.TerminalShell.bash prepare name body
+
 let private withLiveTerminal (name: string) body =
     withPreparedTerminal (fun _ -> async { return () }) name body
+
+/// A terminal under the shell PRODUCTION composes (`app/Host.fs`), which on Debian and
+/// Ubuntu — and in this repository's own container — is dash. Every other case here runs
+/// under bash, which is the right fixture for the bash dialect's own hooks and the wrong one
+/// for asking whether what ships works.
+let private withPosixTerminal (name: string) body =
+    withShellTerminal SessionTerminals.TerminalShell.posix (fun _ -> async { return () }) name body
 
 /// A queue entry for a terminal, as the drain would hand one over.
 let private queueEntry (terminal: TerminalId) (author: ActorRef) (n: string) : PendingAct =
@@ -744,6 +761,47 @@ let tests =
                     let! saw = until 5000 (fun () -> (printed ()).Contains ("IN:" + dir))
                     Expect.isTrue saw
                         (sprintf "the second block ran in the first block's directory %s, got: %s" dir (printed ()))
+                })
+
+        testCaseAsync "cd moves the next block under the shell production actually composes" <|
+            // The same invariant, under `TerminalShell.posix` — the shell `app/Host.fs`
+            // composes, which is dash here and on every Debian/Ubuntu host. It was FALSE in
+            // production for the whole of stage 2d: the sh dialect wrote its prompt mark as a
+            // literal escape and relied on the shell expanding it, which dash does not, so the
+            // open-probe timed out, every terminal fell back to a process per block, and `cd`
+            // died with each one. Green above under bash, broken on every box that ships.
+            withPosixTerminal "cdposix" (fun terminals id records _ _ _ ->
+                async {
+                    let ada = PeerRef (PeerId.create "ada" |> expect)
+                    let dir = mkdtemp nodeFs nodeOs
+                    do! terminals.RunBlock id (queueEntry id ada "1") ("cd " + dir) ignore
+                    do! terminals.RunBlock id (queueEntry id ada "2") "echo \"IN:$PWD\"" ignore
+                    let printed () = records |> Seq.map (fun r -> r.Data) |> String.concat ""
+                    let! saw = until 5000 (fun () -> (printed ()).Contains ("IN:" + dir))
+                    Expect.isTrue saw
+                        (sprintf "the second block ran in the first block's directory %s, got: %s" dir (printed ()))
+                })
+
+        testCaseAsync "a slow command does not lose integration where there is no start mark" <|
+            // The other half, and the reason the sh fix cannot ship without the dialect saying
+            // `MarksCommandStart = false`. A POSIX sh has no preexec, so it never emits `C`;
+            // arming the integration detector on that absence makes every command slower than
+            // `integrationWindowMs` report a working shell as lost and holds its queue. This
+            // runs a command past that window and asserts the terminal is not marked lost.
+            withPosixTerminal "slowposix" (fun terminals id _ log _ _ ->
+                async {
+                    let ada = PeerRef (PeerId.create "ada" |> expect)
+                    // Longer than the 2s window, short enough for the suite's budget.
+                    do! terminals.RunBlock id (queueEntry id ada "1") "sleep 3; echo done" ignore
+                    let! page = log.Read None 1000
+                    Expect.isFalse
+                        (page.Events
+                         |> List.exists (fun e ->
+                             match e.Event with
+                             | SessionEvent.TerminalIntegrationLost l -> l.TerminalId = id
+                             | _ -> false))
+                        "a shell that never promised a start mark is not reported as having lost one"
+                    Expect.isEmpty (terminals.Lost ()) "and its queue is not held behind the report"
                 })
 
         testCaseAsync "a command is sized before it is written, not after" <|
