@@ -52,12 +52,49 @@ let none : RepoSandboxes =
       Outcomes = fun () -> []
       Undeclared = fun () -> [] }
 
+/// What the log already says about one declaration: the reason it was last refused, when
+/// that refusal is still the last word about it.
+///
+/// A start ENDS a refusal rather than merely following it, so a failure after one is news
+/// again — the same rule `SessionEnvironment` applies to its own start attempts, and for the
+/// same reason: what is stale is a refusal that is still true, not every refusal ever made.
+///
+/// Read from the log rather than from `outcomes`, which is the field beside it. `outcomes`
+/// is what the LAST fold made of things and is empty in a process that has just started, so
+/// a delta against it would re-announce every standing refusal on every restart. The log is
+/// what the session has actually been told.
+let private lastRefusal (events: SessionEvent list) (repo: RepoRef) (sandbox: SandboxRef option) : string option =
+    let rendered = sandbox |> Option.map SandboxRef.render
+    events
+    |> List.choose (fun event ->
+        match event with
+        | SessionEvent.RepoConfigRefused r when
+            RepoRef.value r.Repo = RepoRef.value repo
+            && (r.Sandbox |> Option.map SandboxRef.render) = rendered -> Some (Some r.Reason)
+        | SessionEvent.WorkSandboxStarted started when Some (SandboxRef.render started.Sandbox) = rendered ->
+            Some None
+        | _ -> None)
+    |> List.tryLast
+    |> Option.flatten
+
 let create
     (reposDir: string)
     (repos: unit -> Repos.ReposService option)
     (sandboxes: unit -> WorkSandboxes.WorkSandboxes)
     (run: RunGatedCommand)
+    (log: EventLog<SessionEvent>)
     : RepoSandboxes =
+
+    let mintMessageId () : MessageId =
+        match MessageId.create (string (System.Guid.NewGuid ())) with
+        | Ok id -> id
+        | Error e -> failwithf "message id invariant violated: %s" e
+
+    let append (actor: ActorRef) (event: SessionEvent) : Async<unit> =
+        async {
+            let! _ = log.Append actor event
+            return ()
+        }
 
     let mutable outcomes : FoldOutcome list = []
     // Which refs the last fold saw declared. Compared against what is RUNNING to answer
@@ -122,6 +159,35 @@ let create
                         |> Async.Sequential
                     outcomes <- fileProblems @ (declarations |> Array.toList |> List.choose id)
                     declaredRefs <- declared |> Map.toList |> List.map (fst >> SandboxRef.render) |> Set.ofList
+                    // Say the refusals that are NEW. A start already announces itself, so
+                    // without this the two outcomes of a declaration were split — one on the
+                    // timeline, one behind a query nobody opens until they suspect a problem,
+                    // which is the state a broken file leaves you least able to suspect.
+                    //
+                    // On change, never per fold: this runs after every repo verb, so a note
+                    // per outcome would be the accumulation the query was chosen to avoid in
+                    // the first place, rebuilt on the surface it was avoided for.
+                    let! page = log.Read None System.Int32.MaxValue
+                    let told = page.Events |> List.map (fun e -> e.Event)
+                    for outcome in outcomes do
+                        match outcome.Problem with
+                        | None -> ()
+                        | Some reason when lastRefusal told outcome.Repo outcome.Sandbox = Some reason -> ()
+                        | Some reason ->
+                            // Attributed to the file, like the starts it did not produce.
+                            // `onBehalfOf` is whoever triggered the fold, and it is not
+                            // borrowed here: nothing is being done on their authority — this
+                            // is the file reporting that nothing was.
+                            let actor = ActorRef.Configured outcome.Repo
+                            do!
+                                append
+                                    actor
+                                    (SessionEvent.RepoConfigRefused
+                                        { RepoConfigRefused.MessageId = mintMessageId ()
+                                          RepoConfigRefused.Repo = outcome.Repo
+                                          RepoConfigRefused.Sandbox = outcome.Sandbox
+                                          RepoConfigRefused.Reason = reason
+                                          RepoConfigRefused.Actor = actor })
         }
 
     let undeclared () =

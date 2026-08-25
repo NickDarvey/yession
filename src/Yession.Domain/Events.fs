@@ -101,6 +101,10 @@ type SessionEvent =
     // notes it is a sibling of.
     | WorkSandboxStarted of WorkSandboxStarted
     | WorkSandboxStopped of WorkSandboxStopped
+    // A declaration that did NOT become a sandbox (Plan 27). The sibling above announces the
+    // starts; until this, only the starts were announced — so a file with a typo in it read
+    // on the timeline exactly like a file nobody had written.
+    | RepoConfigRefused of RepoConfigRefused
     // The shell profile (Plan 25): where a shell opened in one sandbox starts. One event
     // for set and for clear, because "what does a new terminal do" has one answer at a
     // time — a second verb would let the two disagree about which was last.
@@ -421,6 +425,33 @@ and TerminalTranscriptTruncated =
       /// gap in an audit trail is a stated fact, never a silent one.
       DroppedBytes : int }
 
+
+/// A repo's `yession.yaml` asked this session for something, and the session did not do it.
+///
+/// The `repo_config` query already answers "what became of every declaration" — but only to
+/// somebody who thought to ask, and a person who has just broken their own file has no
+/// reason to suspect there is a question. A start that SUCCEEDS has always announced itself
+/// (`WorkSandboxStarted`); this is the missing half, so that the two outcomes of a
+/// declaration are visible in the same place rather than one on the timeline and one behind
+/// a query.
+///
+/// Recorded on CHANGE and never per fold. The fold re-runs after every repo verb, so a note
+/// per outcome would rebuild exactly the accumulation `SessionEnvironment` had to stop —
+/// which is why the query was chosen over notes in the first place, and why this is a delta
+/// rather than a reversal of that choice.
+and RepoConfigRefused =
+    { MessageId : MessageId
+      Repo : RepoRef
+      /// Which declaration. `None` is the FILE itself — it could not be read at all, so
+      /// there is no sandbox to name, and the fix is in the YAML rather than in what it
+      /// asked for.
+      Sandbox : SandboxRef option
+      /// Said whole, in the words the refusal already used. A note that summarised would be
+      /// a second copy of a sentence the query is also showing, free to disagree with it.
+      Reason : string
+      /// The repo's file, as the party that asked (`ActorRef.Configured`) — the same
+      /// attribution its successful starts carry.
+      Actor : ActorRef }
 
 and WorkSandboxStarted =
     { MessageId : MessageId

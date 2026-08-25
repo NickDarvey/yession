@@ -978,6 +978,26 @@ module Codec =
                   WorkSandboxStarted.CredentialOwner = get.Required.Field "credentialOwner" (Decode.option actor.Decode)
                   WorkSandboxStarted.Actor = get.Required.Field "actor" actor.Decode }) }
 
+    let private repoConfigRefused : Codec<RepoConfigRefused> =
+        { Encode =
+            fun (p: RepoConfigRefused) ->
+                Encode.object
+                    [ "messageId", messageId.Encode p.MessageId
+                      "repo", repoRef.Encode p.Repo
+                      // Absent rather than null when the FILE is what could not be read:
+                      // there is no declaration to name, and a reader that finds no sandbox
+                      // here knows the fix is in the YAML rather than in what it asked for.
+                      "sandbox", Encode.option sandboxRef.Encode p.Sandbox
+                      "reason", Encode.string p.Reason
+                      "actor", actor.Encode p.Actor ]
+          Decode =
+            Decode.object (fun get ->
+                { RepoConfigRefused.MessageId = get.Required.Field "messageId" messageId.Decode
+                  RepoConfigRefused.Repo = get.Required.Field "repo" repoRef.Decode
+                  RepoConfigRefused.Sandbox = get.Required.Field "sandbox" (Decode.option sandboxRef.Decode)
+                  RepoConfigRefused.Reason = get.Required.Field "reason" Decode.string
+                  RepoConfigRefused.Actor = get.Required.Field "actor" actor.Decode }) }
+
     let private workSandboxStopped : Codec<WorkSandboxStopped> =
         { Encode =
             fun (p: WorkSandboxStopped) ->
@@ -1160,6 +1180,8 @@ module Codec =
                     Encode.object [ "type", Encode.string "workSandboxStarted"; "payload", workSandboxStarted.Encode p ]
                 | WorkSandboxStopped p ->
                     Encode.object [ "type", Encode.string "workSandboxStopped"; "payload", workSandboxStopped.Encode p ]
+                | RepoConfigRefused p ->
+                    Encode.object [ "type", Encode.string "repoConfigRefused"; "payload", repoConfigRefused.Encode p ]
                 | ShellProfileSet p ->
                     Encode.object [ "type", Encode.string "shellProfileSet"; "payload", shellProfileSet.Encode p ]
                 | SessionEvent.CommandRefused p ->
@@ -1214,6 +1236,7 @@ module Codec =
                 | "repoRemoved" -> Decode.field "payload" repoRemoved.Decode |> Decode.map RepoRemoved
                 | "repoBranchSwitched" -> Decode.field "payload" repoBranchSwitched.Decode |> Decode.map RepoBranchSwitched
                 | "workSandboxStarted" -> Decode.field "payload" workSandboxStarted.Decode |> Decode.map WorkSandboxStarted
+                | "repoConfigRefused" -> Decode.field "payload" repoConfigRefused.Decode |> Decode.map RepoConfigRefused
                 | "workSandboxStopped" -> Decode.field "payload" workSandboxStopped.Decode |> Decode.map WorkSandboxStopped
                 | "shellProfileSet" -> Decode.field "payload" shellProfileSet.Decode |> Decode.map ShellProfileSet
                 | "commandRefused" -> Decode.field "payload" commandRefused.Decode |> Decode.map SessionEvent.CommandRefused
