@@ -218,22 +218,14 @@ let internal reporting (label: string) (page: IPage) (ev: Evidence) (body: Async
                                            try {
                                              const out = {}
                                              for (const n of await caches.keys()) {
-                                               const c = await caches.open(n)
-                                               const entries = {}
-                                               for (const req of await c.keys()) {
-                                                 // The ADDRESS keyed to its BODY. The address says
-                                                 // which line the entry starts on — a replay with
-                                                 // entries but none starting at 0 folds nothing —
-                                                 // and the body says WHICH record it is: a store
-                                                 // that kept the `"i"` input line but not yet the
-                                                 // `"o"` output reads the same by address as one
-                                                 // that kept both, and only the bytes tell them
-                                                 // apart. Truncated; a recording is small here.
-                                                 const addr = req.url.replace(location.origin, '').replace(/\?token=[^&]*/, '')
-                                                 const resp = await c.match(req)
-                                                 entries[addr] = resp ? (await resp.text()).slice(0, 300) : null
-                                               }
-                                               out[n] = entries
+                                               const reqs = await (await caches.open(n)).keys()
+                                               // The ADDRESSES, not just how many. A transcript
+                                               // answer is kept under the cursor it was asked
+                                               // from, so the address says which line the entry
+                                               // starts on — and a replay that has entries but
+                                               // none starting at the beginning folds nothing.
+                                               // "6 entries" cannot tell those apart.
+                                               out[n] = reqs.map(r => r.url.replace(location.origin, '').replace(/\?token=[^&]*/, ''))
                                              }
                                              return out
                                            } catch (e) { return 'unreadable: ' + e.message }
@@ -276,40 +268,12 @@ let private someOwnText (selector: string) (text: string) =
 /// exceeded", and a case with a dozen waits is a case whose red names none of them — telling
 /// them apart then costs a full run of the gate per hypothesis, which is how guessing comes to
 /// cost the same as looking and wins every time. The label is the whole instrument.
-///
-/// Poll until the predicate holds, awaiting it whether it is a plain boolean expression or an
-/// async one.
-///
-/// It does NOT use `page.WaitForFunctionAsync`, which is unusable for a predicate that resolves a
-/// Promise: that call checks the truthiness of the expression's VALUE and never awaits it, so an
-/// `(async () => …)()` (or any `.then`-chained expression) is truthy the instant it is evaluated —
-/// the Promise object itself — and the wait settles while the condition it names has never held. A
-/// store-kept gate written that way is a silent no-op: `transcriptKept`/`conversationKept` returned
-/// at once, `make` killed the session before the record was ever written, and the reload replayed
-/// nothing — green on an idle box, red on a loaded runner, which is the whole of this bug. This was
-/// verified in place: `WaitForFunctionAsync "(async () => false)()"` settles in ~30ms, and even the
-/// function form `() => (async () => false)()` settles at once, while `() => false` correctly times
-/// out. `EvaluateAsync` awaits a returned Promise (confirmed: `(async () => false)()` -> false), so
-/// polling it is correct for both predicate shapes.
-let private waitTimeoutMs = 30000.0
 let private waitFor (what: string) (page: IPage) (predicate: string) : Async<unit> =
     async {
-        let sw = Stopwatch.StartNew ()
-        let mutable held = false
-        let mutable lastError = ""
-        while not held && sw.Elapsed.TotalMilliseconds < waitTimeoutMs do
-            // `EvaluateAsync` awaits a Promise the expression returns, so an async predicate yields
-            // its real boolean here. A transient throw (an execution context torn down by a reload
-            // mid-poll) is just "not yet" — kept, so the final timeout can name it.
-            try
-                let! v = await (page.EvaluateAsync<bool> predicate)
-                held <- v
-            with e -> lastError <- e.Message
-            if not held then do! Async.Sleep 100
-        if not held then
-            let tail = if lastError = "" then "" else sprintf " (last error: %s)" lastError
-            failwithf "waiting for %s — timed out after %gms%s\n  predicate: %s"
-                what waitTimeoutMs tail predicate
+        try
+            do! await (page.WaitForFunctionAsync predicate) |> Async.Ignore
+        with e ->
+            failwithf "waiting for %s — %s\n  predicate: %s" what e.Message predicate
     }
 
 // Browser-evaluated predicate strings: JS by necessity — they run inside Chromium via CDP.
@@ -1902,22 +1866,16 @@ let private keptIn (cachePart: string) (text: string) =
         cachePart
         text
 
-/// The transcript store holding what the terminal PRINTED — an asciicast `"o"` output record
-/// carrying the shell's answer, not the `"i"` input record of the command that caused it.
+/// The transcript store holding what the terminal PRINTED — an asciicast `"o"` record, not
+/// the `"i"` record of the command that caused it.
 ///
-/// The distinction is the precondition. `echo printed-before-the-session-died` is kept as an
-/// `"i"` record the instant it is sent — the command line CONTAINS the marker — so a plain search
-/// (`keptIn`) is satisfied before the shell has answered, let alone before the answer has been
-/// fetched and written. Narrowing to `"o"` excludes that input record and leaves only the shell's
-/// real output (verified: the recording holds an `"i"` line for the command and one
-/// `[t,"o","printed-before-the-session-died\r\n"]` for its result — no separate echo record).
-///
-/// This narrowing was necessary but not sufficient: the wait that consumed it never actually ran
-/// (see `waitFor` — `WaitForFunctionAsync` does not await an async predicate), so `make` proceeded
-/// on the first poll regardless of what the store held, killed the session before the output
-/// record was written, and the reload replayed a recording with no output — `[data-terminal-output]`
-/// never carried the text and the case timed out naming a wait rather than a cause. Green on an
-/// idle box, red on a loaded runner, twice on the release gate.
+/// The distinction is the whole precondition. `echo printed-before-the-session-died` CONTAINS
+/// the text this case looks for, so a plain search of the store is satisfied the moment the
+/// typed line is kept — before the shell has answered, let alone before the answer has been
+/// fetched and written. The session was then killed inside that window and the reload replayed
+/// a recording with the command in it and no output, so `[data-terminal-output]` never carried
+/// the text and the case timed out naming a wait rather than a cause. Green on an idle box,
+/// red on a loaded runner, twice on the release gate.
 let private transcriptKept =
     keptWhere
         "/terminals/"
@@ -1963,13 +1921,10 @@ let private offlineReopen (name: string) (make: IPage -> Async<unit>) (check: IP
 
                 // The worker has to be RUNNING before the session goes, or the reload has
                 // nothing serving it. Waiting on the registration is the difference between
-                // testing this and testing a race — but only through `waitFor`, which awaits: a
-                // bare `WaitForFunctionAsync` of this `.then`-chained Promise settles at once (see
-                // `waitFor`), so it was not waiting on the worker at all. `getRegistration`
-                // resolves promptly each poll (unlike `.ready`, which never settles with no active
-                // worker and would hang a single evaluation), and the loop supplies the timeout.
-                do! waitFor "the service worker to be active" page
-                        "navigator.serviceWorker.getRegistration().then(r => !!(r && r.active))"
+                // testing this and testing a race.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                            "navigator.serviceWorker.ready.then(r => !!r.active)")
 
                 // Gone, and staying gone. The proxy stays up, which is the honest shape of a
                 // reaped session behind an operator's front door — and it means the shell
