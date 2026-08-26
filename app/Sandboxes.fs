@@ -1036,9 +1036,22 @@ module SrtSandbox =
     /// which would fail open at the first root nobody thought to name.
     let configFor (tools: SrtTools) (policy: SandboxPolicy) : SrtConfig =
         let distinct (paths: string list) = paths |> List.distinct
+        // Everything writable, named once — and the readable set is DERIVED from it rather
+        // than listed beside it.
+        //
+        // A path that can be written and not read is not a path. Under `DenyRead = ["/"]`
+        // a process can create a file in a directory it cannot stat, and that is not a
+        // theoretical shape: `tmpDir` and the three devices below were in the write list
+        // and nowhere in the read one, so the temp dir srt redirects TMPDIR to was
+        // writable and invisible at once — which is what a runtime that stats its own temp
+        // directory before using it (.NET's named mutexes do) reports as a bare EPERM.
+        //
+        // Derived, so the containment is structural. Two lists that have to agree by
+        // inspection are two lists that drift, and this pair already had.
+        let writable = distinct (policy.WritePaths @ [ tmpDir; "/dev/stdout"; "/dev/stderr"; "/dev/null" ])
         { DenyRead = [ "/" ]
-          AllowRead = distinct (policy.ReadPaths @ policy.WritePaths @ tools.Runtime)
-          AllowWrite = distinct (policy.WritePaths @ [ tmpDir; "/dev/stdout"; "/dev/stderr"; "/dev/null" ])
+          AllowRead = distinct (policy.ReadPaths @ writable @ tools.Runtime)
+          AllowWrite = writable
           AllowedDomains = policy.AllowedDomains |> Option.defaultValue []
           Bwrap = tools.Bwrap
           Socat = tools.Socat

@@ -352,7 +352,13 @@ let private sandboxPolicyTests =
             Expect.equal config.DenyRead [ "/" ] "the denied region is the whole filesystem"
             Expect.equal
                 config.AllowRead
-                [ "/opt/tools"; "/data/workspace"; "/usr" ]
+                [ "/opt/tools"
+                  "/data/workspace"
+                  Sandboxes.SrtSandbox.tmpDir
+                  "/dev/stdout"
+                  "/dev/stderr"
+                  "/dev/null"
+                  "/usr" ]
                 "read paths, everything writable (a workspace that cannot be read is no workspace), and the host runtime"
 
         testCase "the srt config carries the tools, the egress and the temp dir through" <| fun () ->
@@ -370,6 +376,20 @@ let private sandboxPolicyTests =
             Expect.equal config.Bwrap (Some "/usr/bin/bwrap") "the named confinement tool rides through"
             Expect.equal config.Ripgrep (Some "/usr/bin/rg") "and so does the scanner srt will not start without"
             Expect.isFalse config.WeakNesting "the strict profile is what a configured host gets"
+
+        // The rule the case above states in passing — "a workspace that cannot be read is no
+        // workspace" — held for the policy's own paths and not for the ones srt adds. The
+        // temp dir it redirects TMPDIR to was writable and unreadable at once, so a process
+        // could create a file in a directory it could not stat. Derive `AllowRead` from the
+        // writable set and this cannot come back; regress the derivation and this goes red.
+        testCase "everything a sandbox may write, it may also read" <| fun () ->
+            let policy =
+                { Support.emptyPolicy with
+                    ReadPaths = [ "/opt/tools" ]
+                    WritePaths = [ "/data/workspace" ] }
+            let config = Sandboxes.SrtSandbox.configFor (toolsWithRuntime [ "/usr" ]) policy
+            let unreadable = config.AllowWrite |> List.filter (fun path -> not (List.contains path config.AllowRead))
+            Expect.equal unreadable [] "a path that can be written and not read is not a path"
 
         testCase "a refusal naming a tool this process can execute settled nothing about the host" <| fun () ->
             // srt reports a fork it could not take — no `which` on PATH, a box too busy to
