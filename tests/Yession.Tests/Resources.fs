@@ -21,6 +21,8 @@ open Fable.Pyxpecto
 open Hedgehog
 open Yession.Domain
 open Yession.Domain.Sandboxes
+open Yession.Domain.Tools
+open Yession.Host
 
 let private expect = function Ok v -> v | Error e -> failwithf "%A" e
 
@@ -489,6 +491,47 @@ let tests =
                  |> expect
                  |> ResourceClosure.isSensitive)
                 "the friendly name is sensitive because of what it reaches"
+
+        // --- what the operator is shown ------------------------------------------------------
+
+        // The row an operator reads is the CLOSURE, not the line they wrote. A composite whose
+        // whole content is one other name has to say what that name comes to, or the surface
+        // answers a question nobody asked.
+        testCase "a resource's row says what selecting it finally grants" <| fun () ->
+            let profile =
+                OperatorProfile.parse """
+                    { "version": 1,
+                      "resources": { "store": { "mount": { "from": "/nix" } },
+                                     "daemon": { "socket": "/nix/var/nix/daemon-socket" },
+                                     "nix": [ "store", "daemon" ] } }"""
+                |> expect
+            let cellOf name key =
+                OperatorResources.rows profile
+                |> List.find (fun row -> row |> List.contains ("resource", CellText name))
+                |> List.pick (fun (column, cell) -> if column = key then Some cell else None)
+            match cellOf "nix" "grants" with
+            | CellText grants ->
+                Expect.isTrue (grants.Contains "/nix,") (sprintf "the mount it reaches, said: %s" grants)
+                Expect.isTrue (grants.Contains "daemon-socket") (sprintf "and the socket, said: %s" grants)
+            | other -> failwithf "expected text, got %A" other
+
+        // Sensitivity is the reason the surface exists at all: an operator has to be able to
+        // see which of their own names are the loud ones, INCLUDING the ones that are only
+        // loud because of what they reach.
+        testCase "a resource is marked sensitive when something it reaches is" <| fun () ->
+            let profile =
+                OperatorProfile.parse """
+                    { "version": 1,
+                      "resources": { "danger": { "endpoint": "anywhere", "sensitive": true },
+                                     "friendly": [ "danger" ],
+                                     "quiet": { "exec": "/bin/true" } } }"""
+                |> expect
+            let sensitive name =
+                OperatorResources.rows profile
+                |> List.find (fun row -> row |> List.contains ("resource", CellText name))
+                |> List.pick (fun (column, cell) -> if column = "sensitive" then Some cell else None)
+            Expect.equal (sensitive "friendly") (CellText "yes") "a friendly name over a loud leaf is loud"
+            Expect.equal (sensitive "quiet") CellAbsent "and one that reaches nothing loud is not"
 
         // --- what a person is shown --------------------------------------------------------
 
