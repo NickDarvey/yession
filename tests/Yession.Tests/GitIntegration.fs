@@ -175,7 +175,7 @@ let private pureTests =
             Expect.isTrue (message.Contains "/usr/bin/git") "which git could not run"
             Expect.isTrue (message.Contains "inside the sandbox") "where it could not run"
             Expect.isTrue (message.Contains "YESSION_BIN_GIT") "how to name a working one"
-            Expect.isTrue (message.Contains "YESSION_SESSION_READ") "how to let it read what it needs"
+            Expect.isTrue (message.Contains "YESSION_SESSION_RESOURCES") "how to let it read what it needs"
             Expect.isTrue (message.Contains "xcode-select") "and what it actually said, kept"
 
         testCase "capped output states its elision" <| fun () ->

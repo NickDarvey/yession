@@ -91,6 +91,26 @@ let private grantedLeaves : ResourceLeaf list =
         | Ok closure -> ResourceClosure.leaves closure |> Set.toList
         | Error e -> failwith e
 
+/// What one sandbox holds: the host's `default`, plus whatever the sandbox itself selected.
+///
+/// A selection naming something this host does not declare is refused HERE, with the profile
+/// in hand, and the sentence lists what there is instead. That refusal is the whole of the
+/// old ceiling check — a repo cannot exceed what the operator offered because it can only
+/// name what the operator offered, which is a stronger arrangement than comparing two lists
+/// and hoping the comparison is right.
+let private grantsFor (selection: ResourceName list) : Result<ResourceLeaf list, string> =
+    match selection, resourceProfile with
+    | [], _ -> Ok grantedLeaves
+    | _, None ->
+        Error (
+            sprintf
+                "this sandbox selects %s, and this host declares no resources at all — an operator sets YESSION_SESSION_RESOURCES to a profile naming them"
+                (selection |> List.map ResourceName.value |> String.concat ", "))
+    | selection, Some file ->
+        ResourceProfile.resolve file.Resources selection
+        |> Result.map (fun closure ->
+            (ResourceClosure.leaves closure |> Set.toList) @ grantedLeaves |> List.distinct)
+
 // The AgentSandbox backend (`YESSION_SESSION_AGENT_BACKEND`): where the agent CLI process
 // runs — host or srt, never docker (a work-sandbox-only backend). Both tiers go through
 // the SDK's `spawnClaudeCodeProcess` seam with an allowlisted env and a scratch HOME
@@ -228,7 +248,7 @@ let private makeSandboxes
                         workspace
                         sharedRepos
                         home
-                        grantedLeaves
+                        grantsFor
                         workSpec
                 Ok (
                     SessionEnvironment.create

@@ -644,14 +644,14 @@ let private configTests =
         testCase "a declaration carries what start_work_sandbox can already be told" <| fun () ->
             let file =
                 ConfigFile.parse """
-                    { "version": 1,
+                    { "version": 2,
                       "sandboxes": {
                         "dev": {
                           "container": { "image": "node:24", "cmd": "npm start" },
                           "workdir": "./app",
                           "env": { "NODE_ENV": "development" },
-                          "net": [ "registry.npmjs.org" ],
-                          "read": [ "~/.cache/npm" ],
+                          "uses": [ "npm" ],
+                          "uses": [ "npm" ],
                           "forward": [ "github" ] } } }"""
                 |> expect
             let dev = file.Sandboxes |> Map.find (sandboxName "dev")
@@ -659,8 +659,7 @@ let private configTests =
             Expect.equal container.Image (Some { Name = "node"; Tag = Some "24" }) "the image splits on its tag"
             Expect.equal dev.WorkingDirectory (Some "./app") "the workdir is the repo's own"
             Expect.equal container.Command (Some "npm start") "the sandbox's process"
-            Expect.equal dev.Net [ "registry.npmjs.org" ] "the egress it asks for"
-            Expect.equal dev.Read [ "~/.cache/npm" ] "the paths it asks to read"
+            Expect.equal (dev.Uses |> List.map ResourceName.value) [ "npm" ] "the resources it selects"
             Expect.equal dev.Forward [ "github" ] "the credentials by name"
 
         // A file is authored by whoever can push to the repo, so a path it writes is that
@@ -668,7 +667,7 @@ let private configTests =
         // because that is where the person who can fix it is standing.
         testCase "a workdir that leaves the checkout is refused, and says which way" <| fun () ->
             let refusal workdir =
-                match ConfigFile.parse (sprintf """{ "version": 1, "sandboxes": { "dev": { "workdir": "%s" } } }""" workdir) with
+                match ConfigFile.parse (sprintf """{ "version": 2, "sandboxes": { "dev": { "workdir": "%s" } } }""" workdir) with
                 | Ok _ -> failwithf "expected a refusal for '%s'" workdir
                 | Error e -> e
             Expect.isTrue ((refusal "/etc").Contains "absolute") "an absolute path names another machine's tree"
@@ -682,7 +681,7 @@ let private configTests =
             let volume source =
                 ConfigFile.parse (
                     sprintf
-                        """{ "version": 1, "sandboxes": { "dev": { "container": { "volumes": [ { "source": "%s", "target": "/w" } ] } } } }"""
+                        """{ "version": 2, "sandboxes": { "dev": { "container": { "volumes": [ { "source": "%s", "target": "/w" } ] } } } }"""
                         source)
             match volume "/var/run/docker.sock" with
             | Ok _ -> failwith "expected a refusal"
@@ -702,21 +701,20 @@ let private configTests =
         testCase "a declaration becomes the ask, against this session's checkout" <| fun () ->
             let decl =
                 (ConfigFile.parse """
-                    { "version": 1,
+                    { "version": 2,
                       "sandboxes": {
                         "dev": {
                           "container": { "image": "node:24" },
                           "workdir": "./app",
                           "env": { "NODE_ENV": "development" },
-                          "net": [ "registry.npmjs.org" ],
-                          "read": [ "/opt/cache" ],
+                          "uses": [ "npm" ],
+                          "uses": [ "npm" ],
                           "forward": [ "github" ] } } }"""
                  |> expect).Sandboxes
                 |> Map.find (sandboxName "dev")
             let request = SandboxDecl.toRequest (Some "/data/repos/octo/hello") decl |> expect
             Expect.equal request.Spec.WorkingDirectory (Some "/data/repos/octo/hello/app") "the workdir is under the checkout"
-            Expect.equal request.Spec.Net [ "registry.npmjs.org" ] "the egress it asks for"
-            Expect.equal request.Spec.Read [ "/opt/cache" ] "the paths it asks to read"
+            Expect.equal (request.Spec.Uses |> List.map ResourceName.value) [ "npm" ] "the resources it selects"
             Expect.equal request.Forward [ "github" ] "the credentials by name"
             Expect.equal
                 request.Spec.Runtime
@@ -764,7 +762,7 @@ let private configTests =
         testCase "a declaration written for the gate reads back as itself" <| fun () ->
             let declared =
                 (ConfigFile.parse """
-                    { "version": 1,
+                    { "version": 2,
                       "sandboxes": {
                         "dev": {
                           "container":
@@ -773,8 +771,8 @@ let private configTests =
                               "volumes": [ { "source": "workspace", "target": "/w", "mode": "ro" } ] },
                           "workdir": "app",
                           "env": { "NODE_ENV": "development", "DB": { "secret": "db-url" } },
-                          "net": [ "registry.npmjs.org" ],
-                          "read": [ "/opt/cache" ],
+                          "uses": [ "npm" ],
+                          "uses": [ "npm" ],
                           "forward": [ "github" ] } } }"""
                  |> expect).Sandboxes
                 |> Map.find (sandboxName "dev")
@@ -808,7 +806,7 @@ let private configTests =
             // The point of the runtime union. `cmd` is not a sandbox key at all — it lives
             // inside `container`, so "a confined sandbox with a process" is not a state the
             // file can express and not one any decoder has to refuse.
-            match ConfigFile.parse """{ "version": 1, "sandboxes": { "dev": { "cmd": "npm start" } } }""" with
+            match ConfigFile.parse """{ "version": 2, "sandboxes": { "dev": { "cmd": "npm start" } } }""" with
             | Ok _ -> failwith "expected a refusal"
             | Error e ->
                 Expect.isTrue (e.Contains "cmd") "it names the key that has no home here"
@@ -817,7 +815,7 @@ let private configTests =
         testCase "a sandbox with no container block asks for no container" <| fun () ->
             // `None` is the repo saying nothing, not the repo asking to be confined — what
             // that means is the backend's answer, not this file's.
-            let file = ConfigFile.parse """{ "version": 1, "sandboxes": { "dev": { "net": [ "a.example" ] } } }""" |> expect
+            let file = ConfigFile.parse """{ "version": 2, "sandboxes": { "dev": { "uses": [ "npm" ] } } }""" |> expect
             Expect.equal (file.Sandboxes |> Map.find (sandboxName "dev")).Container None "nothing was asked for"
 
         testCase "a secret is named, never carried" <| fun () ->
@@ -825,7 +823,7 @@ let private configTests =
             // a file somebody commits a password into.
             let file =
                 ConfigFile.parse """
-                    { "version": 1,
+                    { "version": 2,
                       "sandboxes": { "dev": { "env": { "DATABASE_URL": { "secret": "db-url" } } } } }"""
                 |> expect
             let dev = file.Sandboxes |> Map.find (sandboxName "dev")
@@ -839,13 +837,13 @@ let private configTests =
             // re-decided.
             let refused =
                 ConfigFile.parse """
-                    { "version": 1, "sandboxes": { "dev": { "env": { "YESSION_BIN_BWRAP": "/tmp/evil" } } } }"""
+                    { "version": 2, "sandboxes": { "dev": { "env": { "YESSION_BIN_BWRAP": "/tmp/evil" } } } }"""
             Expect.isError refused "a repo cannot name the host's bubblewrap"
 
         testCase "the reserved refusal says which variable" <| fun () ->
             // A refusal nobody can act on gets worked around rather than fixed.
             match ConfigFile.parse """
-                    { "version": 1, "sandboxes": { "dev": { "env": { "YESSION_LAUNCH": "x" } } } }""" with
+                    { "version": 2, "sandboxes": { "dev": { "env": { "YESSION_LAUNCH": "x" } } } }""" with
             | Ok _ -> failwith "expected a refusal"
             | Error e -> Expect.isTrue (e.Contains "YESSION_LAUNCH") "it names the variable it refused"
 
@@ -854,7 +852,7 @@ let private configTests =
         // named a key without naming which sandbox wrote it.
         testCase "a refusal is addressed to the sandbox that caused it" <| fun () ->
             match ConfigFile.parse """
-                    { "version": 1,
+                    { "version": 2,
                       "sandboxes": { "dev": { "workdir": "." },
                                      "gate": { "env": { "YESSION_LAUNCH": "x" } } } }""" with
             | Ok _ -> failwith "expected a refusal"
@@ -868,7 +866,7 @@ let private configTests =
             // The guard above must not have made `env` useless.
             let file =
                 ConfigFile.parse """
-                    { "version": 1, "sandboxes": { "dev": { "env": { "NODE_ENV": "test" } } } }"""
+                    { "version": 2, "sandboxes": { "dev": { "env": { "NODE_ENV": "test" } } } }"""
                 |> expect
             let dev = file.Sandboxes |> Map.find (sandboxName "dev")
             Expect.equal (dev.EnvironmentVariables |> Map.tryFind "NODE_ENV") (Some (PlainValue "test"))
@@ -878,33 +876,33 @@ let private configTests =
             // A typo that decodes to "nothing was asked for" reads as configuration and
             // behaves as none.
             Expect.isError
-                (ConfigFile.parse """{ "version": 1, "sandboxes": { "dev": { "workdirr": "./app" } } }""")
+                (ConfigFile.parse """{ "version": 2, "sandboxes": { "dev": { "workdirr": "./app" } } }""")
                 "a misspelled key fails the file"
 
         testCase "an unknown top-level key is refused too" <| fun () ->
             Expect.isError
-                (ConfigFile.parse """{ "version": 1, "sandboxes": {}, "mcp": { "serial": "http://x" } }""")
+                (ConfigFile.parse """{ "version": 2, "sandboxes": {}, "mcp": { "serial": "http://x" } }""")
                 "a key this schema does not define is not silently ignored"
 
         testCase "a version this build does not speak is refused" <| fun () ->
             // A file from the future says so, rather than losing half its meaning to a
             // decoder that skips what it cannot read.
-            Expect.isError (ConfigFile.parse """{ "version": 2, "sandboxes": {} }""")
-                "version 2 is not decoded as a lossy version 1"
+            Expect.isError (ConfigFile.parse """{ "version": 3, "sandboxes": {} }""")
+                "version 3 is not decoded as a lossy version 2"
 
         testCase "a file with no version is refused" <| fun () ->
             Expect.isError (ConfigFile.parse """{ "sandboxes": {} }""") "the version is how the refusal above stays possible"
 
         testCase "a name a sandbox cannot have is refused where it is written" <| fun () ->
             // The name survives as a Docker object-name component and a directory.
-            Expect.isError (ConfigFile.parse """{ "version": 1, "sandboxes": { "Dev Box": {} } }""")
+            Expect.isError (ConfigFile.parse """{ "version": 2, "sandboxes": { "Dev Box": {} } }""")
                 "an unusable name fails the file rather than a container start much later"
 
         testCase "two sandboxes with one name inside one file are refused" <| fun () ->
             // The ONLY place a clash can happen — across files the scope keeps them apart —
             // and it is refused where the person who wrote both can pick another name.
             // JSON's own duplicate-key handling would hide this, so the name is what repeats.
-            let a = ConfigFile.parse """{ "version": 1, "sandboxes": { "dev": {}, "dev": {} } }"""
+            let a = ConfigFile.parse """{ "version": 2, "sandboxes": { "dev": {}, "dev": {} } }"""
             match a with
             | Error _ -> ()
             | Ok file ->
@@ -914,7 +912,7 @@ let private configTests =
         testCase "the union of two repos' files is total" <| fun () ->
             // The whole algebra. The keys are (repo, name) pairs and the repos are disjoint,
             // so both repos' `dev` survive and neither shadows the other.
-            let file = ConfigFile.parse """{ "version": 1, "sandboxes": { "dev": {} } }""" |> expect
+            let file = ConfigFile.parse """{ "version": 2, "sandboxes": { "dev": {} } }""" |> expect
             let one, two = repo "octo/hello", repo "octo/other"
             let union = ConfigFile.union [ one, file; two, file ]
             Expect.equal (Map.count union) 2 "two repos asking for `dev` get two sandboxes"
@@ -928,9 +926,9 @@ let private configTests =
             // teeth: keyed on the name alone, the last fold would win and the answer would
             // depend on the order. Keyed by scope, there is nothing to win.
             let mine =
-                ConfigFile.parse """{ "version": 1, "sandboxes": { "dev": { "net": [ "a.example" ] } } }""" |> expect
+                ConfigFile.parse """{ "version": 2, "sandboxes": { "dev": { "uses": [ "npm" ] } } }""" |> expect
             let theirs =
-                ConfigFile.parse """{ "version": 1, "sandboxes": { "dev": { "net": [ "b.example" ] } } }""" |> expect
+                ConfigFile.parse """{ "version": 2, "sandboxes": { "dev": { "uses": [ "npm" ] } } }""" |> expect
             let one, two = repo "octo/hello", repo "octo/other"
             Expect.equal
                 (ConfigFile.union [ one, mine; two, theirs ])
@@ -941,7 +939,7 @@ let private configTests =
 
         testCase "no file can declare the sandbox a terminal lands in by default" <| fun () ->
             // `default` is the session's, and a repo naming it gets its OWN, scoped.
-            let file = ConfigFile.parse """{ "version": 1, "sandboxes": { "default": {} } }""" |> expect
+            let file = ConfigFile.parse """{ "version": 2, "sandboxes": { "default": {} } }""" |> expect
             let union = ConfigFile.union [ repo "octo/hello", file ]
             Expect.isFalse (union |> Map.containsKey SandboxRef.defaultRef)
                 "the session's own default is not something a checkout can take over"

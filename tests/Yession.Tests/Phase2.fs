@@ -244,102 +244,6 @@ let private sandboxPolicyTests =
             // rather than a second, container-less docker path.
             Expect.isOk (Sandboxes.forBackend DockerBackend "s" EnvironmentSpec.defaults) "so does docker"
 
-        testCase "egress: only a confined backend carries an allowlist, and it is opt-in" <| fun () ->
-            let ambient = Map.ofList [ "YESSION_SESSION_WORK_NET", "api.example.com, cdn.example.com" ]
-            Expect.equal (Sandboxes.egressFor HostBackend ambient) None "an unconfined backend is unrestricted"
-            Expect.equal (Sandboxes.egressFor DockerBackend ambient) None "so is docker"
-            Expect.equal
-                (Sandboxes.egressFor SrtBackend ambient)
-                (Some [ "api.example.com"; "cdn.example.com" ])
-                "srt carries exactly the configured domains"
-            Expect.equal
-                (Sandboxes.egressFor SrtBackend Map.empty)
-                (Some [])
-                "and none where none were configured — srt has no unrestricted mode, so it fails closed"
-
-        // The rule a repo-authored file rests on (Plan 27). A `yession.yaml` is written by
-        // whoever can push to the repo, which is not whoever runs the host, so the
-        // operator's list is a ceiling and the only direction a file may move it is down.
-        testCase "a sandbox may narrow the operator's egress, and gets it whole by saying nothing" <| fun () ->
-            let ambient = Map.ofList [ "YESSION_SESSION_WORK_NET", "api.example.com, cdn.example.com" ]
-            let policy asked =
-                Sandboxes.policyFor
-                    SrtBackend ambient Map.empty None None None [] { EnvironmentSpec.defaults with Net = asked }
-            Expect.equal
-                ((policy [] |> expect).AllowedDomains)
-                (Some [ "api.example.com"; "cdn.example.com" ])
-                "a sandbox that named nothing reaches what the operator allows"
-            Expect.equal
-                ((policy [ "api.example.com" ] |> expect).AllowedDomains)
-                (Some [ "api.example.com" ])
-                "and one that named less reaches less, at once"
-
-        testCase "a sandbox asking past the ceiling is refused, naming what it asked for" <| fun () ->
-            let ambient = Map.ofList [ "YESSION_SESSION_WORK_NET", "api.example.com" ]
-            match
-                Sandboxes.policyFor
-                    SrtBackend ambient Map.empty None None None []
-                    { EnvironmentSpec.defaults with Net = [ "api.example.com"; "evil.example.com" ] }
-                with
-            | Ok _ -> failwith "expected a refusal"
-            | Error e ->
-                Expect.isTrue (e.Contains "evil.example.com") "it names what exceeded the ceiling"
-                Expect.isFalse (e.Contains "asks to reach api.example.com, evil") "and not the part that did not"
-                Expect.isTrue (e.Contains "YESSION_SESSION_WORK_NET") "and which knob would allow it"
-
-        // The unconfining backends restrict this axis not at all, so an ask is satisfied
-        // there by everything. Refusing would be a refusal on behalf of a rule that is not
-        // being enforced.
-        testCase "a backend that confines no egress grants the ask whole" <| fun () ->
-            for backend in [ HostBackend; DockerBackend ] do
-                let policy =
-                    Sandboxes.policyFor
-                        backend Map.empty Map.empty None None None []
-                        { EnvironmentSpec.defaults with Net = [ "anything.example.com" ] }
-                Expect.equal ((policy |> expect).AllowedDomains) None (sprintf "%A stays unrestricted" backend)
-
-        // The read axis is the same rule read off the other variable — and it is the reason
-        // `configuredReadPaths` sits beside `egressFor` instead of inside the one backend
-        // that enforces it.
-        testCase "an extra read path is allowed only where the operator named it" <| fun () ->
-            let ambient = Map.ofList [ "YESSION_SESSION_READ", "/opt/toolchain" ]
-            let policy asked =
-                Sandboxes.policyFor
-                    SrtBackend ambient Map.empty None None None [] { EnvironmentSpec.defaults with Read = asked }
-            Expect.equal
-                ((policy [ "/opt/toolchain" ] |> expect).ReadPaths)
-                [ "/opt/toolchain" ]
-                "a path the operator named lands"
-            match policy [ "/etc/shadow" ] with
-            | Ok _ -> failwith "expected a refusal"
-            | Error e ->
-                Expect.isTrue (e.Contains "/etc/shadow") "it names the path"
-                Expect.isTrue (e.Contains "YESSION_SESSION_READ") "and which knob would allow it"
-
-        // Found by writing this repo's own `yession.yaml` (Plan 27, part 4), which is what
-        // that exercise is for. A file cannot write an absolute read path — the home
-        // directory belongs to whoever runs the session — so `~/.nuget/packages` is the only
-        // way it can name the cache its build uses, and the tilde used to reach bubblewrap
-        // verbatim: a bind to a path that exists nowhere, silently useless, in a sandbox
-        // that had been told it could read the cache.
-        testCase "a read path under the session's home is resolved before it reaches a sandbox" <| fun () ->
-            let ambient =
-                Map.ofList [ "HOME", "/home/dev"; "YESSION_SESSION_READ", "~/.nuget/packages" ]
-            let policy asked =
-                Sandboxes.policyFor
-                    SrtBackend ambient Map.empty None None None [] { EnvironmentSpec.defaults with Read = asked }
-            Expect.equal
-                ((policy [ "~/.nuget/packages" ] |> expect).ReadPaths)
-                [ "/home/dev/.nuget/packages" ]
-                "the sandbox is given a path that exists"
-            // The ceiling is one statement, so the two sides have to be compared in one
-            // form: a repo writing what the operator wrote must not be refused for spelling
-            // it the same way, and the absolute form must not be a way around the tilde.
-            Expect.equal
-                ((policy [ "/home/dev/.nuget/packages" ] |> expect).ReadPaths)
-                [ "/home/dev/.nuget/packages" ]
-                "however either side spelled it"
-
         testCase "the srt config denies every read, and the policy's paths are the holes in it" <| fun () ->
             // Denying only the operator's home left everything nobody thought to name —
             // another session's data directory, a checkout this session was never given —
@@ -443,18 +347,14 @@ let private sandboxPolicyTests =
                 None
                 "and a one-segment prefix is dropped: /usr is the platform's to name, not an install's"
 
-        testCase "the read scope's allow-back adds the operator's paths, it does not replace the platform's" <| fun () ->
-            // The opposite of YESSION_*_DOMAINS, and deliberately: a deployment naming its
-            // unusual toolchain still needs libc.
-            let paths =
-                Sandboxes.SrtSandbox.runtimeReadPaths
-                    "linux"
-                    [ "/opt/node22/bin/node" ]
-                    (Map.ofList [ "YESSION_SESSION_READ", "/srv/toolchain, /srv/sdk" ])
-            Expect.isTrue (List.contains "/usr" paths) "the platform's runtime is still there"
+        // What an operator hands out is a RESOURCE somebody selects, and it arrives through
+        // the policy. This list is only the platform's own and the runtimes this process
+        // names — it used to fold the operator's `YESSION_SESSION_READ` in as well, which
+        // made one variable a ceiling and an unconditional grant at once.
+        testCase "the read scope is the platform's and what is running, and nothing an operator hands out" <| fun () ->
+            let paths = Sandboxes.SrtSandbox.runtimeReadPaths "linux" [ "/opt/node22/bin/node" ] Map.empty
+            Expect.isTrue (List.contains "/usr" paths) "the platform's runtime is there"
             Expect.isTrue (List.contains "/opt/node22" paths) "so is what is already running"
-            Expect.isTrue (List.contains "/srv/toolchain" paths) "and the operator's additions"
-            Expect.isTrue (List.contains "/srv/sdk" paths) "all of them"
 
         testCase "the read scope allows /etc by the file, never the directory that holds the secrets" <| fun () ->
             // /etc is the one region in the runtime list that also holds an operator's
@@ -473,14 +373,6 @@ let private sandboxPolicyTests =
                     "/home/operator"
                     (Sandboxes.SrtSandbox.runtimeReadPaths "linux" [ "/home/operator/node_modules/x/package.json" ] ambient))
                 "a discovered prefix that is the home is dropped"
-            Expect.isTrue
-                (List.contains
-                    "/home/operator"
-                    (Sandboxes.SrtSandbox.runtimeReadPaths
-                        "linux"
-                        []
-                        (Map.add "YESSION_SESSION_READ" "/home/operator" ambient)))
-                "an operator naming it explicitly means it"
 
         testCase "the read scope's platform list is the platform's, not this box's" <| fun () ->
             Expect.isTrue
@@ -1046,7 +938,7 @@ let private hostEnvironment (log: Yession.SessionProcess.EventLog<SessionEvent>)
     Yession.SessionProcess.SessionEnvironment.create
         log
         createSandbox
-        (Sandboxes.preparePolicy HostBackend noSecrets None None None [] EnvironmentSpec.defaults)
+        (Sandboxes.preparePolicy HostBackend noSecrets None None None (fun _ -> Ok []) EnvironmentSpec.defaults)
         (Sandboxes.summaryFor HostBackend EnvironmentSpec.defaults)
         (sprintf "env-%s" name)
 

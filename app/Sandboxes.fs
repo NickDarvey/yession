@@ -74,23 +74,6 @@ let private listFrom (raw: string option) : string list =
     |> Array.filter (fun entry -> entry <> "")
     |> List.ofArray
 
-let egressFor (backend: SandboxBackend) (ambient: Map<string, string>) : string list option =
-    match backend with
-    | HostBackend
-    | DockerBackend -> None
-    | SrtBackend -> ambient |> Map.tryFind "YESSION_SESSION_WORK_NET" |> listFrom |> Some
-
-/// The operator's extra read paths. It ADDS to the platform list rather than replacing it
-/// — unlike `YESSION_SESSION_*_NET`, which replaces — because a deployment naming its
-/// unusual toolchain still needs libc.
-///
-/// Beside `egressFor` rather than down in `SrtSandbox`, which is the only backend that
-/// enforces it: these are two readings of the same operator statement — what this session's
-/// sandboxes may reach, and what they may see — and `policyFor` reconciles a spec against
-/// both. A rule with a sibling somewhere else is a rule one of whose halves has moved.
-let configuredReadPaths (ambient: Map<string, string>) : string list =
-    ambient |> Map.tryFind "YESSION_SESSION_READ" |> listFrom
-
 /// Where a session's workspaces and its checkouts sit under its data directory.
 ///
 /// One module because these are not independent facts. A terminal starts in the
@@ -180,59 +163,6 @@ let reposVisibleAt (backend: SandboxBackend) (hostReposDir: string) : string =
     | HostBackend
     | SrtBackend -> hostReposDir
     | DockerBackend -> "/repos"
-
-/// Reconcile what a sandbox asks to reach with what the operator allows.
-///
-/// The operator's list is a CEILING and this is the only place the two authors meet: the
-/// backend and the env are the operator's, the spec is partly the repo's, and a repo that
-/// could widen its own reach would make the ceiling a suggestion. So narrowing lands at
-/// once, and an ask that exceeds it is REFUSED, naming what exceeded — never granted, and
-/// never quietly dropped either. AGENTS.md's stance on a capability a run cannot host, said
-/// about configuration: asking for it requires it.
-///
-/// `None` is a ceiling that does not exist — the unconfining backends, which restrict this
-/// axis not at all. An ask is satisfied there by everything, so it is granted whole; a
-/// sandbox that may reach the internet may reach `registry.npmjs.org`.
-///
-/// The refusal is already the sentence a human would approve, which is what a real
-/// classifier turns this into later: nothing here has to be undone for that.
-let underCeiling (what: string) (knob: string) (ceiling: string list option) (asked: string list) : Result<string list, string> =
-    match ceiling, asked with
-    | _, [] -> Ok []
-    | None, asked -> Ok asked
-    | Some ceiling, asked ->
-        match asked |> List.filter (fun one -> not (List.contains one ceiling)) with
-        | [] -> Ok asked
-        | over ->
-            Error (
-                sprintf
-                    "this sandbox asks to %s %s, which this session does not allow — %s is %s"
-                    what
-                    (String.concat ", " over)
-                    knob
-                    (match ceiling with
-                     | [] -> "empty"
-                     | allowed -> String.concat ", " allowed))
-
-/// A leading `~/` made absolute against the session's own home.
-///
-/// A repo's file cannot write an absolute read path and should not try: the home directory
-/// belongs to whoever runs the session, and `~/.nuget/packages` is the only way a file can
-/// name the cache its build actually uses. Without this the tilde reached bubblewrap
-/// verbatim — a path that exists nowhere, so the bind was silently useless and a build
-/// re-downloaded everything inside a sandbox that had been told it could read the cache.
-///
-/// Applied to the CEILING as well as the ask, because a comparison between the two is only
-/// meaningful once both are in one form — and an operator writing `~` means by it exactly
-/// what a repo does.
-let expandHome (ambient: Map<string, string>) (path: string) : string =
-    match ambient |> Map.tryFind "HOME" with
-    | Some home when path = "~" -> home
-    | Some home when path.StartsWith "~/" -> home.TrimEnd '/' + path.Substring 1
-    // No HOME is a session whose own environment could not say where home is. The tilde
-    // stays as written rather than resolved against something invented — and the ceiling
-    // comparison still holds, because both sides are unexpanded together.
-    | _ -> path
 
 /// What an operator's granted leaves add to a policy.
 ///
@@ -347,57 +277,40 @@ let policyFor
         | HostBackend
         | SrtBackend -> mergeEnv (mergeEnv inherited fromGrants) resolved
         | DockerBackend -> mergeEnv fromGrants resolved
-    let ceiling = egressFor backend ambient
-    // The read ceiling is the operator's extra paths. The PLATFORM list is allowed back
-    // regardless (`runtimeReadPaths`), so this bounds only what a sandbox can ask to add.
-    let readCeiling =
-        match backend with
-        | HostBackend
-        | DockerBackend -> None
-        | SrtBackend -> Some (configuredReadPaths ambient)
-    match underCeiling "reach" "YESSION_SESSION_WORK_NET" ceiling spec.Net with
-    | Error e -> Error e
-    | Ok net ->
-        match
-            underCeiling
-                "read"
-                "YESSION_SESSION_READ"
-                (readCeiling |> Option.map (List.map (expandHome ambient)))
-                (spec.Read |> List.map (expandHome ambient))
-        with
-        | Error e -> Error e
-        | Ok read ->
-            Ok
-                { ReadPaths = read @ grantedReads
-                  WritePaths =
-                    (workspace |> Option.toList)
-                    @ (reposDir |> Option.toList)
-                    @ (home |> Option.toList)
-                    @ grantedWrites
-                  // A sandbox that named nothing gets the operator's list, which is what
-                  // every sandbox has had until now.
-                  // The operator's grants are ADDED, never bounded: a ceiling is what a
-                  // repo may ask for, and this is what the operator already gave.
-                  AllowedDomains =
-                    ceiling
-                    |> Option.map (fun allowed ->
-                        (match net with [] -> allowed | asked -> asked) @ grantedDomains |> List.distinct)
-                  Env = env
-                  // What the sandbox ASKED to start in, and the workspace only when it asked
-                  // for nothing. `toRequest` has already resolved this against the checkout
-                  // as the sandbox SEES it (`ReposService.CheckoutOf` is backend-aware), so
-                  // there is nothing left here to resolve — only to honour.
-                  //
-                  // It used to be `workspace` outright, which made a repo's `workdir` a key
-                  // the decoder validated strictly and the policy then dropped: a file that
-                  // read as applied and was not. The tell was that `ensure` reported the
-                  // difference correctly — "it starts in repos/foo/bar" — about a sandbox
-                  // whose `pwd` was the workspace, so the product asserted something untrue.
-                  //
-                  // The write root stays the workspace either way (`WritePaths` above): a
-                  // sandbox that starts in its checkout still writes where it always did.
-                  WorkingDirectory = spec.WorkingDirectory |> Option.orElse workspace
-                  Filesystem = Confined }
+    Ok
+        { ReadPaths = grantedReads
+          WritePaths =
+            (workspace |> Option.toList)
+            @ (reposDir |> Option.toList)
+            @ (home |> Option.toList)
+            @ grantedWrites
+          // Every domain a sandbox may reach is one an operator named in a resource
+          // this sandbox holds. There is no ceiling to reconcile against any more,
+          // because there is nothing left to reconcile: a repo selects names, and a
+          // name it was not offered does not resolve.
+          //
+          // `None` is the unconfining backends, which restrict this axis not at all.
+          AllowedDomains =
+            match backend with
+            | HostBackend
+            | DockerBackend -> None
+            | SrtBackend -> Some (List.distinct grantedDomains)
+          Env = env
+          // What the sandbox ASKED to start in, and the workspace only when it asked
+          // for nothing. `toRequest` has already resolved this against the checkout
+          // as the sandbox SEES it (`ReposService.CheckoutOf` is backend-aware), so
+          // there is nothing left here to resolve — only to honour.
+          //
+          // It used to be `workspace` outright, which made a repo's `workdir` a key
+          // the decoder validated strictly and the policy then dropped: a file that
+          // read as applied and was not. The tell was that `ensure` reported the
+          // difference correctly — "it starts in repos/foo/bar" — about a sandbox
+          // whose `pwd` was the workspace, so the product asserted something untrue.
+          //
+          // The write root stays the workspace either way (`WritePaths` above): a
+          // sandbox that starts in its checkout still writes where it always did.
+          WorkingDirectory = spec.WorkingDirectory |> Option.orElse workspace
+          Filesystem = Confined }
 
 /// A one-line description of the backend + spec for the start-requested event.
 let summaryFor (backend: SandboxBackend) (spec: EnvironmentSpec) : string =
@@ -420,14 +333,22 @@ let preparePolicy
     (workspace: string option)
     (reposDir: string option)
     (home: string option)
-    (granted: ResourceLeaf list)
+    // What this sandbox holds, resolved: the operator's `default` together with whatever the
+    // sandbox itself selected. ONE function rather than a list and a resolver, because the
+    // two are the same question asked about different names, and a caller that could resolve
+    // one without the other would be a caller that could forget half.
+    (grantsFor: ResourceName list -> Result<ResourceLeaf list, string>)
     (spec: EnvironmentSpec)
     : unit -> Async<Result<SandboxPolicy, string>> =
     fun () ->
         async {
             match! resolveVariables resolveSecret spec.EnvironmentVariables with
             | Error e -> return Error e
-            | Ok resolved -> return policyFor backend (ambientEnv ()) resolved workspace reposDir home granted spec
+            | Ok resolved ->
+                match grantsFor spec.Uses with
+                | Error e -> return Error e
+                | Ok granted ->
+                    return policyFor backend (ambientEnv ()) resolved workspace reposDir home granted spec
         }
 
 // --- A buffered one-shot: settle once, deliver to every (even late) awaiter --------------
@@ -1113,7 +1034,15 @@ module SrtSandbox =
             installed
             |> List.choose installPrefix
             |> List.filter (fun prefix -> Some prefix <> home)
-        platformPaths @ prefixes @ configuredReadPaths ambient |> List.distinct
+        // The platform's own paths and the runtimes this process names, and nothing else.
+        //
+        // `YESSION_SESSION_READ` used to be folded in here as well as being the ceiling a
+        // repo's `read:` was held to — one variable that was a bound AND an unconditional
+        // grant, so a repo's ask could never obtain anything and an operator could not offer
+        // a path without forcing it on everything. What an operator hands out is now a
+        // resource somebody selects, and it arrives through the policy like every other
+        // grant rather than through this list.
+        platformPaths @ prefixes |> List.distinct
 
     /// Quote one argument for the shell srt wraps the command in. srt's Linux and macOS
     /// wrappers take a COMMAND STRING (the profile ends in `<shell> -c <wrapped>`), so an

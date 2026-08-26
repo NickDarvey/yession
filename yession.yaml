@@ -1,43 +1,46 @@
-# yession.yaml — what a session working on Yession needs to reach.
+# yession.yaml — what a session working on Yession selects.
 #
 # The TOOLCHAIN is devenv.nix's business (Node 24, .NET 10, bubblewrap, uv, Chromium). This
-# file says only what the sandbox AROUND it may touch, which is the whole division of labour:
-# a repo already declares how to build itself, and repeating that here would be the second
-# live copy AGENTS.md forbids.
+# file says only which of the HOST's resources the sandbox around it holds, which is the whole
+# division of labour: a repo already declares how to build itself, and repeating that here
+# would be the second live copy AGENTS.md forbids.
+#
+# Nothing below names a path or a hostname, and it cannot. Those belong to whoever runs the
+# machine — this file works the same on a laptop, in CI, and on a host that keeps its caches
+# somewhere else entirely — so it names what an operator declared and the operator owns what
+# those names come to. `resources` on the settings surface says what they are here.
+#
+# A name this host does not declare is refused, and the refusal lists what there is instead.
+# That refusal IS the old ceiling: a repo cannot exceed what an operator offered because it
+# can only name what an operator offered.
 #
 # No `container:` block, and that is not an omission — this repo's work sandbox is srt
 # (YESSION_SESSION_WORK_BACKEND defaults to it), which runs no container. The keys that would
 # go in one have nowhere to be written, which is what the schema is for.
-version: 1
+version: 2
 
 sandboxes:
-  dev: &yession
+  dev:
     workdir: .
 
-    net:
-      - cache.nixos.org              # the binary cache every `devenv shell` pulls from.
-                                     # NOT yession.cachix.org: CI logs show NARs coming from
-                                     # it, but that substituter is injected by cachix-action
-                                     # and this repo configures none, so a session would only
-                                     # be asking for reach it never uses.
-      - channels.nixos.org           # nixpkgs tarballs (.claude/setup.sh)
-      - nixos.org
-      - github.com                   # git, and the flake / devenv inputs
-      - codeload.github.com
-      - objects.githubusercontent.com
-      - api.nuget.org                # `restore`
-      - registry.npmjs.org           # the off-Nix `npm install --ignore-scripts` fallback
-
-    read:
-      - /nix                         # the store the whole toolchain lives in
-      - ~/.nuget/packages
-      - ~/.cache/nix
-      - ~/.cache/devenv
-      - ~/.local/share/devenv
+    # nix     — the store and the daemon socket. The daemon is what makes adding a dependency
+    #           work at all: it substitutes and builds, so this sandbox needs no egress of its
+    #           own to get one. `pin` is separate because MOVING a pin is a client fetch.
+    # dotnet  — the NuGet cache `restore` writes.
+    # node    — the npm cache the off-Nix fallback writes.
+    # ca      — a trust store. Without one every HTTPS fetch fails AFTER egress said yes,
+    #           which is the least legible failure this sandbox can have.
+    uses: [ nix, pin, dotnet, node, ca ]
 
     forward: [ github ]              # so `git push` works from a terminal
 
   # `verify` is minutes long. A second sandbox on the same configuration means the gate runs
   # beside interactive work instead of holding the shell — which is the example Plan 15 stage 2
   # gave for why named sandboxes exist at all.
-  gate: *yession
+  #
+  # It does NOT select `pin`. A release gate that can silently move a dependency pin is not a
+  # gate: it builds what is pinned, and moving the pin is somebody's deliberate act elsewhere.
+  gate:
+    workdir: .
+    uses: [ nix, dotnet, node, ca ]
+    forward: [ github ]
