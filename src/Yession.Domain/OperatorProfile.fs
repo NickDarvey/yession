@@ -19,6 +19,23 @@ open Yession.Domain
 // operator can therefore split a leaf into three, or gather three into one name, without any
 // repo's file changing. That is what makes the vocabulary genuinely theirs.
 
+/// A whole profile: the vocabulary, and what every sandbox on this host gets without asking.
+///
+/// `Default` is the operator granting something to everything, which is a DIFFERENT act from
+/// declaring that it exists — and keeping the two apart is the correction this model is built
+/// around. `YESSION_SESSION_READ` was both at once, so an operator could not offer a path
+/// without forcing it on every sandbox, and a repo asking for one could never obtain it.
+///
+/// Here `resources` is the menu and `default` is one selection from it. A name declared and
+/// not defaulted is available and not granted — the state the old variable could not express.
+type ProfileFile =
+    { Resources : ResourceProfile
+      Default : ResourceName list }
+
+module ProfileFile =
+
+    let empty : ProfileFile = { Resources = ResourceProfile.empty; Default = [] }
+
 module OperatorProfile =
 
     /// The name the file has, wherever an operator keeps it.
@@ -30,7 +47,7 @@ module OperatorProfile =
     [<Literal>]
     let Version = 1
 
-    let private fileKeys = [ "version"; "resources" ]
+    let private fileKeys = [ "version"; "resources"; "default" ]
     let private leafKeys = [ "mount"; "socket"; "endpoint"; "env"; "exec"; "sensitive" ]
     let private mountKeys = [ "from"; "at"; "mode" ]
 
@@ -148,7 +165,19 @@ module OperatorProfile =
                     | Error e -> Decode.fail e))
             |> List.fold (fun acc one -> Decode.map2 (fun taken x -> taken @ [ x ]) acc one) (Decode.succeed []))
 
-    let decoder : Decoder<ResourceProfile> =
+    let private names : Decoder<ResourceName list> =
+        stringList
+        |> Decode.andThen (fun raws ->
+            raws
+            |> List.fold
+                (fun acc raw ->
+                    acc |> Result.bind (fun taken -> ResourceName.create raw |> Result.map (fun n -> taken @ [ n ])))
+                (Ok [])
+            |> function
+                | Ok names -> Decode.succeed names
+                | Error e -> Decode.fail e)
+
+    let decoder : Decoder<ProfileFile> =
         noUnknownKeys fileKeys
         |> Decode.andThen (fun () ->
             Decode.field "version" Decode.int
@@ -156,14 +185,24 @@ module OperatorProfile =
                 failIf
                     (version <> Version)
                     (sprintf "this build speaks %s version %d, not %d" FileName Version version)
-                    (Decode.field "resources" resources)))
-        |> Decode.andThen (fun declared ->
+                    (Decode.map2
+                        (fun declared selection -> declared, selection)
+                        (Decode.field "resources" resources)
+                        (Decode.optional "default" names |> Decode.map (Option.defaultValue [])))))
+        |> Decode.andThen (fun (declared, selection) ->
             // The algebra's own refusals — a cycle, a dangling name, a name declared twice, a
             // resource that contradicts itself — reached through `load` and NOT re-checked
             // here. A decoder with its own copy of those rules is the redundant spare that
             // rots: two mechanisms for one requirement, free to disagree.
             match ResourceProfile.load declared with
-            | Ok profile -> Decode.succeed profile
-            | Error e -> Decode.fail e)
+            | Error e -> Decode.fail e
+            | Ok profile ->
+                // The default must RESOLVE, and it is checked here rather than at the first
+                // sandbox that would have used it. An operator granting something to every
+                // sandbox on the host should learn it does not hold while they are looking at
+                // the file, not when somebody else's session refuses to start.
+                match ResourceProfile.resolve profile selection with
+                | Error e -> Decode.fail (sprintf "the default selection cannot be granted: %s" e)
+                | Ok _ -> Decode.succeed { Resources = profile; Default = selection })
 
-    let parse (json: string) : Result<ResourceProfile, string> = Decode.fromString decoder json
+    let parse (json: string) : Result<ProfileFile, string> = Decode.fromString decoder json

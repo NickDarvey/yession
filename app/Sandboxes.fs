@@ -234,6 +234,57 @@ let expandHome (ambient: Map<string, string>) (path: string) : string =
     // comparison still holds, because both sides are unexpanded together.
     | _ -> path
 
+/// What an operator's granted leaves add to a policy.
+///
+/// The operator's side of the ceiling/grant split. `YESSION_SESSION_READ` was a bound AND an
+/// unconditional grant, so an operator could not offer a path without forcing it on
+/// everything, and a repo asking for one could never obtain it. A resource in the profile's
+/// `default` is the grant half, said once, by name, and visible in the `resources` query.
+///
+/// Not a second policy engine: this only maps primitives onto fields a policy already has.
+/// What may be granted at all was settled by the algebra before anything reached here.
+let grantsFrom
+    (leaves: ResourceLeaf list)
+    : Result<string list * string list * string list * Map<string, string>, string> =
+    let rec fold reads writes domains env remaining =
+        match remaining with
+        | [] -> Ok (List.rev reads, List.rev writes, List.rev domains, env)
+        | leaf :: rest ->
+            match leaf with
+            | Mount mount ->
+                match mount.Mode with
+                | ResourceMountMode.Read -> fold (mount.From :: reads) writes domains env rest
+                | ResourceMountMode.Write -> fold reads (mount.From :: writes) domains env rest
+                // Refused rather than quietly treated as writable. Neither srt nor docker has
+                // a union mount here, so an overlay would be a resource that READS as "the
+                // host's copy stays untouched" and BEHAVES as "write straight into it" —
+                // which is the failure a schema exists to prevent, not a rough edge. It
+                // becomes available when a backend can actually do it.
+                | ResourceMountMode.Overlay ->
+                    Error (
+                        sprintf
+                            "this host cannot overlay %s yet — no backend here has a union mount, so declare it read or write rather than let it silently become one"
+                            mount.From)
+            // A socket is read AND written by anything that talks to it. Granting one half
+            // grants nothing.
+            | Socket path -> fold (path :: reads) (path :: writes) domains env rest
+            | Endpoint host -> fold reads writes (host :: domains) env rest
+            | Variable (name, value) -> fold reads writes domains (Map.add name value env) rest
+            | Exec path -> fold (path :: reads) writes domains env rest
+    fold [] [] [] Map.empty leaves
+
+/// The directories of granted executables, for PATH.
+let grantedPath (leaves: ResourceLeaf list) : string list =
+    leaves
+    |> List.choose (function
+        | Exec path ->
+            match path.LastIndexOf '/' with
+            | index when index > 0 -> Some (path.Substring (0, index))
+            | _ -> None
+        | _ -> None)
+    |> List.distinct
+
+
 let policyFor
     (backend: SandboxBackend)
     (ambient: Map<string, string>)
@@ -251,11 +302,21 @@ let policyFor
     // what `$HOME` says inside it. `None` only where the backend supplies its own — docker,
     // whose image has a home of its own that this process did not create.
     (home: string option)
+    // What the OPERATOR grants every sandbox on this host without it asking — the profile's
+    // `default`, already flattened. Distinct from the ceiling below: this is given, that is
+    // merely allowed, and `YESSION_SESSION_READ` being both at once is the defect this pair
+    // exists to separate.
+    (granted: ResourceLeaf list)
     // What this sandbox ASKED to reach. Reconciled here, and only here, because here is
     // where the operator's ambient environment and the (partly repo-authored) spec are both
     // in hand — a caller that reconciled first would be a second copy of the ceiling rule.
     (spec: EnvironmentSpec)
     : Result<SandboxPolicy, string> =
+    // First, because everything below reads it: what the operator already gave.
+    match grantsFrom granted with
+    | Error e -> Error e
+    | Ok (grantedReads, grantedWrites, grantedDomains, grantedEnv) ->
+
     let env =
         // The sandbox's own home replaces the inherited one IN THE BASELINE, so a spec that
         // names `HOME` still wins — the rule that the spec beats the baseline is one rule,
@@ -269,10 +330,23 @@ let policyFor
             match home with
             | Some home -> Map.add "HOME" home (hostBaseline ambient)
             | None -> hostBaseline ambient
+        // Granted variables sit UNDER the spec's, like the rest of the baseline: an operator
+        // says what a sandbox starts with, and a repo may still say otherwise about its own.
+        // Granted executables join PATH in FRONT of the inherited one, so a toolchain the
+        // operator named is the one that answers.
+        let fromGrants =
+            match grantedPath granted with
+            | [] -> grantedEnv
+            | directories ->
+                let existing = inherited |> Map.tryFind "PATH" |> Option.defaultValue ""
+                let combined =
+                    if existing = "" then String.concat ":" directories
+                    else String.concat ":" directories + ":" + existing
+                Map.add "PATH" combined grantedEnv
         match backend with
         | HostBackend
-        | SrtBackend -> mergeEnv inherited resolved
-        | DockerBackend -> resolved
+        | SrtBackend -> mergeEnv (mergeEnv inherited fromGrants) resolved
+        | DockerBackend -> mergeEnv fromGrants resolved
     let ceiling = egressFor backend ambient
     // The read ceiling is the operator's extra paths. The PLATFORM list is allowed back
     // regardless (`runtimeReadPaths`), so this bounds only what a sandbox can ask to add.
@@ -294,13 +368,20 @@ let policyFor
         | Error e -> Error e
         | Ok read ->
             Ok
-                { ReadPaths = read
+                { ReadPaths = read @ grantedReads
                   WritePaths =
-                    (workspace |> Option.toList) @ (reposDir |> Option.toList) @ (home |> Option.toList)
+                    (workspace |> Option.toList)
+                    @ (reposDir |> Option.toList)
+                    @ (home |> Option.toList)
+                    @ grantedWrites
                   // A sandbox that named nothing gets the operator's list, which is what
                   // every sandbox has had until now.
+                  // The operator's grants are ADDED, never bounded: a ceiling is what a
+                  // repo may ask for, and this is what the operator already gave.
                   AllowedDomains =
-                    ceiling |> Option.map (fun allowed -> match net with [] -> allowed | asked -> asked)
+                    ceiling
+                    |> Option.map (fun allowed ->
+                        (match net with [] -> allowed | asked -> asked) @ grantedDomains |> List.distinct)
                   Env = env
                   // What the sandbox ASKED to start in, and the workspace only when it asked
                   // for nothing. `toRequest` has already resolved this against the checkout
@@ -339,13 +420,14 @@ let preparePolicy
     (workspace: string option)
     (reposDir: string option)
     (home: string option)
+    (granted: ResourceLeaf list)
     (spec: EnvironmentSpec)
     : unit -> Async<Result<SandboxPolicy, string>> =
     fun () ->
         async {
             match! resolveVariables resolveSecret spec.EnvironmentVariables with
             | Error e -> return Error e
-            | Ok resolved -> return policyFor backend (ambientEnv ()) resolved workspace reposDir home spec
+            | Ok resolved -> return policyFor backend (ambientEnv ()) resolved workspace reposDir home granted spec
         }
 
 // --- A buffered one-shot: settle once, deliver to every (even late) awaiter --------------

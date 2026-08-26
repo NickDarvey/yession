@@ -76,6 +76,21 @@ let private resourceProfile =
         | Ok profile -> profile
         | Error e -> failwith e
 
+/// What the operator grants every work sandbox without it asking: the profile's `default`,
+/// flattened once at boot.
+///
+/// Resolved here rather than per sandbox because it cannot differ between them — it is the
+/// host's statement, not this sandbox's — and because a failure to resolve it is a failure of
+/// the profile, which the decoder already refused. `[]` is a deployment that declared no
+/// default, which is ordinary: the vocabulary exists and nothing is handed out.
+let private grantedLeaves : ResourceLeaf list =
+    match resourceProfile with
+    | None -> []
+    | Some file ->
+        match ResourceProfile.resolve file.Resources file.Default with
+        | Ok closure -> ResourceClosure.leaves closure |> Set.toList
+        | Error e -> failwith e
+
 // The AgentSandbox backend (`YESSION_SESSION_AGENT_BACKEND`): where the agent CLI process
 // runs — host or srt, never docker (a work-sandbox-only backend). Both tiers go through
 // the SDK's `spawnClaudeCodeProcess` seam with an allowlisted env and a scratch HOME
@@ -207,7 +222,14 @@ let private makeSandboxes
                     | DockerBackend -> None
                 home |> Option.iter Fs.ensureDir
                 let prepare =
-                    Sandboxes.preparePolicy workBackend resolveSecretRef workspace sharedRepos home workSpec
+                    Sandboxes.preparePolicy
+                        workBackend
+                        resolveSecretRef
+                        workspace
+                        sharedRepos
+                        home
+                        grantedLeaves
+                        workSpec
                 Ok (
                     SessionEnvironment.create
                         log
