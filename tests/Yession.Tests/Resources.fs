@@ -77,7 +77,7 @@ let rec private buildDag (size: int) (i: int) (acc: (ResourceName * ResourceDecl
                     gen {
                         let! leaf = genLeafFor 0
                         let! sensitivity = genSensitivity
-                        return ResourceDecl.Leaf (leaf, sensitivity)
+                        return ResourceDecl.Leaf ([ leaf ], sensitivity)
                     }
                 else
                     gen {
@@ -85,7 +85,7 @@ let rec private buildDag (size: int) (i: int) (acc: (ResourceName * ResourceDecl
                         if shape = 0 then
                             let! leaf = genLeafFor i
                             let! sensitivity = genSensitivity
-                            return ResourceDecl.Leaf (leaf, sensitivity)
+                            return ResourceDecl.Leaf ([ leaf ], sensitivity)
                         else
                             let! picks = Gen.list (Range.linear 1 3) (Gen.int32 (Range.linear 0 (i - 1)))
                             return ResourceDecl.Composition (picks |> List.map (fun p -> pool.[p]))
@@ -140,7 +140,7 @@ let private genSelection (declarations: (ResourceName * ResourceDecl) list) : Ge
 let rec private expand (declarations: (ResourceName * ResourceDecl) list) (name: ResourceName) =
     match declarations |> List.tryFind (fun (declared, _) -> declared = name) with
     | None -> []
-    | Some (_, ResourceDecl.Leaf (leaf, sensitivity)) -> [ leaf, sensitivity ]
+    | Some (_, ResourceDecl.Leaf (leaves, sensitivity)) -> leaves |> List.map (fun leaf -> leaf, sensitivity)
     | Some (_, ResourceDecl.Composition children) -> children |> List.collect (expand declarations)
 
 let private check (name: string) (body: unit -> Property<unit>) = testCase name <| fun () -> Property.check (body ())
@@ -148,9 +148,9 @@ let private check (name: string) (body: unit -> Property<unit>) = testCase name 
 /// Two resources that each load and cannot hold together: one target, two modes.
 let private alternatives =
     let at = { From = "/nix"; At = "/nix"; Mode = ResourceMountMode.Read }
-    [ ResourceName.create "nix-ro" |> expect, ResourceDecl.Leaf (Mount at, Sensitivity.Ordinary)
+    [ ResourceName.create "nix-ro" |> expect, ResourceDecl.Leaf ([ Mount at ], Sensitivity.Ordinary)
       ResourceName.create "nix-rw" |> expect,
-        ResourceDecl.Leaf (Mount { at with Mode = ResourceMountMode.Write }, Sensitivity.Ordinary) ]
+        ResourceDecl.Leaf ([ Mount { at with Mode = ResourceMountMode.Write } ], Sensitivity.Ordinary) ]
 
 let tests =
     testList "the resources algebra" [
@@ -323,8 +323,8 @@ let tests =
                 let b = ResourceName.create "cc-gcc" |> expect
                 let both = ResourceName.create "cc-both" |> expect
                 let clashing =
-                    [ a, ResourceDecl.Leaf (Variable ("CC", "clang"), Sensitivity.Ordinary)
-                      b, ResourceDecl.Leaf (Variable ("CC", "gcc"), Sensitivity.Ordinary)
+                    [ a, ResourceDecl.Leaf ([ Variable ("CC", "clang") ], Sensitivity.Ordinary)
+                      b, ResourceDecl.Leaf ([ Variable ("CC", "gcc") ], Sensitivity.Ordinary)
                       both, ResourceDecl.Composition [ a; b ] ]
                 match ResourceProfile.load (declarations @ clashing) with
                 | Ok _ -> failwith "expected a refusal"
@@ -366,7 +366,7 @@ let tests =
                 let danger = ResourceName.create "open-web" |> expect
                 let wrappers = [ 0 .. depth - 1 ] |> List.map (fun i -> ResourceName.create (sprintf "friendly%d" i) |> expect)
                 let declarations =
-                    [ danger, ResourceDecl.Leaf (Endpoint "anywhere.example.com", Sensitivity.Sensitive) ]
+                    [ danger, ResourceDecl.Leaf ([ Endpoint "anywhere.example.com" ], Sensitivity.Sensitive) ]
                     @ (wrappers
                        |> List.mapi (fun i name ->
                             let inner = if i = 0 then danger else wrappers.[i - 1]
@@ -384,14 +384,111 @@ let tests =
                 let quiet = ResourceName.create "quiet" |> expect
                 let both = ResourceName.create "both" |> expect
                 let declarations =
-                    [ loud, ResourceDecl.Leaf (shared, Sensitivity.Sensitive)
-                      quiet, ResourceDecl.Leaf (shared, Sensitivity.Ordinary)
+                    [ loud, ResourceDecl.Leaf ([ shared ], Sensitivity.Sensitive)
+                      quiet, ResourceDecl.Leaf ([ shared ], Sensitivity.Ordinary)
                       both, ResourceDecl.Composition [ quiet; loud ] ]
                 let profile = ResourceProfile.load declarations |> expect
                 Expect.isTrue
                     (ResourceProfile.resolve profile [ both ] |> expect |> ResourceClosure.isSensitive)
                     "the louder mark wins, whichever order the routes are folded in"
             }
+
+        // --- the syntax an operator writes ---------------------------------------------------
+        //
+        // From JSON literals, like `Config.fs`'s own cases: what a YAML front end does with a
+        // document is its business, and pinning the SCHEMA does not need one.
+
+        testCase "an object is a leaf and an array is a composition" <| fun () ->
+            let profile =
+                OperatorProfile.parse """
+                    { "version": 1,
+                      "resources": { "store": { "mount": { "from": "/nix" } },
+                                     "daemon": { "socket": "/nix/var/nix/daemon-socket" },
+                                     "nix": [ "store", "daemon" ] } }"""
+                |> expect
+            let nix = ResourceName.create "nix" |> expect
+            let closure = ResourceProfile.resolve profile [ nix ] |> expect
+            Expect.equal
+                (ResourceClosure.leaves closure)
+                (Set.ofList
+                    [ Mount { From = "/nix"; At = "/nix"; Mode = ResourceMountMode.Read }
+                      Socket "/nix/var/nix/daemon-socket" ])
+                "the composition flattens to both leaves, and neither is a name any more"
+
+        // A cache is a mount and an endpoint and the variable pointing a tool at it. Three
+        // names an operator then composes would be three names for one idea, none of which
+        // means anything alone.
+        testCase "one leaf may declare several primitives" <| fun () ->
+            let profile =
+                OperatorProfile.parse """
+                    { "version": 1,
+                      "resources": { "npm": { "mount": { "from": "/h/.npm", "mode": "overlay" },
+                                              "endpoint": "registry.npmjs.org",
+                                              "env": { "npm_config_cache": "/h/.npm" } } } }"""
+                |> expect
+            let closure = ResourceProfile.resolve profile [ ResourceName.create "npm" |> expect ] |> expect
+            Expect.equal (Set.count (ResourceClosure.leaves closure)) 3 "a mount, an endpoint and a variable"
+
+        testCase "at defaults to from, so a path that means the same on both sides is written once" <| fun () ->
+            let profile =
+                OperatorProfile.parse """{ "version": 1, "resources": { "s": { "mount": { "from": "/nix" } } } }"""
+                |> expect
+            match ResourceProfile.resolve profile [ ResourceName.create "s" |> expect ] |> expect |> ResourceClosure.leaves |> Set.toList with
+            | [ Mount mount ] -> Expect.equal mount.At "/nix" "the target is the source unless it is named"
+            | other -> failwithf "expected one mount, got %A" other
+
+        testCase "a resource that grants nothing is refused, not decoded as an empty one" <| fun () ->
+            // A name that reads as configuration and is none — the same failure an unknown
+            // key would be, arriving by another route.
+            Expect.isError
+                (OperatorProfile.parse """{ "version": 1, "resources": { "hollow": { } } }""")
+                "an empty leaf is not a resource"
+
+        testCase "an unknown key inside a resource is refused, not skipped" <| fun () ->
+            // The resource grants something REAL as well, so the only thing that can refuse
+            // this is the unknown key. The first draft named only the typo, which left the
+            // "grants nothing" refusal catching it and this case green with the key check
+            // deleted — a test passing for a reason that is not its name.
+            Expect.isError
+                (OperatorProfile.parse """
+                    { "version": 1, "resources": { "s": { "mount": { "from": "/nix" }, "mounts": "/x" } } }""")
+                "a misspelled key fails the file even when the rest of the resource is fine"
+
+        testCase "a mount mode this build does not know is refused, naming the three there are" <| fun () ->
+            match OperatorProfile.parse """{ "version": 1, "resources": { "s": { "mount": { "from": "/n", "mode": "rw" } } } }""" with
+            | Ok _ -> failwith "expected a refusal"
+            | Error e -> Expect.isTrue (e.Contains "overlay") (sprintf "the refusal lists the modes, said: %s" e)
+
+        testCase "a version this build does not speak is refused" <| fun () ->
+            Expect.isError (OperatorProfile.parse """{ "version": 2, "resources": {} }""") "not read as a lossy version 1"
+
+        // The algebra's refusals arrive through `load` rather than being re-implemented here.
+        // A decoder with its own copy of them is a second mechanism free to disagree with the
+        // first — so this asserts they REACH the operator, not that they exist twice.
+        testCase "a cycle in a profile is refused by the algebra, through the decoder" <| fun () ->
+            match OperatorProfile.parse """{ "version": 1, "resources": { "a": [ "b" ], "b": [ "a" ] } }""" with
+            | Ok _ -> failwith "expected a refusal"
+            | Error e -> Expect.isTrue (e.Contains "->") (sprintf "and the refusal carries the path, said: %s" e)
+
+        testCase "a composition naming an undeclared resource is refused, through the decoder" <| fun () ->
+            Expect.isError
+                (OperatorProfile.parse """{ "version": 1, "resources": { "a": [ "nope" ] } }""")
+                "the algebra's dangling-name refusal reaches the operator"
+
+        // Sensitivity is declarable on a leaf and NOT on a composition — there is no key for
+        // it there — so the only way a composite becomes sensitive is by reaching one.
+        testCase "a composition cannot declare itself ordinary around a sensitive leaf" <| fun () ->
+            let profile =
+                OperatorProfile.parse """
+                    { "version": 1,
+                      "resources": { "danger": { "endpoint": "anywhere", "sensitive": true },
+                                     "friendly": [ "danger" ] } }"""
+                |> expect
+            Expect.isTrue
+                (ResourceProfile.resolve profile [ ResourceName.create "friendly" |> expect ]
+                 |> expect
+                 |> ResourceClosure.isSensitive)
+                "the friendly name is sensitive because of what it reaches"
 
         // --- what a person is shown --------------------------------------------------------
 
