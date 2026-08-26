@@ -36,6 +36,7 @@
     <!-- Reading `yession.yaml` off a checkout (Plan 27). After Repos.fs, which owns where a
          checkout is, and Fs.fs. The only part of the file's story that cannot run in the
          cheap tier: the decoder itself is pure and lives in the domain. -->
+    <Compile Include="OperatorResources.fs" />
     <Compile Include="RepoConfig.fs" />
     <!-- The session's named WorkSandboxes (Plan 15, stage 2). After Queries (it declares
          one) and Sandboxes (it composes them); before Host, which wires terminals to it. -->

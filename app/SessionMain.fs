@@ -62,6 +62,20 @@ let private workBackend =
     | Ok backend -> backend
     | Error e -> failwith e
 
+// The operator's vocabulary (`YESSION_SESSION_RESOURCES`), read once at boot.
+//
+// Fail-closed like the backend above, and for a stronger reason: a profile is a statement
+// about what this host will let a sandbox touch, and a deployment that started with a
+// half-read one would be offering something nobody wrote. No profile at all is ordinary and
+// declares nothing; a profile that cannot be read stops the session.
+let private resourceProfile =
+    match Interop.envOr "YESSION_SESSION_RESOURCES" "" with
+    | "" -> None
+    | path ->
+        match OperatorResources.read path with
+        | Ok profile -> profile
+        | Error e -> failwith e
+
 // The AgentSandbox backend (`YESSION_SESSION_AGENT_BACKEND`): where the agent CLI process
 // runs — host or srt, never docker (a work-sandbox-only backend). Both tiers go through
 // the SDK's `spawnClaudeCodeProcess` seam with an allowlisted env and a scratch HOME
@@ -667,6 +681,7 @@ Async.StartImmediate (
                   // Reads the cell rather than a value: the registry is the Host's, and
                   // the Host has not been started yet. By the time anyone reads it, it is.
                   WorkSandboxes.query (fun () -> workSandboxes)
+                  OperatorResources.query (fun () -> resourceProfile)
                   ShellProfile.query (fun () -> terminals)
                   RepoSandboxes.query (fun () -> repoSandboxes)
                   McpClient.query (fun () -> mcpServers) ]
