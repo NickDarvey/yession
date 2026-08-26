@@ -108,6 +108,22 @@ module SessionLayout =
         if sandbox = SandboxRef.defaultRef then sprintf "%s/workspace" dataDir
         else sprintf "%s/sandboxes/%s/workspace" dataDir (SandboxRef.slug sandbox)
 
+    /// A work sandbox's own HOME, beside its workspace.
+    ///
+    /// Every toolchain keeps state under `$HOME` — dotnet a CLI home, npm a cache, uv and
+    /// cargo their own — and a sandbox that inherits the operator's cannot write a byte of
+    /// it. That is worse than having none: a tool with no HOME falls back, a tool with a
+    /// HOME it cannot touch fails. dotnet reports it as "The user's home directory could not
+    /// be determined."
+    ///
+    /// Not a new idea here — `agentHome` below has given the agent CLI exactly this since
+    /// Plan 08, for exactly this reason. This is the same arrangement for the sandboxes a
+    /// person's commands run in, and it is `workspaceFor`'s shape so the two cannot drift:
+    /// `default` keeps the session's own directory, a named one gets its own.
+    let homeFor (dataDir: string) (sandbox: SandboxRef) : string =
+        if sandbox = SandboxRef.defaultRef then sprintf "%s/home" dataDir
+        else sprintf "%s/sandboxes/%s/home" dataDir (SandboxRef.slug sandbox)
+
     /// The session's repos directory, INSIDE the workspace a terminal opens in. One
     /// directory for the whole session — the git verbs clone into it, every work sandbox
     /// reads and builds it — so a NAMED sandbox reaches it at this same absolute path,
@@ -231,15 +247,31 @@ let policyFor
     // checkout. The docker backend carries it as a bind mount on the spec instead
     // (`SessionMain`), so it is None there.
     (reposDir: string option)
+    // This sandbox's own HOME (`SessionLayout.homeFor`), which it may write and which is
+    // what `$HOME` says inside it. `None` only where the backend supplies its own — docker,
+    // whose image has a home of its own that this process did not create.
+    (home: string option)
     // What this sandbox ASKED to reach. Reconciled here, and only here, because here is
     // where the operator's ambient environment and the (partly repo-authored) spec are both
     // in hand — a caller that reconciled first would be a second copy of the ceiling rule.
     (spec: EnvironmentSpec)
     : Result<SandboxPolicy, string> =
     let env =
+        // The sandbox's own home replaces the inherited one IN THE BASELINE, so a spec that
+        // names `HOME` still wins — the rule that the spec beats the baseline is one rule,
+        // and carving `HOME` out of it would make it two.
+        //
+        // What this displaces is the Session Process's own `HOME`, which is the operator's:
+        // a directory the sandbox is denied. A tool given no home falls back; a tool given
+        // one it cannot touch fails, which is the shape dotnet reports as "The user's home
+        // directory could not be determined."
+        let inherited =
+            match home with
+            | Some home -> Map.add "HOME" home (hostBaseline ambient)
+            | None -> hostBaseline ambient
         match backend with
         | HostBackend
-        | SrtBackend -> mergeEnv (hostBaseline ambient) resolved
+        | SrtBackend -> mergeEnv inherited resolved
         | DockerBackend -> resolved
     let ceiling = egressFor backend ambient
     // The read ceiling is the operator's extra paths. The PLATFORM list is allowed back
@@ -263,7 +295,8 @@ let policyFor
         | Ok read ->
             Ok
                 { ReadPaths = read
-                  WritePaths = (workspace |> Option.toList) @ (reposDir |> Option.toList)
+                  WritePaths =
+                    (workspace |> Option.toList) @ (reposDir |> Option.toList) @ (home |> Option.toList)
                   // A sandbox that named nothing gets the operator's list, which is what
                   // every sandbox has had until now.
                   AllowedDomains =
@@ -305,13 +338,14 @@ let preparePolicy
     (resolveSecret: SecretName -> Async<Result<string, string>>)
     (workspace: string option)
     (reposDir: string option)
+    (home: string option)
     (spec: EnvironmentSpec)
     : unit -> Async<Result<SandboxPolicy, string>> =
     fun () ->
         async {
             match! resolveVariables resolveSecret spec.EnvironmentVariables with
             | Error e -> return Error e
-            | Ok resolved -> return policyFor backend (ambientEnv ()) resolved workspace reposDir spec
+            | Ok resolved -> return policyFor backend (ambientEnv ()) resolved workspace reposDir home spec
         }
 
 // --- A buffered one-shot: settle once, deliver to every (even late) awaiter --------------
