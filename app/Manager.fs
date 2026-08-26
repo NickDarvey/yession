@@ -82,6 +82,7 @@ let createFull
                                         None
                                         None
                                         None
+                                        []
                                         spec
                                 Ok (
                                     SessionEnvironment.create

@@ -409,7 +409,7 @@ let tests =
                                      "nix": [ "store", "daemon" ] } }"""
                 |> expect
             let nix = ResourceName.create "nix" |> expect
-            let closure = ResourceProfile.resolve profile [ nix ] |> expect
+            let closure = ResourceProfile.resolve profile.Resources [ nix ] |> expect
             Expect.equal
                 (ResourceClosure.leaves closure)
                 (Set.ofList
@@ -428,14 +428,14 @@ let tests =
                                               "endpoint": "registry.npmjs.org",
                                               "env": { "npm_config_cache": "/h/.npm" } } } }"""
                 |> expect
-            let closure = ResourceProfile.resolve profile [ ResourceName.create "npm" |> expect ] |> expect
+            let closure = ResourceProfile.resolve profile.Resources [ ResourceName.create "npm" |> expect ] |> expect
             Expect.equal (Set.count (ResourceClosure.leaves closure)) 3 "a mount, an endpoint and a variable"
 
         testCase "at defaults to from, so a path that means the same on both sides is written once" <| fun () ->
             let profile =
                 OperatorProfile.parse """{ "version": 1, "resources": { "s": { "mount": { "from": "/nix" } } } }"""
                 |> expect
-            match ResourceProfile.resolve profile [ ResourceName.create "s" |> expect ] |> expect |> ResourceClosure.leaves |> Set.toList with
+            match ResourceProfile.resolve profile.Resources [ ResourceName.create "s" |> expect ] |> expect |> ResourceClosure.leaves |> Set.toList with
             | [ Mount mount ] -> Expect.equal mount.At "/nix" "the target is the source unless it is named"
             | other -> failwithf "expected one mount, got %A" other
 
@@ -487,7 +487,7 @@ let tests =
                                      "friendly": [ "danger" ] } }"""
                 |> expect
             Expect.isTrue
-                (ResourceProfile.resolve profile [ ResourceName.create "friendly" |> expect ]
+                (ResourceProfile.resolve profile.Resources [ ResourceName.create "friendly" |> expect ]
                  |> expect
                  |> ResourceClosure.isSensitive)
                 "the friendly name is sensitive because of what it reaches"

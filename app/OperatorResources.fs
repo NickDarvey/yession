@@ -46,7 +46,7 @@ let private parseOptions : obj = jsNative
 /// with NO profile is ordinary and declares nothing, while a profile that cannot be read is
 /// an operator's mistake and must be said out loud. Folding the second into the first is how
 /// a host silently stops offering everything the day somebody mistypes a key.
-let read (path: string) : Result<ResourceProfile option, string> =
+let read (path: string) : Result<ProfileFile option, string> =
     if not (Fs.exists path) then Ok None
     else
         let saying (reason: string) = sprintf "%s: %s" path reason
@@ -74,7 +74,8 @@ let private queryDef : QueryDef =
         Rows
             [ QueryColumn.create "resource" "resource"
               QueryColumn.create "grants" "grants"
-              QueryColumn.create "sensitive" "sensitive" ] }
+              QueryColumn.create "sensitive" "sensitive"
+              QueryColumn.create "default" "granted to every sandbox" ] }
 
 /// The declared names and what each one comes to.
 ///
@@ -82,7 +83,8 @@ let private queryDef : QueryDef =
 /// for "what does this host allow at all" should not have to know which of their own names
 /// are which. `ResourceClosure.describe` is the same rendering an approval prompt will use,
 /// so what is shown here and what is shown there cannot drift into two answers.
-let rows (profile: ResourceProfile) : (string * QueryCell) list list =
+let rows (file: ProfileFile) : (string * QueryCell) list list =
+    let profile = file.Resources
     ResourceProfile.declared profile
     |> Set.toList
     |> List.map (fun name ->
@@ -97,12 +99,15 @@ let rows (profile: ResourceProfile) : (string * QueryCell) list list =
             | Error reason -> reason, CellAbsent
         [ "resource", CellText (ResourceName.value name)
           "grants", CellText (fst described)
-          "sensitive", snd described ])
+          "sensitive", snd described
+          // Whether every sandbox on this host gets it without asking. Declared and not
+          // granted is a real state, and one an operator cannot see any other way.
+          "default", (if List.contains name file.Default then CellText "yes" else CellAbsent) ])
 
 /// Register it. Takes a thunk rather than a value for the reason the other registrations do:
 /// what a session holds is settled during composition, and a value read here would be the
 /// one that existed before the composition finished.
-let query (profile: unit -> ResourceProfile option) : Queries.QueryRegistration =
+let query (profile: unit -> ProfileFile option) : Queries.QueryRegistration =
     { Def = queryDef
       Read =
         fun () ->
@@ -110,6 +115,6 @@ let query (profile: unit -> ResourceProfile option) : Queries.QueryRegistration 
                 return
                     Ok (RowsOf (
                         match profile () with
-                        | Some profile -> rows profile
+                        | Some file -> rows file
                         | None -> []))
             } }
