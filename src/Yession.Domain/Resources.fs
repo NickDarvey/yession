@@ -76,7 +76,13 @@ type ResourceLeaf =
 /// not a test that could only prove it compiles.
 [<RequireQualifiedAccess>]
 type ResourceDecl =
-    | Leaf of leaf: ResourceLeaf * sensitivity: Sensitivity
+    /// Primitives declared directly. A LIST, because the things that make one resource work
+    /// are usually several — a cache is a mount and an endpoint and the variable that points
+    /// a tool at it — and splitting those into three names an operator then has to compose
+    /// would be three names for one idea, none of which means anything alone.
+    ///
+    /// Composition is for combining resources that DO mean something alone.
+    | Leaf of leaves: ResourceLeaf list * sensitivity: Sensitivity
     | Composition of ResourceName list
 
 /// What two leaves can collide ON. Same target, different leaf, is not a resource.
@@ -179,10 +185,11 @@ module ResourceClosure =
                 left.Grants
         { Grants = grants; Reached = Set.union left.Reached right.Reached }
 
-    let private ofLeaf (name: ResourceName) (leaf: ResourceLeaf) (sensitivity: Sensitivity) : ResourceClosure =
-        { Grants = Map.ofList [ leaf, sensitivity ]; Reached = Set.singleton name }
+    let private ofLeaves (name: ResourceName) (leaves: ResourceLeaf list) (sensitivity: Sensitivity) : ResourceClosure =
+        { Grants = leaves |> List.map (fun leaf -> leaf, sensitivity) |> Map.ofList
+          Reached = Set.singleton name }
 
-    let internal single = ofLeaf
+    let internal single = ofLeaves
 
     /// What a human approves, one line per leaf, sensitive ones marked.
     ///
@@ -267,7 +274,7 @@ module ResourceProfile =
         // have been refused. Total rather than an exception, because a partial function here
         // is a crash in a fold every client runs.
         | None -> ResourceClosure.empty
-        | Some (ResourceDecl.Leaf (leaf, sensitivity)) -> ResourceClosure.single name leaf sensitivity
+        | Some (ResourceDecl.Leaf (leaves, sensitivity)) -> ResourceClosure.single name leaves sensitivity
         | Some (ResourceDecl.Composition children) ->
             children
             |> List.fold

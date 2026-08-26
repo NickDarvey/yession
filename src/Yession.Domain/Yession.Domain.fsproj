@@ -63,6 +63,10 @@
          before the file that uses them is read. Depends on nothing but Identity.fs —
          it knows nothing of sandboxes, backends or toolchains. -->
     <Compile Include="Resources.fs" />
+    <!-- What an OPERATOR writes: the counterpart of Config.fs, and the only place a
+         path or a hostname is named. After Resources.fs, whose algebra it decodes
+         into and whose refusals it reaches through rather than repeating. -->
+    <Compile Include="OperatorProfile.fs" />
     <Compile Include="Config.fs" />
     <!-- The read half of the imperative session API (Plan 15). Depends on nothing but
          System: a query is a declaration, and what it declares about is somebody else's. -->
