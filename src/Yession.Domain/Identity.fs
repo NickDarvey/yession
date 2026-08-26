@@ -409,6 +409,30 @@ module SandboxName =
 
     let value (SandboxName name) = name
 
+/// A name the OPERATOR gave to a resource — one thing a sandbox may be granted, or a name
+/// for several of them together.
+///
+/// The same charset as `SandboxName`, and that is not laziness: a refusal lists names, and
+/// a list is only reproducible across runtimes if it sorts the same under .NET's ordinal
+/// compare and JavaScript's code-unit compare. Lowercase ASCII, digits, `-` and `_` sort
+/// identically under both.
+type ResourceName = private ResourceName of string
+
+module ResourceName =
+
+    let create (raw: string) : Result<ResourceName, string> =
+        let name = (defaultArg (Option.ofObj raw) "").Trim ()
+        let charOk c = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c = '-' || c = '_'
+        let startOk c = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+        if name = "" then Error "a resource name cannot be empty"
+        elif name.Length > 40 then Error (sprintf "'%s' is too long for a resource name (40 characters)" name)
+        elif not (startOk name.[0]) then
+            Error (sprintf "'%s' is not a resource name (it must start with a lowercase letter or digit)" name)
+        elif name |> Seq.forall charOk then Ok (ResourceName name)
+        else Error (sprintf "'%s' is not a resource name (lowercase letters, digits, '-' and '_' only)" name)
+
+    let value (ResourceName name) = name
+
 /// WHO declared a sandbox (Plan 27).
 ///
 /// The session has always had its own — `default`, and whatever the agent starts. A repo

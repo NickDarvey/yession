@@ -57,6 +57,12 @@
          (a declaration is an `EnvironmentSpec` serialization), Identity.fs (it is keyed
          by `SandboxRef`) and Repos.fs, which owns the repo it belongs to. Pure and
          parser-free: it decodes a tree somebody else parsed. -->
+    <!-- The operator's vocabulary, and the algebra that flattens a selection of it.
+         Before Config.fs, which decodes a repo's SELECTION from it: a repo names
+         resources and can never write a host path, so the names have to mean something
+         before the file that uses them is read. Depends on nothing but Identity.fs —
+         it knows nothing of sandboxes, backends or toolchains. -->
+    <Compile Include="Resources.fs" />
     <Compile Include="Config.fs" />
     <!-- The read half of the imperative session API (Plan 15). Depends on nothing but
          System: a query is a declaration, and what it declares about is somebody else's. -->
