@@ -82,7 +82,12 @@ let createFull
                                         None
                                         None
                                         None
-                                        []
+                                        // The in-process Manager composition declares no
+                                        // resources, so a sandbox here can only select
+                                        // nothing — and says so if it tries.
+                                        (fun selection ->
+                                            if List.isEmpty selection then Ok []
+                                            else Error "this composition declares no resources")
                                         spec
                                 Ok (
                                     SessionEnvironment.create

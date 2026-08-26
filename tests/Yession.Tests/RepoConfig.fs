@@ -47,18 +47,18 @@ let private checkout (r: RepoRef) (text: string option) : string =
 // is offside inside the list expression below.
 
 let private devWithNet = """
-version: 1
+version: 2
 sandboxes:
   dev:
     container:
       image: node:24
-    net:
-      - registry.npmjs.org
+    uses:
+      - npm
     forward: [ github ]
 """
 
 let private duplicateName = """
-version: 1
+version: 2
 sandboxes:
   dev:
     container: { image: node:24 }
@@ -67,10 +67,10 @@ sandboxes:
 """
 
 let private anchored = """
-version: 1
+version: 2
 sandboxes:
   dev: &base
-    net: [ registry.npmjs.org ]
+    uses: [ npm ]
   gate: *base
 """
 
@@ -85,7 +85,7 @@ let tests =
             let dev = file.Sandboxes |> Map.find (SandboxName.create "dev" |> expect)
             Expect.equal (dev.Container |> Option.get).Image (Some { Name = "node"; Tag = Some "24" })
                 "the image survived the round trip"
-            Expect.equal dev.Net [ "registry.npmjs.org" ] "so did the egress it asks for"
+            Expect.equal (dev.Uses |> List.map ResourceName.value) [ "npm" ] "so did the resources it selects"
             Expect.equal dev.Forward [ "github" ] "and the credential names"
 
         // Yession's own `yession.yaml`, decoded by the real thing. It is the acceptance test
@@ -100,9 +100,16 @@ let tests =
             let dev = file.Sandboxes |> Map.find (SandboxName.create "dev" |> expect)
             let gate = file.Sandboxes |> Map.find (SandboxName.create "gate" |> expect)
             Expect.equal dev.Container None "this repo's work sandbox is srt, so it declares no container"
-            Expect.isTrue (dev.Net |> List.contains "cache.nixos.org") "it can reach the cache devenv pulls from"
+            Expect.isTrue (dev.Uses |> List.map ResourceName.value |> List.contains "nix") "it selects the host's nix resource"
             Expect.equal dev.Forward [ "github" ] "and forwards the credential `git push` needs"
-            Expect.equal gate.Net dev.Net "the anchor gave the gate the same reach"
+            // The gate deliberately selects LESS: it builds what is pinned and cannot move a
+            // pin, because a release gate that can silently change a dependency is not a gate.
+            Expect.isFalse
+                (gate.Uses |> List.map ResourceName.value |> List.contains "pin")
+                "the gate cannot move a dependency pin"
+            Expect.isTrue
+                (dev.Uses |> List.map ResourceName.value |> List.contains "pin")
+                "and the sandbox a person works in can"
 
         testCase "a repo with no file asks for nothing, and that is not an error" <| fun () ->
             // The ordinary case. Most repos will never carry one.
@@ -113,7 +120,7 @@ let tests =
             // Folding this into the case above is how a repo silently stops being configured
             // the day somebody mistypes a key.
             let r = repo "octo/broken"
-            Expect.isError (RepoConfig.read (checkout r (Some "version: 1\nsandboxes:\n  dev:\n    workdirr: ./app\n")) r)
+            Expect.isError (RepoConfig.read (checkout r (Some "version: 2\nsandboxes:\n  dev:\n    workdirr: ./app\n")) r)
                 "an unknown key fails the file rather than yielding an empty one"
 
         testCase "the refusal names the repo it came from" <| fun () ->
@@ -138,14 +145,14 @@ let tests =
             let dir = checkout r (Some anchored)
             let file = RepoConfig.read dir r |> expect |> Option.get
             let gate = file.Sandboxes |> Map.find (SandboxName.create "gate" |> expect)
-            Expect.equal gate.Net [ "registry.npmjs.org" ] "the alias carried the anchor's value"
+            Expect.equal (gate.Uses |> List.map ResourceName.value) [ "npm" ] "the alias carried the anchor's value"
 
         testCase "a custom tag cannot ask the parser for something the schema never agreed to" <| fun () ->
             // `schema: 'core'` is the whole mitigation, and a test that never exercises a tag
             // would not notice it being dropped.
             let r = repo "octo/hello"
             Expect.isError
-                (RepoConfig.read (checkout r (Some "version: 1\nsandboxes: !!python/object:os.system {}\n")) r)
+                (RepoConfig.read (checkout r (Some "version: 2\nsandboxes: !!python/object:os.system {}\n")) r)
                 "an unknown tag is refused"
 
         testCase "one repo's broken file does not cost the others their configuration" <| fun () ->
@@ -154,8 +161,8 @@ let tests =
             let good, bad = repo "octo/good", repo "octo/bad"
             let dir = mkdtemp nodeFs nodeOs
             for r in [ good; bad ] do mkdirp nodeFs (sprintf "%s/%s" dir (RepoRef.relativePath r))
-            writeFile nodeFs (RepoConfig.pathIn dir good) "version: 1\nsandboxes:\n  dev: {}\n"
-            writeFile nodeFs (RepoConfig.pathIn dir bad) "version: 1\nsandboxes:\n  dev:\n    nope: 1\n"
+            writeFile nodeFs (RepoConfig.pathIn dir good) "version: 2\nsandboxes:\n  dev: {}\n"
+            writeFile nodeFs (RepoConfig.pathIn dir bad) "version: 2\nsandboxes:\n  dev:\n    nope: 1\n"
             let declared, refused = RepoConfig.readAll dir [ good; bad ]
             Expect.equal (Map.count declared) 1 "the good repo's sandbox survived"
             Expect.isTrue
@@ -232,8 +239,8 @@ let foldTests =
                 let one, two = repo "octo/one", repo "octo/two"
                 let dir = mkdtemp nodeFs nodeOs
                 for r in [ one; two ] do mkdirp nodeFs (sprintf "%s/%s" dir (RepoRef.relativePath r))
-                writeFile nodeFs (RepoConfig.pathIn dir one) "version: 1\nsandboxes:\n  dev: {}\n"
-                writeFile nodeFs (RepoConfig.pathIn dir two) "version: 1\nsandboxes:\n  dev: {}\n  gate: {}\n"
+                writeFile nodeFs (RepoConfig.pathIn dir one) "version: 2\nsandboxes:\n  dev: {}\n"
+                writeFile nodeFs (RepoConfig.pathIn dir two) "version: 2\nsandboxes:\n  dev: {}\n  gate: {}\n"
                 let seen = ResizeArray<GatedCall> ()
                 let folded =
                     RepoSandboxes.create
@@ -252,7 +259,7 @@ let foldTests =
         testCaseAsync "each ask is authored by the file that made it" <|
             async {
                 let r = repo "octo/hello"
-                let dir = checkout r (Some "version: 1\nsandboxes:\n  dev: {}\n")
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev: {}\n")
                 let seen = ResizeArray<GatedCall> ()
                 let folded =
                     RepoSandboxes.create dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable) (recordingGate seen) (foldLog ())
@@ -264,7 +271,7 @@ let foldTests =
         testCaseAsync "a triggered fold runs on the authority of whoever triggered it" <|
             async {
                 let r = repo "octo/hello"
-                let dir = checkout r (Some "version: 1\nsandboxes:\n  dev:\n    forward: [ github ]\n")
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev:\n    forward: [ github ]\n")
                 let seen = ResizeArray<GatedCall> ()
                 let folded =
                     RepoSandboxes.create dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable) (recordingGate seen) (foldLog ())
@@ -278,7 +285,7 @@ let foldTests =
         testCaseAsync "a refused declaration is a row saying which, and why" <|
             async {
                 let r = repo "octo/hello"
-                let dir = checkout r (Some "version: 1\nsandboxes:\n  dev: {}\n")
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev: {}\n")
                 let folded =
                     RepoSandboxes.create
                         dir
@@ -298,7 +305,7 @@ let foldTests =
         testCaseAsync "a declaration that became a sandbox is a row with no problem" <|
             async {
                 let r = repo "octo/hello"
-                let dir = checkout r (Some "version: 1\nsandboxes:\n  dev: {}\n")
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev: {}\n")
                 let folded =
                     RepoSandboxes.create
                         dir
@@ -316,7 +323,7 @@ let foldTests =
         testCaseAsync "an unreadable file is a row about the file, not about a sandbox" <|
             async {
                 let r = repo "octo/hello"
-                let dir = checkout r (Some "version: 1\nsandboxes:\n  dev:\n    nope: 1\n")
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev:\n    nope: 1\n")
                 let folded =
                     RepoSandboxes.create
                         dir
@@ -352,7 +359,7 @@ let foldTests =
         testCaseAsync "a refused declaration says so on the timeline, attributed to the file" <|
             async {
                 let r = repo "octo/hello"
-                let dir = checkout r (Some "version: 1\nsandboxes:\n  dev: {}\n")
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev: {}\n")
                 let log = foldLog ()
                 let folded =
                     RepoSandboxes.create
@@ -377,7 +384,7 @@ let foldTests =
         testCaseAsync "the same refusal folded twice is said once" <|
             async {
                 let r = repo "octo/hello"
-                let dir = checkout r (Some "version: 1\nsandboxes:\n  dev: {}\n")
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev: {}\n")
                 let log = foldLog ()
                 let folded =
                     RepoSandboxes.create
@@ -400,7 +407,7 @@ let foldTests =
         testCaseAsync "a refusal that changed is said again" <|
             async {
                 let r = repo "octo/hello"
-                let dir = checkout r (Some "version: 1\nsandboxes:\n  dev: {}\n")
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev: {}\n")
                 let log = foldLog ()
                 let mutable why = "the ceiling is closed"
                 let moving : RunGatedCommand =
@@ -425,7 +432,7 @@ let foldTests =
         testCaseAsync "a declaration that became a sandbox says nothing here" <|
             async {
                 let r = repo "octo/hello"
-                let dir = checkout r (Some "version: 1\nsandboxes:\n  dev: {}\n")
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev: {}\n")
                 let log = foldLog ()
                 let folded =
                     RepoSandboxes.create

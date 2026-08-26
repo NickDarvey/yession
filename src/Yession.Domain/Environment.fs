@@ -111,16 +111,18 @@ module SandboxRuntime =
 type EnvironmentSpec =
     { WorkingDirectory : string option
       EnvironmentVariables : Map<string, EnvironmentVariableRef>
-      /// Egress this sandbox ASKS to reach. `[]` is not "nothing" — it is the sandbox saying
-      /// nothing, and what that means is the operator's answer (`YESSION_SESSION_WORK_NET`).
+      /// The operator's resources this sandbox selects, by name.
       ///
-      /// An ask, never a grant. The operator's list is a ceiling and this may only narrow
-      /// it: a file is authored by whoever can push to the repo, which is not whoever runs
-      /// the host, so a repo that could widen its own reach would make the ceiling a
-      /// suggestion. Reconciled in `Sandboxes`, where the two authors meet.
-      Net : string list
-      /// Extra host paths it asks to read, on the same terms.
-      Read : string list
+      /// NAMES and not the grants they come to, deliberately. A name is what a person wrote,
+      /// what a refusal can quote back, and what `differences` can compare — a flattened
+      /// closure would compare two sandboxes by their consequences and report a difference
+      /// nobody typed. Resolution happens once, where the profile is in hand.
+      ///
+      /// This replaced `Net` and `Read`. Those were a repo naming a hostname and a host path
+      /// directly, bounded by an operator's environment variable that was simultaneously a
+      /// ceiling and an unconditional grant — so a repo's `read:` could never obtain
+      /// anything, and an operator could not offer a path without forcing it on everything.
+      Uses : ResourceName list
       Runtime : SandboxRuntime }
 
 module EnvironmentSpec =
@@ -129,8 +131,7 @@ module EnvironmentSpec =
     let defaults : EnvironmentSpec =
         { WorkingDirectory = None
           EnvironmentVariables = Map.empty
-          Net = []
-          Read = []
+          Uses = []
           Runtime = Confinement }
 
     /// The same, as a container — what the docker backend starts from when nothing asked for
@@ -194,10 +195,11 @@ module SandboxRequest =
                     "it starts in %s, not %s"
                     (where running.Spec.WorkingDirectory)
                     (where wanted.Spec.WorkingDirectory)
-              if running.Spec.Net <> wanted.Spec.Net then
-                sprintf "it reaches %s, not %s" (list running.Spec.Net) (list wanted.Spec.Net)
-              if running.Spec.Read <> wanted.Spec.Read then
-                sprintf "it reads %s, not %s" (list running.Spec.Read) (list wanted.Spec.Read)
+              if running.Spec.Uses <> wanted.Spec.Uses then
+                sprintf
+                    "it uses %s, not %s"
+                    (list (running.Spec.Uses |> List.map ResourceName.value))
+                    (list (wanted.Spec.Uses |> List.map ResourceName.value))
               if running.Spec.EnvironmentVariables <> wanted.Spec.EnvironmentVariables then
                 sprintf
                     "its environment sets %s, not %s"

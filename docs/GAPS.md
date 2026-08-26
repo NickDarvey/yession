@@ -137,10 +137,12 @@ Items are roughly ordered by how much they matter.
     can be anywhere, so the allow-back is a platform list (`SrtTools.Runtime`) plus the
     install prefix of whatever is already running — `process.execPath`, srt's own package
     (its wrapped argv execs a vendored helper from inside the sandbox), and
-    `YESSION_BIN_CLAUDE`, `YESSION_BIN_GIT` — plus `YESSION_SESSION_READ` for a
-    toolchain neither finds. That last one ADDS to the platform list rather than replacing
-    it. A path the list is missing fails loudly and locally: a command cannot find its
-    interpreter.
+    `YESSION_BIN_CLAUDE`, `YESSION_BIN_GIT`. A toolchain none of those finds is now a
+    RESOURCE an operator declares and a sandbox selects, which arrives through the policy
+    rather than through this list — `YESSION_SESSION_READ` used to be folded in here as well
+    as being the ceiling a repo's `read:` was held to, so one variable was a bound and an
+    unconditional grant at once. A path nothing names fails loudly and locally: a command
+    cannot find its interpreter.
     - **The darwin list is unverified.** No job here executes a suite on darwin (pr.yaml's
       macos job builds the package and enters the dev shell), so `linuxRuntimePaths` is
       pinned by the `Srt` tier and `darwinRuntimePaths` is what a Seatbelt profile
@@ -158,7 +160,7 @@ Items are roughly ordered by how much they matter.
     and `YESSION_BIN_CLAUDE`. Unset, the verbs still fall back to PATH so an off-Nix
     install does not regress — and an `npm i -g yession` on macOS is exactly where that
     fallback is wrong, so the git sandbox proves `git --version` before any verb runs one
-    and refuses with a sentence naming `YESSION_BIN_GIT` and `YESSION_SESSION_READ`
+    and refuses with a sentence naming `YESSION_BIN_GIT` and this host's resources profile
     instead of passing the host binary's excuse through.
     - **That probe then refused a git that worked, because it was the one git spawn built
       without the hardened env.** `git --version` ran with an EMPTY env, which is an env no
@@ -168,9 +170,8 @@ Items are roughly ordered by how much they matter.
       home-manager install always does — the probe died `fatal: unable to access …
       (Operation not permitted)`, exit 128, and every repo verb was refused for the
       sandbox's whole lifetime in words blaming the binary and the read scope. Neither was
-      at fault, and taking the sentence's advice (`YESSION_SESSION_READ=$HOME/.config
-      /git`) would have widened the scope to hand back part of the home Plan 24 exists to
-      deny. Every git spawned by the repo verbs is now built by one function that carries
+      at fault, and taking the sentence's advice — declaring `~/.config/git` as a resource
+      and defaulting it — would have handed back part of the home Plan 24 exists to deny. Every git spawned by the repo verbs is now built by one function that carries
       the env, so a probe cannot again gate verbs it does not run as.
     - **Linux cannot reproduce that class of fault, which is why it shipped.** srt denies a
       read on Linux by mounting emptiness over the path, so a denied config reads as ENOENT

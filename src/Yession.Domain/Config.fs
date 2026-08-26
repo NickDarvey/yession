@@ -40,12 +40,19 @@ type SandboxDecl =
       WorkingDirectory : string option
       /// `SecretRef` values name a secret; they never carry one, and the type cannot.
       EnvironmentVariables : Map<string, EnvironmentVariableRef>
-      /// Egress this sandbox may reach. Widening the operator's ceiling is a REQUEST — it
-      /// goes through the gate when the fold authors `start_work_sandbox` — so this is what
-      /// is asked for, never what is granted.
-      Net : string list
-      /// Extra host paths it may read. Same rule.
-      Read : string list
+      /// The operator's resources this sandbox selects, by name.
+      ///
+      /// A repo can never write a host path or a hostname. It does not know this machine's
+      /// layout, and the same file has to work on a laptop, in CI, and on a host that keeps
+      /// its caches somewhere else — so it names what the operator declared, and the
+      /// operator owns what those names come to.
+      ///
+      /// This replaced `net:` and `read:`, which were the opposite arrangement: a repo
+      /// naming a hostname and a host path directly, bounded by an environment variable that
+      /// was a ceiling AND an unconditional grant at once. A repo's `read:` could therefore
+      /// never obtain anything, and an operator could not offer a path without forcing it on
+      /// every sandbox.
+      Uses : ResourceName list
       /// Credential NAMES to forward. Resolved for a human at spawn; a value never appears
       /// in a file, and could not: the type is a name.
       Forward : string list }
@@ -56,8 +63,7 @@ module SandboxDecl =
         { Container = None
           WorkingDirectory = None
           EnvironmentVariables = Map.empty
-          Net = []
-          Read = []
+          Uses = []
           Forward = [] }
 
     /// One declaration, written back as the file would have written it.
@@ -116,8 +122,7 @@ module SandboxDecl =
                 [ if container.IsSome then "container", container.Value
                   if decl.WorkingDirectory.IsSome then "workdir", Encode.string decl.WorkingDirectory.Value
                   if not (Map.isEmpty decl.EnvironmentVariables) then "env", Encode.object env
-                  if not (List.isEmpty decl.Net) then "net", strings decl.Net
-                  if not (List.isEmpty decl.Read) then "read", strings decl.Read
+                  if not (List.isEmpty decl.Uses) then "uses", strings (decl.Uses |> List.map ResourceName.value)
                   if not (List.isEmpty decl.Forward) then "forward", strings decl.Forward ])
 
     /// What a declaration ASKS the session for, given where this repo's checkout is.
@@ -174,8 +179,7 @@ module SandboxDecl =
             { Spec =
                 { WorkingDirectory = workingDirectory
                   EnvironmentVariables = decl.EnvironmentVariables
-                  Net = decl.Net
-                  Read = decl.Read
+                  Uses = decl.Uses
                   Runtime =
                     match decl.Container with
                     | Some container -> Container container
@@ -197,7 +201,7 @@ module ConfigFile =
 
     /// The only version this build speaks.
     [<Literal>]
-    let Version = 1
+    let Version = 2
 
     /// Variables a file may not set, by prefix.
     ///
@@ -231,6 +235,20 @@ module ConfigFile =
                         (if List.length unknown = 1 then "key" else "keys")
                         (String.concat ", " (List.sort unknown))
                         (String.concat ", " known)))
+
+    /// Resource names, refused where they are written rather than at the sandbox that would
+    /// have used them.
+    let private resourceNames : Decoder<ResourceName list> =
+        Decode.oneOf [ Decode.list Decode.string; Decode.string |> Decode.map List.singleton ]
+        |> Decode.andThen (fun raws ->
+            raws
+            |> List.fold
+                (fun acc raw ->
+                    acc |> Result.bind (fun taken -> ResourceName.create raw |> Result.map (fun n -> taken @ [ n ])))
+                (Ok [])
+            |> function
+                | Ok names -> Decode.succeed names
+                | Error e -> Decode.fail e)
 
     let private stringList : Decoder<string list> =
         Decode.oneOf [ Decode.list Decode.string; Decode.string |> Decode.map List.singleton ]
@@ -335,7 +353,7 @@ module ConfigFile =
                   Mounts = get.Optional.Field "volumes" (Decode.list mount) |> Option.defaultValue []
                   Command = get.Optional.Field "cmd" Decode.string }))
 
-    let private sandboxKeys = [ "container"; "workdir"; "env"; "net"; "read"; "forward" ]
+    let private sandboxKeys = [ "container"; "workdir"; "env"; "uses"; "forward" ]
 
     let private sandbox : Decoder<SandboxDecl> =
         noUnknownKeys sandboxKeys
@@ -345,8 +363,7 @@ module ConfigFile =
                   WorkingDirectory = get.Optional.Field "workdir" (inCheckout "workdir")
                   EnvironmentVariables =
                     get.Optional.Field "env" environment |> Option.defaultValue Map.empty
-                  Net = get.Optional.Field "net" stringList |> Option.defaultValue []
-                  Read = get.Optional.Field "read" stringList |> Option.defaultValue []
+                  Uses = get.Optional.Field "uses" resourceNames |> Option.defaultValue []
                   Forward = get.Optional.Field "forward" stringList |> Option.defaultValue [] }))
 
     /// Sandbox names, refusing a clash INSIDE one file.

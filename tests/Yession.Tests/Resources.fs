@@ -492,6 +492,21 @@ let tests =
                  |> ResourceClosure.isSensitive)
                 "the friendly name is sensitive because of what it reaches"
 
+        // The refusal that REPLACED the ceiling. There is no list-versus-list comparison any
+        // more: a repo cannot exceed what an operator offered because it can only name what
+        // an operator offered, and a name it was not offered does not resolve. That is a
+        // stronger arrangement than comparing two lists and hoping the comparison is right.
+        testCase "a repo selecting something this host does not declare is refused, and told what there is" <| fun () ->
+            let profile =
+                OperatorProfile.parse """
+                    { "version": 1, "resources": { "nix": { "mount": { "from": "/nix" } } } }"""
+                |> expect
+            match ResourceProfile.resolve profile.Resources [ ResourceName.create "npm" |> expect ] with
+            | Ok _ -> failwith "expected a refusal"
+            | Error e ->
+                Expect.isTrue (e.Contains "npm") (sprintf "the refusal names what was asked for, said: %s" e)
+                Expect.isTrue (e.Contains "nix") (sprintf "and lists what this host has, said: %s" e)
+
         // --- what the operator is shown ------------------------------------------------------
 
         // The row an operator reads is the CLOSURE, not the line they wrote. A composite whose

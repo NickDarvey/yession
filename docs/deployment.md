@@ -19,7 +19,7 @@ answerable without a table.
 |---|---|---|
 | `YESSION_*` | **you**, the operator. Ordinary configuration. | `YESSION_MANAGER_URL`, `YESSION_IDLE_TIMEOUT` |
 | `YESSION_BIN_*` | you, and it names an executable on this host. | `YESSION_BIN_GIT`, `YESSION_BIN_BWRAP` |
-| `YESSION_SESSION_*` | you, as the CEILING for every session — a repo's own `yession.yaml` may narrow it per sandbox, never widen it. | `YESSION_SESSION_WORK_BACKEND`, `YESSION_SESSION_READ` |
+| `YESSION_SESSION_*` | you, per session. What a sandbox may HOLD is no longer here: it is named in the resources profile (`YESSION_SESSION_RESOURCES`), which a repo selects from and can never exceed. | `YESSION_SESSION_WORK_BACKEND`, `YESSION_SESSION_RESOURCES` |
 | `YESSION_LAUNCH` | **nobody.** The Manager mints it per launch and the session decodes it. | — |
 
 `YESSION_LAUNCH` carries the launch's control secret, which is custody of that session's
@@ -31,6 +31,18 @@ The split matters most for the middle two. Anything under `YESSION_BIN_*` names 
 this host will execute, so it is the operator's alone and always will be. Anything under
 `YESSION_SESSION_*` is a per-session policy that happens, today, to be set once for the whole
 host.
+
+What a sandbox may READ, WRITE and REACH is no longer among them. That is declared in a
+**resources profile** — `YESSION_SESSION_RESOURCES` names the file — where each resource has a
+name, and a repo's `yession.yaml` selects names rather than writing paths and hostnames of its
+own. The two acts an operator performs there are deliberately separate: `resources:` is what
+this host CAN offer, and `default:` is what every sandbox gets without asking. A name declared
+and not defaulted is available and not granted.
+
+That separation is the point. `YESSION_SESSION_READ` used to be both at once — a ceiling a
+repo's `read:` was held to AND an unconditional grant to every sandbox — so an operator could
+not offer a path without forcing it on everything, and a repo asking for one could never
+obtain it.
 
 ---
 
