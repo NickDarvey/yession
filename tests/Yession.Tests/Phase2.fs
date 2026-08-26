@@ -264,7 +264,7 @@ let private sandboxPolicyTests =
             let ambient = Map.ofList [ "YESSION_SESSION_WORK_NET", "api.example.com, cdn.example.com" ]
             let policy asked =
                 Sandboxes.policyFor
-                    SrtBackend ambient Map.empty None None { EnvironmentSpec.defaults with Net = asked }
+                    SrtBackend ambient Map.empty None None None { EnvironmentSpec.defaults with Net = asked }
             Expect.equal
                 ((policy [] |> expect).AllowedDomains)
                 (Some [ "api.example.com"; "cdn.example.com" ])
@@ -278,7 +278,7 @@ let private sandboxPolicyTests =
             let ambient = Map.ofList [ "YESSION_SESSION_WORK_NET", "api.example.com" ]
             match
                 Sandboxes.policyFor
-                    SrtBackend ambient Map.empty None None
+                    SrtBackend ambient Map.empty None None None
                     { EnvironmentSpec.defaults with Net = [ "api.example.com"; "evil.example.com" ] }
                 with
             | Ok _ -> failwith "expected a refusal"
@@ -294,7 +294,7 @@ let private sandboxPolicyTests =
             for backend in [ HostBackend; DockerBackend ] do
                 let policy =
                     Sandboxes.policyFor
-                        backend Map.empty Map.empty None None
+                        backend Map.empty Map.empty None None None
                         { EnvironmentSpec.defaults with Net = [ "anything.example.com" ] }
                 Expect.equal ((policy |> expect).AllowedDomains) None (sprintf "%A stays unrestricted" backend)
 
@@ -305,7 +305,7 @@ let private sandboxPolicyTests =
             let ambient = Map.ofList [ "YESSION_SESSION_READ", "/opt/toolchain" ]
             let policy asked =
                 Sandboxes.policyFor
-                    SrtBackend ambient Map.empty None None { EnvironmentSpec.defaults with Read = asked }
+                    SrtBackend ambient Map.empty None None None { EnvironmentSpec.defaults with Read = asked }
             Expect.equal
                 ((policy [ "/opt/toolchain" ] |> expect).ReadPaths)
                 [ "/opt/toolchain" ]
@@ -327,7 +327,7 @@ let private sandboxPolicyTests =
                 Map.ofList [ "HOME", "/home/dev"; "YESSION_SESSION_READ", "~/.nuget/packages" ]
             let policy asked =
                 Sandboxes.policyFor
-                    SrtBackend ambient Map.empty None None { EnvironmentSpec.defaults with Read = asked }
+                    SrtBackend ambient Map.empty None None None { EnvironmentSpec.defaults with Read = asked }
             Expect.equal
                 ((policy [ "~/.nuget/packages" ] |> expect).ReadPaths)
                 [ "/home/dev/.nuget/packages" ]
@@ -549,15 +549,49 @@ let private sandboxPolicyTests =
             let ambient = Map.ofList [ "PATH", "/usr/bin"; "HOME", "/home/u" ]
             let resolved = Map.ofList [ "HOME", "/workspace-home"; "TOKEN", "t" ]
             let host =
-                Sandboxes.policyFor HostBackend ambient resolved (Some "/ws") (Some "/repos") EnvironmentSpec.defaults
+                Sandboxes.policyFor HostBackend ambient resolved (Some "/ws") (Some "/repos") (Some "/ws/home") EnvironmentSpec.defaults
                 |> expect
             Expect.equal (Map.tryFind "HOME" host.Env) (Some "/workspace-home") "the spec's variable wins"
             Expect.equal (Map.tryFind "PATH" host.Env) (Some "/usr/bin") "the baseline fills the rest"
             Expect.equal host.WorkingDirectory (Some "/ws") "the workspace is the default cwd"
-            Expect.equal host.WritePaths [ "/ws"; "/repos" ] "the repos dir is a write path of its own (Plan 14)"
-            let docker = Sandboxes.policyFor DockerBackend ambient resolved None None EnvironmentSpec.defaults |> expect
+            Expect.isTrue
+                (List.contains "/repos" host.WritePaths)
+                "the repos dir is a write path of its own (Plan 14)"
+            let docker = Sandboxes.policyFor DockerBackend ambient resolved None None None EnvironmentSpec.defaults |> expect
             Expect.equal (Map.tryFind "PATH" docker.Env) None "a docker image supplies its own base env"
             Expect.equal (Map.tryFind "TOKEN" docker.Env) (Some "t") "only the spec's variables inject"
+
+        // A sandbox that inherits a HOME it cannot write is worse off than one with no HOME
+        // at all: a tool with none falls back, a tool with one it cannot touch fails. dotnet
+        // says so as "The user's home directory could not be determined", which names
+        // neither the sandbox nor anything an operator can set.
+        testCase "a sandbox has a home of its own, and may write it" <| fun () ->
+            let policy =
+                Sandboxes.policyFor
+                    SrtBackend
+                    (Map.ofList [ "HOME", "/Users/operator" ])
+                    Map.empty
+                    (Some "/data/s/workspace")
+                    (Some "/data/s/workspace/repos")
+                    (Some "/data/s/home")
+                    EnvironmentSpec.defaults
+                |> expect
+            Expect.equal (Map.tryFind "HOME" policy.Env) (Some "/data/s/home") "not the operator's, which it is denied"
+            Expect.isTrue (List.contains "/data/s/home" policy.WritePaths) "and it may write it, or naming it changed nothing"
+
+        // The layout rule, beside the workspace one it copies: `default` keeps the session's
+        // own directory, a named sandbox gets its own — two sandboxes exist precisely so
+        // that what happens in one does not happen in the other.
+        testCase "each sandbox's home is its own, and the default keeps the session's" <| fun () ->
+            let named = SandboxRef.inScope (RepoRef.create "octo/hello" |> expect) (SandboxName.create "dev" |> expect)
+            Expect.equal
+                (Sandboxes.SessionLayout.homeFor "/data/s" SandboxRef.defaultRef)
+                "/data/s/home"
+                "the session's own"
+            Expect.notEqual
+                (Sandboxes.SessionLayout.homeFor "/data/s" named)
+                (Sandboxes.SessionLayout.homeFor "/data/s" SandboxRef.defaultRef)
+                "and a named sandbox does not share it"
 
         // A repo's `workdir` is validated in two places before it gets here — the decoder
         // refuses an absolute path, `toRequest` clamps it at the checkout — and for a while
@@ -574,6 +608,7 @@ let private sandboxPolicyTests =
                     Map.empty
                     (Some "/data/s/workspace")
                     (Some "/data/s/workspace/repos")
+                    (Some "/data/s/home")
                     declared
                 |> expect
             Expect.equal
@@ -596,12 +631,19 @@ let private sandboxPolicyTests =
                     Map.empty
                     (Some "/data/s/workspace")
                     (Some "/data/s/workspace/repos")
+                    (Some "/data/s/home")
                     declared
                 |> expect
-            Expect.equal
-                policy.WritePaths
-                [ "/data/s/workspace"; "/data/s/workspace/repos" ]
-                "the workspace and the repos dir, exactly as before"
+            // Containment rather than equality: what this pins is that declaring a workdir
+            // does not take a write path AWAY. The list has since gained the sandbox's own
+            // home, and will gain more — an exact match would go red for every addition and
+            // say "your redesign is wrong" when it means "something moved".
+            Expect.isTrue
+                (List.contains "/data/s/workspace" policy.WritePaths)
+                "the workspace is still writable"
+            Expect.isTrue
+                (List.contains "/data/s/workspace/repos" policy.WritePaths)
+                "and so is the repos dir"
 
         // What the change above COSTS, stated so it cannot move without a red test: a
         // relative spawn is resolved against the policy's root, so in a sandbox that
@@ -935,7 +977,7 @@ let private hostEnvironment (log: Yession.SessionProcess.EventLog<SessionEvent>)
     Yession.SessionProcess.SessionEnvironment.create
         log
         createSandbox
-        (Sandboxes.preparePolicy HostBackend noSecrets None None EnvironmentSpec.defaults)
+        (Sandboxes.preparePolicy HostBackend noSecrets None None None EnvironmentSpec.defaults)
         (Sandboxes.summaryFor HostBackend EnvironmentSpec.defaults)
         (sprintf "env-%s" name)
 
@@ -1265,7 +1307,7 @@ let private acceptanceE2eTests =
                 let name = SessionId.value (SessionId.mint ())
                 let spec = { EnvironmentSpec.defaults with Runtime = Container { ContainerSpec.defaults with Image = Some { Name = "alpine"; Tag = Some "3" } } }
                 let createSandbox = Sandboxes.forBackend DockerBackend name spec |> expect
-                match! createSandbox ((Sandboxes.policyFor DockerBackend Map.empty Map.empty None None EnvironmentSpec.defaults |> expect)) with
+                match! createSandbox ((Sandboxes.policyFor DockerBackend Map.empty Map.empty None None None EnvironmentSpec.defaults |> expect)) with
                 | Error reason -> failwithf "docker sandbox failed: %s" reason
                 | Ok sandbox ->
                     let! run, out, _ = runInSandbox sandbox "echo" [ "hello-from-docker" ] Map.empty None

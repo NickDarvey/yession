@@ -184,8 +184,16 @@ let private makeSandboxes
             | Ok createSandbox ->
                 let workspace = workspaceFor sandbox
                 workspace |> Option.iter Fs.ensureDir
+                // Its own HOME, created here beside its workspace. Docker's image brings a
+                // home this process did not make, so only the host-family backends get one.
+                let home =
+                    match workBackend with
+                    | HostBackend
+                    | SrtBackend -> Some (Sandboxes.SessionLayout.homeFor dataDir sandbox)
+                    | DockerBackend -> None
+                home |> Option.iter Fs.ensureDir
                 let prepare =
-                    Sandboxes.preparePolicy workBackend resolveSecretRef workspace sharedRepos workSpec
+                    Sandboxes.preparePolicy workBackend resolveSecretRef workspace sharedRepos home workSpec
                 Ok (
                     SessionEnvironment.create
                         log

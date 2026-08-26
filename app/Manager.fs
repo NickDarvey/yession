@@ -81,6 +81,7 @@ let createFull
                                         (fun secret -> async { return Error (sprintf "no secrets channel for '%s'" (SecretName.value secret)) })
                                         None
                                         None
+                                        None
                                         spec
                                 Ok (
                                     SessionEnvironment.create
