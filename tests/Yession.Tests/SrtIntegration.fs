@@ -23,6 +23,7 @@ open Yession.Tests.Support
 
 let private nodeFs : obj = importAll "node:fs"
 let private nodeOs : obj = importAll "node:os"
+let private nodeNet : obj = importAll "node:net"
 
 [<Emit("$0.mkdtempSync($1.tmpdir() + '/yession-srt-')")>]
 let private mkdtemp (fs: obj) (os: obj) : string = jsNative
@@ -39,8 +40,24 @@ let private hostHome () : string = jsNative
 [<Emit("process.execPath")>]
 let private nodePath () : string = jsNative
 
+[<Emit("process.platform")>]
+let private platform () : string = jsNative
+
 [<Emit("Date.now()")>]
 let private nowMs () : float = jsNative
+
+/// A unix socket with something listening on it, and a thunk that closes it.
+///
+/// A LISTENER, rather than probing an empty path: a refused connect and a denied connect are
+/// both failures, and only a successful one says the grant reached the kernel.
+[<Emit("""(function (net, path) {
+  const server = net.createServer((c) => { c.end('ok') })
+  server.listen(path)
+  return () => { try { server.close() } catch {} }
+})($0, $1)""")>]
+let private listenOnImpl (net: obj) (path: string) : (unit -> unit) = jsNative
+
+let private listenOn (path: string) : (unit -> unit) = listenOnImpl nodeNet path
 
 // --- The sandbox under test ---------------------------------------------------------------
 
@@ -110,6 +127,57 @@ let private driveSpawner
 let tests =
     Tag.needs "Srt integration" [ Tag.Srt ] (fun () ->
         testList "Srt integration" [
+
+            // #335 made a socket its own axis on the policy. This is that fix one level up,
+            // and the same fault wearing a different hat: srt reads the socket allowance from
+            // the config the MANAGER was initialized with, not the one a spawn carries, so a
+            // sandbox that names a socket the FIRST sandbox of the session did not would hold
+            // a grant that exists only in its own config object.
+            //
+            // Deliberately the second sandbox, and deliberately a socket outside the
+            // workspace: inside it, the workspace's own read/write grant would satisfy the
+            // connect and this would pass with the union deleted.
+            // Only where the grant is PATH-SCOPED, which is macOS. On Linux srt filters unix
+            // sockets with seccomp-bpf, which cannot read a socket path out of user-space
+            // memory, so the wrapper takes `allowAllUnixSockets` and ignores the path list
+            // entirely — see docs/GAPS.md. Skipped rather than asserted either way: the
+            // invariant is real and this platform cannot express it, which is what a visible
+            // skip says and a quiet pass does not.
+            (if platform () <> "darwin" then
+                ptestCase "a socket named by a later sandbox is one it can still connect to (macOS only: Linux cannot scope a socket grant to a path)" (fun () -> ())
+             else
+             testCaseAsync "a socket named by a later sandbox is one it can still connect to" (async {
+                let workspace = mkdtemp nodeFs nodeOs
+                // Canonical, because `mkdtemp` hands back `/var/folders/...` on macOS and
+                // `/var` is a symlink — the exact fault #330 refuses for an operator, and it
+                // bites a test that writes a path the same way.
+                let elsewhere = mkdtemp nodeFs nodeOs |> Fs.canonical |> Option.get
+                let socketPath = elsewhere + "/probe.sock"
+                let close = listenOn socketPath
+
+                // First, naming no socket at all — this is what initializes srt's manager.
+                let! _ = startSandbox (policyIn workspace [])
+
+                // Then one that does. The read and write halves are what `grantsFrom`
+                // produces for a `Socket` leaf beside the socket itself, so this is the
+                // policy a resource really becomes.
+                let! second =
+                    startSandbox
+                        { policyIn workspace [] with
+                            ReadPaths = [ workspace; socketPath ]
+                            WritePaths = [ workspace; socketPath ]
+                            Sockets = [ socketPath ] }
+
+                let connect =
+                    sprintf
+                        "%s -e \"const n=require('node:net');const c=n.connect(%s);c.on('connect',()=>{c.end();process.exit(0)});c.on('error',e=>{console.error(e.code);process.exit(1)})\""
+                        (nodePath ())
+                        ("'" + socketPath + "'")
+                let! run, _, err = shell second connect
+                close ()
+                Expect.equal (exitCode run) 0
+                    (sprintf "the second sandbox reached the socket it named, said: %s" err)
+            }))
 
             testCaseAsync "a command runs confined, writes its workspace, and streams its output" (async {
                 let workspace = mkdtemp nodeFs nodeOs
