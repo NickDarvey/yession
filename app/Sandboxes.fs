@@ -146,6 +146,19 @@ module SessionLayout =
         Interop.setEnv "CLAUDE_CODE_TMPDIR" settled
         settled
 
+    /// Where the sandbox's temporary files go, read from the same place srt reads it.
+    ///
+    /// Not a copy of the decision — the decision is `prepareTmpDir` above, which is what puts
+    /// the value there. This asks what it settled on, so the three readers of it (the write
+    /// list, the sandbox's own `TMPDIR`, and the child srt wraps) cannot become three
+    /// answers. They already did once: the policy inherited the MANAGER's `/tmp` as `TMPDIR`,
+    /// srt overrode the child to the session's own, and the two disagreed silently until a
+    /// start-up check asked whether the policy's `TMPDIR` was writable and it was not.
+    ///
+    /// The fallback is srt's own, for a process that never prepared one (a test building a
+    /// policy directly). It is what srt would use in that case, so they still agree.
+    let tmpDir () : string = Interop.envOr "CLAUDE_CODE_TMPDIR" "/tmp/claude"
+
     /// Where a session that predates the layout above left its checkouts: beside the
     /// workspace instead of inside it.
     let legacyReposDir (dataDir: string) : string = sprintf "%s/repos" dataDir
@@ -284,9 +297,15 @@ let policyFor
         // one it cannot touch fails, which is the shape dotnet reports as "The user's home
         // directory could not be determined."
         let inherited =
+            // `TMPDIR` beside `HOME`, and for the same reason: the inherited one is the
+            // MANAGER's, which the sandbox cannot write. srt then overrides the child's to
+            // the session's own, so leaving the manager's here made the policy state one
+            // thing and the child receive another — and a policy that lies about what it
+            // grants is what the start-up checks read.
+            let baseline = Map.add "TMPDIR" (SessionLayout.tmpDir ()) (hostBaseline ambient)
             match home with
-            | Some home -> Map.add "HOME" home (hostBaseline ambient)
-            | None -> hostBaseline ambient
+            | Some home -> Map.add "HOME" home baseline
+            | None -> baseline
         // Granted variables sit UNDER the spec's, like the rest of the baseline: an operator
         // says what a sandbox starts with, and a repo may still say otherwise about its own.
         // Granted executables join PATH in FRONT of the inherited one, so a toolchain the
@@ -964,14 +983,6 @@ type StartFailure =
 /// the network namespace is unshared, so the only route out is srt's filtering proxy.
 module SrtSandbox =
 
-    /// Where srt will redirect the sandbox's `TMPDIR`, read from the same place srt reads
-    /// it. Not a copy of the decision — the decision is `SessionLayout.prepareTmpDir`, which
-    /// is what puts the value here; this asks what it settled on so the write list and the
-    /// child's `TMPDIR` cannot become two answers.
-    ///
-    /// The fallback is srt's own, for a process that never prepared one (a test building a
-    /// policy directly). It is what srt would use in that case, so the two still agree.
-    let tmpDir () = Interop.envOr "CLAUDE_CODE_TMPDIR" "/tmp/claude"
 
     // --- What stays readable once everything else is denied -----------------------------
     //
@@ -1124,7 +1135,7 @@ module SrtSandbox =
         //
         // Derived, so the containment is structural. Two lists that have to agree by
         // inspection are two lists that drift, and this pair already had.
-        let writable = distinct (policy.WritePaths @ [ tmpDir (); "/dev/stdout"; "/dev/stderr"; "/dev/null" ])
+        let writable = distinct (policy.WritePaths @ [ SessionLayout.tmpDir (); "/dev/stdout"; "/dev/stderr"; "/dev/null" ])
         { DenyRead = [ "/" ]
           AllowRead = distinct (policy.ReadPaths @ writable @ tools.Runtime)
           AllowWrite = writable
@@ -1363,7 +1374,7 @@ module SrtSandbox =
             async {
                 try
                     policy.WorkingDirectory |> Option.iter Fs.ensureDir
-                    Fs.ensureDir (tmpDir ())
+                    Fs.ensureDir (SessionLayout.tmpDir ())
                     let config = configFor tools policy
                     let! srt = managerFor config
                     let children = Children.Registry ()

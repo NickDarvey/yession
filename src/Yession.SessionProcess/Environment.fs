@@ -46,6 +46,39 @@ module SessionEnvironment =
           Stop = fun () -> async { return () }
           CurrentRef = fun () -> None }
 
+    /// Run this sandbox's own checks in it, once, before anybody else can reach it.
+    ///
+    /// The policy the sandbox was BUILT from is what gets checked, which is why this
+    /// takes the prepared policy rather than asking the sandbox what it thinks it holds:
+    /// a backend that quietly dropped something would otherwise be asked to grade its own
+    /// work.
+    ///
+    /// A sandbox that cannot run `/bin/sh` at all fails here too, and says so. That is
+    /// not a false alarm — a sandbox that cannot run a shell cannot run a command, which
+    /// is the only thing anybody wants one for.
+    let verify (policy: SandboxPolicy) (sandbox: Sandbox) : Async<Result<unit, string>> =
+        async {
+            match SandboxVerification.plan policy with
+            | [] -> return Ok ()
+            | checks ->
+                let said = System.Text.StringBuilder ()
+                let exec =
+                    { Executable = "/bin/sh"
+                      Arguments = [ "-c"; SandboxVerification.program checks ]
+                      Env = Map.empty
+                      WorkingDirectory = None }
+                match! sandbox.Spawn exec (fun (_, chunk) -> said.Append chunk |> ignore) with
+                | Error reason ->
+                    return Error (sprintf "this sandbox cannot run a command at all: %s" reason)
+                | Ok handle ->
+                    match! handle.Exited with
+                    | SandboxExited 0 -> return Ok ()
+                    | SandboxExited _ ->
+                        return Error (SandboxVerification.explain checks (said.ToString ()))
+                    | SandboxRunFailed reason ->
+                        return Error (sprintf "this sandbox cannot run a command at all: %s" reason)
+        }
+
     let create
         (log: EventLog<SessionEvent>)
         (createSandbox: CreateSandbox)
@@ -64,6 +97,7 @@ module SessionEnvironment =
                 let! _ = log.Append ActorRef.SessionProcess event
                 return ()
             }
+
 
         /// What the log already says became of this environment — a failure reason when the
         /// last thing recorded about it was a start that failed, `None` when it started,
@@ -110,16 +144,41 @@ module SessionEnvironment =
                     // the log already ends with can be left unsaid. The successful sequence
                     // is unchanged — need, start-requested, started, in that order — because
                     // what moved is when they are written, not what they say or their order.
+                    // The policy is carried out of this block beside the sandbox, because
+                    // what gets verified is what the sandbox was BUILT from.
                     let! prepared =
                         async {
                             match! preparePolicy () with
                             | Error reason -> return Error reason
-                            | Ok policy -> return! createSandbox policy
+                            | Ok policy ->
+                                match! createSandbox policy with
+                                | Error reason -> return Error reason
+                                | Ok sandbox -> return Ok (policy, sandbox)
                         }
                     let requested () =
                         append (EnvironmentStartRequested
                                     { EnvironmentId = environmentId
                                       SpecSummary = specSummary })
+                    // Verified BEFORE it is declared started, and here rather than inside
+                    // each backend's `create`: three backends would need three copies of
+                    // this, free to disagree about what a working sandbox is. A failure
+                    // takes the existing refusal path unchanged — `EnvironmentStartFailed`
+                    // carries the sentence, the no-repeat rule above still applies, and
+                    // `RepoSandboxes` already turns it into a refusal a person can read.
+                    let! prepared =
+                        async {
+                            match prepared with
+                            | Error reason -> return Error reason
+                            | Ok (policy, sandbox) ->
+                                match! verify policy sandbox with
+                                | Ok () -> return Ok sandbox
+                                | Error reason ->
+                                    // Disposed rather than left running. A sandbox that
+                                    // failed its own checks is not a sandbox anybody should
+                                    // be able to reach, and `running` is never set for it.
+                                    do! sandbox.Dispose ()
+                                    return Error reason
+                        }
                     match prepared with
                     | Ok sandbox ->
                         running <- Some sandbox
