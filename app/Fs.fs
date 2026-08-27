@@ -73,3 +73,19 @@ let private resolveImpl (path: obj) (target: string) : string = jsNative
 /// so a relative repos directory made every verb say `cannot change to ...: No such file
 /// or directory` about a checkout that was sitting right there.
 let absolute (path: string) : string = resolveImpl nodePath path
+
+[<Emit("$0.realpathSync($1)")>]
+let private realpathSyncImpl (fs: obj) (path: string) : string = jsNative
+
+/// The path the KERNEL will check, with every symlink on the way in resolved.
+///
+/// Two paths that name one file are not interchangeable to a sandbox: srt canonicalises an
+/// allow-list entry, and the OS then denies reading the symlink NODES an access traverses —
+/// macOS's escape hatch is `file-read-metadata` on DIRECTORIES, and `/etc`, `/tmp` and
+/// `/run` are all symlinks there. So a grant written one way is a denial used the other, and
+/// the difference is invisible until something fails far downstream.
+///
+/// `None` when the path does not resolve — a directory a tool has yet to create is ordinary,
+/// and refusing it here would be a different rule wearing this one's name.
+let canonical (path: string) : string option =
+    try Some (realpathSyncImpl fs path) with _ -> None

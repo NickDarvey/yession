@@ -36,6 +36,9 @@ let private readFile (fs: obj) (path: string) : string = jsNative
 [<Emit("$0.writeFileSync($1, $2)")>]
 let private writeFile (fs: obj) (path: string) (text: string) : unit = jsNative
 
+[<Emit("$0.symlinkSync($1, $2)")>]
+let private symlink (fs: obj) (target: string) (path: string) : unit = jsNative
+
 let private repo (raw: string) = RepoRef.create raw |> expect
 
 /// A repos directory holding one checkout, with `text` as its `yession.yaml` when given.
@@ -78,6 +81,66 @@ sandboxes:
 
 let tests =
     testList "yession.yaml on disk (Plan 27)" [
+
+        // --- the operator's profile, as a FILE ----------------------------------------------
+
+        // Measured before it was written. A `ca` resource declared as `/etc/ssl/cert.pem` on
+        // this macOS host produced a sandbox that reads `/private/etc/ssl/cert.pem` and is
+        // refused `/etc/ssl/cert.pem` — the path the operator wrote, and the path the approval
+        // prompt showed a person before they consented to it. srt canonicalises the allow-list
+        // entry; the OS then denies the symlink node the access has to traverse.
+        //
+        // A grant that reads as held and behaves as denied says nothing at any point, so this
+        // is refused where an operator is still looking at their own file.
+        testCase "a resource reached through a symlink is refused, naming the path to write" <| fun () ->
+            let dir = mkdtemp nodeFs nodeOs |> Fs.canonical |> Option.get
+            mkdirp nodeFs (dir + "/real")
+            writeFile nodeFs (dir + "/real/thing") "x"
+            symlink nodeFs (dir + "/real") (dir + "/link")
+            let file = dir + "/resources.yaml"
+            writeFile nodeFs file (
+                sprintf "version: 1\nresources:\n  thing:\n    mount:\n      - { from: %s/link/thing, mode: read }\n" dir)
+            match OperatorResources.read file with
+            | Ok _ -> failwith "expected a refusal"
+            | Error e ->
+                Expect.isTrue (e.Contains (dir + "/link/thing"))
+                    (sprintf "the refusal quotes what was written, said: %s" e)
+                Expect.isTrue (e.Contains (dir + "/real/thing"))
+                    (sprintf "and the form to write instead, said: %s" e)
+
+        // The other half, and the reason the rule is not just "refuse anything unusual": the
+        // canonical form of the SAME file loads. Without this, a rule that refused everything
+        // would be green above and useless.
+        testCase "the canonical form of that same path loads" <| fun () ->
+            let dir = mkdtemp nodeFs nodeOs |> Fs.canonical |> Option.get
+            mkdirp nodeFs (dir + "/real")
+            writeFile nodeFs (dir + "/real/thing") "x"
+            symlink nodeFs (dir + "/real") (dir + "/link")
+            let file = dir + "/resources.yaml"
+            writeFile nodeFs file (
+                sprintf "version: 1\nresources:\n  thing:\n    mount:\n      - { from: %s/real/thing, mode: read }\n" dir)
+            match OperatorResources.read file with
+            | Ok (Some profile) ->
+                Expect.equal
+                    (Sandboxes.ResourceProfile.declared profile.Resources
+                     |> Set.toList
+                     |> List.map ResourceName.value)
+                    [ "thing" ]
+                    "it declares what it said it declares"
+            | other -> failwithf "expected a profile, got %A" other
+
+        // A path nothing has created yet is left alone. A cache directory a tool makes on
+        // first use is ordinary, and refusing it here would be an existence check wearing the
+        // symlink rule's name — an operator would read "reached through a symlink" about a
+        // path that is not.
+        testCase "a path that does not exist yet is not refused" <| fun () ->
+            let dir = mkdtemp nodeFs nodeOs |> Fs.canonical |> Option.get
+            let file = dir + "/resources.yaml"
+            writeFile nodeFs file (
+                sprintf "version: 1\nresources:\n  cache:\n    mount:\n      - { from: %s/not-yet, mode: write }\n" dir)
+            match OperatorResources.read file with
+            | Ok (Some _) -> ()
+            | other -> failwithf "expected a profile, got %A" other
 
         testCase "a real file decodes to what the repo asked for" <| fun () ->
             // The end-to-end claim: YAML on disk reaches the domain intact.

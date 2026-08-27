@@ -40,6 +40,49 @@ let private toJson (doc: obj) : string = jsNative
 [<Emit("{ schema: 'core', uniqueKeys: true, maxAliasCount: 100 }")>]
 let private parseOptions : obj = jsNative
 
+/// Every path a resource names must be the one the KERNEL will check.
+///
+/// A grant is not addressed to the operator, it is addressed to a sandbox — and the two do
+/// not read a path the same way. srt canonicalises an allow-list entry, and the OS then
+/// denies reading the symlink NODES that an access traverses on the way in: macOS's escape
+/// hatch is `file-read-metadata` on DIRECTORIES only, and `/etc`, `/tmp` and `/run` are all
+/// symlinks there. So `/etc/ssl/cert.pem` is granted at `/private/etc/ssl/cert.pem` and
+/// denied at the path it was written as. Measured, not deduced: a sandbox holding exactly
+/// that resource reads the canonical path and is refused the written one.
+///
+/// Refused rather than rewritten, and that is the whole decision. Silently canonicalising
+/// would fix the mount and leave the `SSL_CERT_FILE` beside it pointing at the denied path —
+/// a resource half-corrected is worse than one that failed, because the failure moves to
+/// whatever reads the variable. The operator writes both lines, so the refusal has to reach
+/// the operator, naming the form to write.
+///
+/// A path that does not resolve is left alone. A cache directory a tool has yet to create is
+/// ordinary, and refusing it here would be an existence check wearing this rule's name.
+let private canonicalPaths (file: ProfileFile) : Result<ProfileFile, string> =
+    let offence (kind: string) (written: string) (real: string) =
+        sprintf
+            "%s %s is reached through a symlink — a sandbox is granted %s and denied %s, so write %s here (and in anything that points at it)"
+            kind written real written real
+    ResourceProfile.ceiling file.Resources
+    |> Set.toList
+    |> List.tryPick (fun leaf ->
+        let check kind written =
+            match Fs.canonical written with
+            | Some real when real <> written -> Some (offence kind written real)
+            | _ -> None
+        match leaf with
+        // Endpoints and variables name no path, and a mount's `At` is where the sandbox
+        // SEES it — on a backend that cannot remount, `At` follows `From` and checking it
+        // twice would say the same thing twice.
+        | Mount mount -> check "the mount" mount.From
+        | Socket path -> check "the socket" path
+        | Exec path -> check "the executable" path
+        | Endpoint _
+        | Variable _ -> None)
+    |> function
+        | Some reason -> Error reason
+        | None -> Ok file
+
 /// Read and decode the operator's profile.
 ///
 /// Three outcomes, and the middle one is why this is not a `Result` of two: a deployment
@@ -53,7 +96,11 @@ let read (path: string) : Result<ProfileFile option, string> =
         try
             let doc = parseDocument (Fs.readText path) parseOptions
             match complaints doc with
-            | [||] -> OperatorProfile.parse (toJson doc) |> Result.map Some |> Result.mapError saying
+            | [||] ->
+                OperatorProfile.parse (toJson doc)
+                |> Result.bind canonicalPaths
+                |> Result.map Some
+                |> Result.mapError saying
             | problems -> Error (saying problems.[0])
         with e -> Error (saying e.Message)
 
