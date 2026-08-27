@@ -191,6 +191,29 @@ Items are roughly ordered by how much they matter.
       path that its read-deny tmpfs wiped — so both are readable AND writable from inside a
       sandbox whose policy names neither. The home they resolve against is the Session
       Process's `os.homedir()`, so the fix is that process's own `HOME`, not the policy.
+    - **A symlink INSIDE a granted directory is still denied, and that is the limit of
+      declaring canonical paths.** Since #330 a resource must name the path the kernel will
+      check, which fixes a grant written as `/etc/ssl/cert.pem`. It does nothing for a
+      symlink one level further in: on a nix-darwin host `/private/etc/nix/nix.conf` is a
+      link to `/etc/static/nix/nix.conf`, whose own path starts at the denied `/etc` node, so
+      granting `/private/etc/nix` yields a directory the sandbox can list and a file it
+      cannot read (`Operation not permitted`). Resolving every link under every granted tree
+      is not a policy this can compute — the honest fix is srt allowing the symlink nodes on
+      the way to a granted path, which is the same one-line widening `/usr/bin/git` ->
+      `/var/select` wanted above.
+    - **A granted executable that cannot RUN is invisible to the start-up checks.** Measured:
+      the `nix` an operator would name on nix-darwin (`/run/current-system/sw/bin/nix`,
+      canonically `…-nix-2.34.6+1/bin/nix`) aborts under Seatbelt — `Abort trap: 6`, exit 134
+      — on every subcommand including `--version`, while the Lix binary from this repo's own
+      dev shell runs fine in the same sandbox. Since an `Exec` leaf joins PATH in front,
+      naming that binary makes it the one that answers, and a working nix becomes a broken
+      one by being declared.
+
+      The checks (#333) do not catch it and cannot as written: an exec leaf lands in the
+      read paths, so it gets `test -r`, which passes. `test -x` would be no better — it
+      consults the file mode, which is the same lie `test -w` tells. The only probe that
+      answers "can this run" is running it, and there is no invocation that is safe for an
+      arbitrary binary. Recorded rather than guessed at.
 - **The agent CLI runs through the `spawnClaudeCodeProcess` seam with a policy env**
   (AgentSandbox): allowlisted baseline + proxy passthrough, a per-session scratch HOME
   (`<data>/agent-home` — `~/.claude` state lives and dies with the session), exactly one
