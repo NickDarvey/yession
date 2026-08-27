@@ -80,6 +80,14 @@ type SandboxPolicy =
       WritePaths : string list
       /// Domains the sandbox may reach. None = unrestricted; Some [] = no egress.
       AllowedDomains : string list option
+      /// Unix sockets the sandbox may CONNECT to.
+      ///
+      /// Its own axis, because connecting to a socket is its own permission and the file
+      /// halves do not add up to it: macOS needs `network-outbound` on the path, which is
+      /// granted separately from reading or writing the node. Measured — a sandbox holding
+      /// the nix daemon socket readable and writable, with `test -S` passing, still could
+      /// not talk to it: "could not connect to any lix socket".
+      Sockets : string list
       Env : Map<string, string>
       /// Default working directory for spawns that do not name one.
       WorkingDirectory : string option

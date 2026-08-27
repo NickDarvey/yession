@@ -302,6 +302,34 @@ let private sandboxPolicyTests =
                   "/usr" ]
                 "read paths, everything writable (a workspace that cannot be read is no workspace), and the host runtime"
 
+        // Connecting to a unix socket is its own permission, and the file halves do not add
+        // up to it. Measured: a sandbox holding the nix daemon socket readable and writable,
+        // with `test -S` passing, was refused by nix with "could not connect to any lix
+        // socket" — because srt's `network.allowUnixSockets` named nothing.
+        testCase "a granted socket reaches srt as a socket, not as two file grants" <| fun () ->
+            let leaves = [ Socket "/nix/var/nix/daemon-socket/socket" ]
+            match Sandboxes.grantsFrom leaves with
+            | Error e -> failwithf "expected a grant, got %s" e
+            | Ok (reads, writes, _, sockets, _) ->
+                Expect.equal sockets [ "/nix/var/nix/daemon-socket/socket" ] "it is a socket grant"
+                // And still the file halves, because talking to one does both and the node
+                // has to be reachable before it can be connected to.
+                Expect.isTrue (List.contains "/nix/var/nix/daemon-socket/socket" reads) "readable too"
+                Expect.isTrue (List.contains "/nix/var/nix/daemon-socket/socket" writes) "and writable"
+
+        // The end of that wire: what srt is actually told. A grant the config never carries
+        // is a grant that does not exist, which is the whole fault this fixes.
+        testCase "the srt config carries the sockets a sandbox may connect to" <| fun () ->
+            let policy = { Support.emptyPolicy with Sockets = [ "/var/run/docker.sock" ] }
+            let config = Sandboxes.SrtSandbox.configFor (toolsWithRuntime []) policy
+            Expect.equal config.AllowUnixSockets [ "/var/run/docker.sock" ] "it rides through"
+
+        // Nobody named one, so nothing is reachable — srt's own default, stated rather than
+        // left to be inferred.
+        testCase "a sandbox that names no socket may connect to none" <| fun () ->
+            let config = Sandboxes.SrtSandbox.configFor (toolsWithRuntime []) Support.emptyPolicy
+            Expect.equal config.AllowUnixSockets [] "no sockets, none allowed"
+
         // --- what a sandbox is asked to prove before it is declared started -----------------
 
         // The order is the whole design. A HOME that cannot be written makes half the list
