@@ -473,7 +473,7 @@ module View =
         let terminalWords () =
             ClientModel.terminalOfFocus field model
             |> Option.bind (fun terminal -> Projection.tryFind terminal model.Terminals)
-            |> Option.map (fun view -> Dom.Text.inTerminal view.Title)
+            |> Option.map (fun view -> Dom.Text.inTerminal (TerminalTitle.value view.Title))
             |> Option.defaultValue Dom.Text.atSomeTerminal
         match field with
         | Title -> Dom.Text.atTitle, Dom.Text.renamingSession
@@ -1777,7 +1777,7 @@ module View =
         // nothing about which one it is on.
         let what =
             Projection.tryFind entry.Terminal model.Terminals
-            |> Option.map (fun view -> view.Title)
+            |> Option.map (fun view -> TerminalTitle.value view.Title)
             |> Option.defaultValue (TerminalId.value entry.Terminal)
         let subject =
             if not showSubject then Lit.nothing
@@ -2311,7 +2311,7 @@ module View =
                 else
                     html $"""
                         <button type="button" class="{Style.btnIconBare}" data-terminal-list-rewind="{id}"
-                                aria-label="Watch {view.Title} from behind its edge"
+                                aria-label="Watch {TerminalTitle.value view.Title} from behind its edge"
                                 @click={Ev(fun _ ->
                                               // ONE message. It used to be this and a select
                                               // beside it, and the second cleared the pin the
@@ -2325,14 +2325,14 @@ module View =
                 else
                     html $"""
                         <button type="button" class="{Style.btnIconBare}" data-terminal-reattach="{id}"
-                                aria-label="Attach {view.Title} again"
+                                aria-label="Attach {TerminalTitle.value view.Title} again"
                                 @click={Ev(fun _ -> actions.ReattachTerminal view.TerminalId)}>{Icon.attach}</button>"""
             let kill =
                 if not affords.CanKill then Lit.nothing
                 else
                     html $"""
                         <button type="button" class="{Style.btnIconBareDanger}" data-terminal-close="{id}"
-                                aria-label="Kill {view.Title}"
+                                aria-label="Kill {TerminalTitle.value view.Title}"
                                 @click={Ev(fun _ -> actions.CloseTerminal view.TerminalId)}>{Icon.stop}</button>"""
             let nameClass = if view.IsOpen then Style.terminalListName else Style.terminalListNameClosed
             html $"""
@@ -2340,7 +2340,7 @@ module View =
                   {state}
                   <span class="min-w-0 flex items-center">
                     <button type="button" class="{nameClass}" data-terminal-list-row="{id}"
-                            @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (TerminalTab view.TerminalId))); actions.FocusPane ())}>{view.Title}</button>
+                            @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (TerminalTab view.TerminalId))); actions.FocusPane ())}>{TerminalTitle.value view.Title}</button>
                     <span class="{Style.terminalTabPeers}">{peers}</span>
                   </span>
                   <span class="{Style.terminalListVerbs}">{rewind}{reattach}{kill}</span>
@@ -2397,12 +2397,12 @@ module View =
                     <button type="button" role="tab" class="{klass}" data-pane-tab="{key}" data-terminal-tab="{id}"
                             aria-selected="{selectedAttr}" tabindex="{tabIndex}" title="{hint}"
                             data-pane-tab-pinned="{pinnedAttr}"
-                            @click={Ev(fun _ -> activate ())}>{view.Title}{pinMark}<span class="{Style.terminalTabPeers}">{peers}</span></button>"""
+                            @click={Ev(fun _ -> activate ())}>{TerminalTitle.value view.Title}{pinMark}<span class="{Style.terminalTabPeers}">{peers}</span></button>"""
             else
                 html $"""
                     <button type="button" role="tab" class="{klass}" data-pane-tab="{key}" data-terminal-closed-tab="{id}"
                             aria-selected="{selectedAttr}" tabindex="{tabIndex}"
-                            @click={Ev(fun _ -> activate ())}>{view.Title}<span class="{Style.small}"> · closed</span><span class="{Style.terminalTabPeers}">{peers}</span></button>"""
+                            @click={Ev(fun _ -> activate ())}>{TerminalTitle.value view.Title}<span class="{Style.small}"> · closed</span><span class="{Style.terminalTabPeers}">{peers}</span></button>"""
         // What a tab is CALLED — read by the tab itself and by the properties bar, which names
         // the selected one. One function, so the strip and the bar can never disagree about
         // what you are looking at.
@@ -2410,7 +2410,7 @@ module View =
             match tab with
             | TerminalTab id ->
                 Projection.tryFind id model.Terminals
-                |> Option.map (fun v -> v.Title)
+                |> Option.map (fun v -> TerminalTitle.value v.Title)
                 |> Option.defaultValue (TerminalId.value id)
             | BlockTab (terminalId, blockId) ->
                 Projection.tryFind terminalId model.Terminals

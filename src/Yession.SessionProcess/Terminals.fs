@@ -634,7 +634,7 @@ module SessionTerminals =
           /// caller who does not care passes explicitly. An `Attached` source ensures
           /// nothing: a session that only talks to a serial port should not start a
           /// container.
-          Open : ActorRef -> Source -> string -> Async<Result<TerminalId, string>>
+          Open : ActorRef -> Source -> TerminalTitle -> Async<Result<TerminalId, string>>
           /// The AGENT's terminal in one WorkSandbox, opened on first use (Plan 15, stage 2).
           ///
           /// Here rather than in the composition root, where it used to live, because it is a
@@ -1306,7 +1306,7 @@ module SessionTerminals =
         // Mutually recursive with `closeTerminal`, because a stream that ends closes its own
         // terminal and the watcher for that is armed at open. One direction only in practice:
         // closing never opens anything.
-        let rec openTerminal (openedBy: ActorRef) (source: Source) (title: string) : Async<Result<TerminalId, string>> =
+        let rec openTerminal (openedBy: ActorRef) (source: Source) (title: TerminalTitle) : Async<Result<TerminalId, string>> =
             async {
                 // A SHELL terminal is a need, and the need is identified before the terminal
                 // exists — so a failed environment start is reported as a failed open
@@ -2025,6 +2025,7 @@ module SessionTerminals =
                     let title =
                         if sandbox = SandboxRef.defaultRef then name
                         else sprintf "[%s] %s" (SandboxRef.render sandbox) name
+                        |> TerminalTitle.fromProse
                     match! openTerminal ActorRef.Agent (SandboxShell sandbox) title with
                     | Error reason -> return Error reason
                     | Ok id ->
@@ -2038,12 +2039,12 @@ module SessionTerminals =
                 match agentTerminals.TryGetValue key with
                 | true, id when isOpen id -> return Ok id
                 | _ ->
-                    let label = if reason.Length > 60 then reason.Substring (0, 57) + "..." else reason
                     // The sandbox is in the title when it is not the default one: several
                     // terminals in a strip are navigable only if each says where it is.
                     let title =
-                        if sandbox = SandboxRef.defaultRef then label
-                        else sprintf "[%s] %s" (SandboxRef.render sandbox) label
+                        if sandbox = SandboxRef.defaultRef then reason
+                        else sprintf "[%s] %s" (SandboxRef.render sandbox) reason
+                        |> TerminalTitle.fromProse
                     match! openTerminal ActorRef.Agent (SandboxShell sandbox) title with
                     | Error reason -> return Error reason
                     | Ok id ->

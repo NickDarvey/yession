@@ -24,7 +24,7 @@ module SessionCommands =
     /// source of truth about a durable fact — and then two code paths to keep agreeing.
     let handle
         (requestInterrupt: PeerId -> AgentTurnId -> Result<unit, string>)
-        (openTerminal: ActorRef -> Source -> string -> Async<Result<TerminalId, string>>)
+        (openTerminal: ActorRef -> Source -> TerminalTitle -> Async<Result<TerminalId, string>>)
         (closeTerminal: TerminalId -> string -> Async<Result<unit, string>>)
         (takeLease: TerminalId -> ActorRef -> Async<Result<unit, string>>)
         (releaseLease: TerminalId -> ActorRef -> Async<Result<unit, string>>)
@@ -50,8 +50,15 @@ module SessionCommands =
                 match requestInterrupt peerId turnId with
                 | Ok () -> return CommandAccepted
                 | Error reason -> return CommandRejected reason
-            | OpenTerminal title ->
-                let title = if title.Trim () = "" then "terminal" else title.Trim ()
+            | OpenTerminal raw ->
+                // The title a peer typed, parsed here at the edge it arrived on. What used
+                // to be an inline trim-and-default is `TerminalTitle.create`, so every other
+                // way of opening a terminal gets the same rules without remembering them —
+                // and an over-long one is refused with the words the composer already shows,
+                // rather than silently kept as a prefix in a durable event.
+                match TerminalTitle.create raw with
+                | Error reason -> return CommandRejected reason
+                | Ok title ->
                 // A peer's Open is always a SHELL in `default` (Plan 16, part D): an
                 // attached source needs a ticket from a provider, and a peer command
                 // carrying a URL would be a peer choosing what this session connects to.

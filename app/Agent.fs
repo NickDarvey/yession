@@ -256,7 +256,7 @@ let private promptOf (context: AgentContextPack) : string =
                     else ""
                 sprintf
                     "[%s] %s ran: %s (%s)\n%s%s"
-                    block.Title
+                    (TerminalTitle.value block.Title)
                     (label block.Author)
                     block.Command
                     outcome

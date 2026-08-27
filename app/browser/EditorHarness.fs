@@ -505,7 +505,7 @@ let private shellModel : ClientModel =
         Terminals =
             { Terminals =
                 [ { TerminalId = terminalId
-                    Title = "build"
+                    Title = TerminalTitle.fromProse "build"
                     OpenedBy = PeerRef peerId
                     Sandbox = Some SandboxRef.defaultRef
                     Renewable = false
@@ -562,7 +562,7 @@ let private shellModel : ClientModel =
                                 Status = BlockFinished (CommandSucceeded 0) } ] ]
                     DroppedBytes = 0 }
                   { TerminalId = liveId
-                    Title = "shell"
+                    Title = TerminalTitle.fromProse "shell"
                     OpenedBy = PeerRef peerId
                     Sandbox = Some SandboxRef.defaultRef
                     Renewable = false
@@ -577,7 +577,7 @@ let private shellModel : ClientModel =
                   // it the list would be exercised over open terminals only, which is the
                   // half that was never the problem.
                   { TerminalId = doneId
-                    Title = "install"
+                    Title = TerminalTitle.fromProse "install"
                     OpenedBy = PeerRef peerId
                     Sandbox = Some SandboxRef.defaultRef
                     Renewable = false

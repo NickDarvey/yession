@@ -47,7 +47,7 @@ let private merge (events: EventEnvelope<SessionEvent> list) : TimelineItem list
     TimelineProjection.items conversation timeline
 
 let private openedBy (by: ActorRef) (id: TerminalId) (title: string) =
-    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = by; Title = title; Sandbox = Some SandboxRef.defaultRef; Renewable = false }
+    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = by; Title = (TerminalTitle.fromProse title); Sandbox = Some SandboxRef.defaultRef; Renewable = false }
 
 let private opened (id: TerminalId) (title: string) = openedBy (PeerRef ada) id title
 
@@ -1252,11 +1252,11 @@ let private pinTests =
             // strip: you asked for it, so it is in your hands.
             let mine =
                 SessionEvent.TerminalOpened
-                    { TerminalId = terminalA; OpenedBy = PeerRef ada; Title = "mine"
+                    { TerminalId = terminalA; OpenedBy = PeerRef ada; Title = (TerminalTitle.fromProse "mine")
                       Sandbox = Some SandboxRef.defaultRef; Renewable = false }
             let theirs =
                 SessionEvent.TerminalOpened
-                    { TerminalId = terminalB; OpenedBy = ActorRef.Agent; Title = "running the tests"
+                    { TerminalId = terminalB; OpenedBy = ActorRef.Agent; Title = (TerminalTitle.fromProse "running the tests")
                       Sandbox = Some SandboxRef.defaultRef; Renewable = false }
             let model = clientOf [ at 1L 0.0 mine; at 2L 1.0 theirs ]
             Expect.equal (model.Pins |> List.map PaneTab.key) [ "terminal:term-a" ] "mine, and only mine"

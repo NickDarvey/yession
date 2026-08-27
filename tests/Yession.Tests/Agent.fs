@@ -561,7 +561,7 @@ let private terminalB = TerminalId.create "term-b" |> expect
 
 let private openedIn (id: TerminalId) (sandbox: SandboxRef option) =
     SessionEvent.TerminalOpened
-        { TerminalId = id; OpenedBy = ActorRef.Agent; Title = "work"; Sandbox = sandbox; Renewable = false }
+        { TerminalId = id; OpenedBy = ActorRef.Agent; Title = (TerminalTitle.fromProse "work"); Sandbox = sandbox; Renewable = false }
 
 /// A block in a NAMED terminal, so a case can put the agent's work somewhere other than the
 /// `term-a` every helper above is pinned to.

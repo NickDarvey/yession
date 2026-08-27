@@ -167,7 +167,7 @@ let private drainTests =
 // --- The projection --------------------------------------------------------------------
 
 let private opened (id: TerminalId) (title: string) =
-    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = PeerRef ada; Title = title; Sandbox = Some SandboxRef.defaultRef; Renewable = false }
+    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = PeerRef ada; Title = (TerminalTitle.fromProse title); Sandbox = Some SandboxRef.defaultRef; Renewable = false }
 
 let private started (id: TerminalId) (b: string) (command: string) (fromSeq: int) =
     SessionEvent.TerminalBlockStarted
@@ -194,7 +194,7 @@ let private projectionTests =
                       opened terminalB "logs"
                       started terminalA "1" "make" 0
                       completed terminalA "1" (CommandSucceeded 0) 4 ]
-            Expect.equal (proj.Terminals |> List.map (fun t -> t.Title)) [ "build"; "logs" ] "open order is kept"
+            Expect.equal (proj.Terminals |> List.map (fun t -> t.Title)) [ TerminalTitle.fromProse "build"; TerminalTitle.fromProse "logs" ] "open order is kept"
             let a = Projection.tryFind terminalA proj |> Option.get
             Expect.equal (a.Blocks |> List.map (fun b -> b.Command)) [ "make" ] "the block is there"
             Expect.equal a.Blocks.Head.Status (BlockFinished (CommandSucceeded 0)) "with its exit code"
@@ -1058,7 +1058,7 @@ let private digestTests =
                   completed terminalA "1" (CommandSucceeded 0) 3 ]
             let entry = (digestOf events).Head
             Expect.equal entry.Author ActorRef.Agent "the agent's own command"
-            Expect.equal entry.Title "build" "named by its terminal, not an opaque id"
+            Expect.equal entry.Title (TerminalTitle.fromProse "build") "named by its terminal, not an opaque id"
 
         testCase "output is capped from the FRONT, and the loss is stated" <| fun () ->
             // Keeping the tail is the whole point: a build's verdict is its last lines,
@@ -1718,13 +1718,13 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 Expect.isTrue (terminals.IsOpen id) "it is open"
                 let! events = eventsOf log
                 match events with
                 | [ SessionEvent.TerminalOpened e ] ->
-                    Expect.equal e.Title "build" "the title is recorded"
+                    Expect.equal e.Title (TerminalTitle.fromProse "build") "the title is recorded"
                     Expect.equal e.OpenedBy (PeerRef ada) "attributed to whoever opened it"
                 | other -> failwithf "expected one TerminalOpened, got %A" other
             }
@@ -1736,7 +1736,7 @@ let private managerTests =
                     scriptedEnvironment (fun _ -> [ Stdout, "hello\n"; Stderr, "warn\n" ], 0)
                 let openTranscript, linesOf, _, _, readTranscript = recordingTranscripts ()
                 let terminals, records, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 let entry = entry "a1" id (PeerRef ada) 1.0
                 let mutable startedCalled = 0
@@ -1791,7 +1791,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "total 4\nfile\n" ], 0)
                 let openTranscript, linesOf, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "ls" ignore
                 let output =
@@ -1808,7 +1808,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stderr, "no such file\n" ], 2)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "cat missing" ignore
                 let! events = eventsOf log
@@ -1827,7 +1827,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "\u001b[31mred\r\n" ], 0)
                 let openTranscript, _, readKeyframes, awaitKeyframes, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "first" ignore
                 do! terminals.RunBlock id (entry "a2" id (PeerRef ada) 2.0) "second" ignore
@@ -1857,7 +1857,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id ActorRef.Agent 1.0) "rm -rf build" ignore
                 let! events = eventsOf log
@@ -1877,7 +1877,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, flood ], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "yes" ignore
                 let! events = eventsOf log
@@ -1911,7 +1911,7 @@ let private managerTests =
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 let! _ = terminals.Close id "closed by a peer"
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "make" ignore
@@ -1933,7 +1933,7 @@ let private schedulerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "ok\n" ], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
@@ -1958,7 +1958,7 @@ let private schedulerTests =
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
@@ -1984,7 +1984,7 @@ let private schedulerTests =
                         }
                 let terminals, _, _ =
                     makeTerminalsGated AttachTerminal.unavailable refuseFirst log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
@@ -2021,7 +2021,7 @@ let private schedulerTests =
                         }
                 let terminals, _, _ =
                     makeTerminalsGated AttachTerminal.unavailable recording log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
@@ -2045,7 +2045,7 @@ let private schedulerTests =
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 // The crash window: a block start reached the log, the doc removal did not.
@@ -2080,6 +2080,41 @@ let private sent (model: ClientModel) : PendingAct =
     match after.Synced.Pending |> Map.toList |> List.map snd with
     | [ entry ] -> entry
     | other -> failwithf "expected one queued command, got %d" (List.length other)
+
+let private terminalTitleTests =
+    let valueOf = Result.map TerminalTitle.value
+
+    testList "The label a terminal carries (Plan 22)" [
+        testCase "a title a person typed is kept, trimmed" <| fun () ->
+            Expect.equal (valueOf (TerminalTitle.create "  build  ")) (Ok "build") "theirs, without the whitespace"
+
+        testCase "no title offered is not an error" <| fun () ->
+            // Pressing New Terminal without naming one is the common case, not a mistake.
+            // This rule used to live inline at the one caller that happened to hold it.
+            Expect.equal (valueOf (TerminalTitle.create "   ")) (Ok "terminal") "the fallback name"
+
+        testCase "a title too long to be a label is refused, not shortened" <| fun () ->
+            // Refused because it is theirs: keeping a prefix in a durable event would be
+            // inventing a fact nobody typed. The peer command has CommandRejected to say so.
+            let tooLong = String.replicate (TerminalTitle.MaxLength + 1) "x"
+            Expect.isError (TerminalTitle.create tooLong) "over the cap"
+            Expect.isOk (TerminalTitle.create (String.replicate TerminalTitle.MaxLength "x")) "at the cap"
+
+        testCase "prose we wrote ourselves is shortened rather than refused" <| fun () ->
+            // The opposite treatment, and deliberately: an agent naming a terminal after its
+            // own sentence cannot be asked to write a shorter one, and the reason is recorded
+            // in full on the act that opened the terminal.
+            let sentence = String.replicate (TerminalTitle.ProseLength + 40) "y"
+            let got = TerminalTitle.value (TerminalTitle.fromProse sentence)
+            Expect.equal got.Length TerminalTitle.ProseLength "cut to fit a tab"
+            Expect.isTrue (got.EndsWith "...") "and says it was cut"
+
+        testCase "prose short enough is left alone" <| fun () ->
+            Expect.equal (TerminalTitle.value (TerminalTitle.fromProse "make")) "make" "untouched"
+
+        testCase "empty prose falls back too" <| fun () ->
+            Expect.equal (TerminalTitle.value (TerminalTitle.fromProse "")) "terminal" "the same fallback"
+    ]
 
 let private transcriptCursorTests =
     // The read position is the NEXT unread line, never the last read one. Every case below
@@ -2306,9 +2341,9 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 Expect.isError shell "a shell terminal IS a need, so a refused sandbox refuses the open"
-                let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 Expect.isOk device "an attached one needs nothing this session runs"
             }
 
@@ -2322,7 +2357,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, opens = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 Expect.equal (List.ofSeq opens) [ id ] "exactly the terminal that opened"
             }
@@ -2336,7 +2371,7 @@ let private sourceTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, opens = makeTerminalsWith (refusingStream ()) log environment openTranscript readTranscript []
-                let! _ = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! _ = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 Expect.isEmpty (List.ofSeq opens) "nothing opened, so nothing is announced"
             }
 
@@ -2350,7 +2385,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 let! snapshot = terminals.Snapshot id
                 let length = terminals.Lengths () |> List.tryFind (fst >> (=) id) |> Option.map snd
@@ -2369,7 +2404,7 @@ let private sourceTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminalsWith (refusingStream ()) log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 Expect.isError opened "the open carries the dial's own reason"
             }
 
@@ -2382,7 +2417,7 @@ let private sourceTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _, _ = makeTerminalsWith (refusingStream ()) log environment openTranscript readTranscript []
-                let! _ = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! _ = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let! events = eventsOf log
                 let opens =
                     events |> List.choose (function SessionEvent.TerminalOpened e -> Some e | _ -> None)
@@ -2399,7 +2434,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, endStream, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 endStream (SandboxExited 0)
                 do! Async.Sleep 20
@@ -2416,7 +2451,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, endStream, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let _ = opened |> expect
                 endStream (SandboxExited 0)
                 do! Async.Sleep 20
@@ -2435,7 +2470,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, endStream, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = codedTicket; Renewable = false }) "remote shell"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = codedTicket; Renewable = false }) (TerminalTitle.fromProse "remote shell")
                 let _ = opened |> expect
                 endStream (SandboxExited 7)
                 do! Async.Sleep 20
@@ -2453,7 +2488,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, endStream, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let _ = opened |> expect
                 endStream (SandboxRunFailed "the exporter went away")
                 do! Async.Sleep 20
@@ -2470,7 +2505,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 let! closed = terminals.Close id "closed by a peer"
                 Expect.isOk closed "the hand close succeeds"
@@ -2489,7 +2524,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 let! head = terminals.Tail id (Some 0) None
                 let page = head |> expect
@@ -2513,7 +2548,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, say = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 // Distinct lines, so a repeat is visible as a repeat rather than as a longer
                 // run of the same thing.
@@ -2544,7 +2579,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, say = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 say "one\n"
                 say "two\n"
@@ -2562,7 +2597,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, say = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 say "before\n"
                 let! first = terminals.Tail id (Some 0) None
@@ -2584,7 +2619,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 let! tail = terminals.Tail id None None
                 let tail = tail |> expect
@@ -2600,7 +2635,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 let! answer = terminals.Tail id (Some 0) (Some { Until = MatchLiteral "ready"; TimeoutSeconds = 5.0 })
                 let answer = answer |> expect
@@ -2619,7 +2654,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 let! first = terminals.Tail id (Some 0) None
                 let first = first |> expect
@@ -2639,7 +2674,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 let! answer = terminals.Tail id (Some 0) (Some { Until = MatchLiteral "never-appears"; TimeoutSeconds = 0.05 })
                 let answer = answer |> expect
@@ -2658,7 +2693,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, say = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 say "root@box:~# "
                 let pattern = Pattern.compile "[#$>] $" |> expect
@@ -2680,7 +2715,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, say = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 let! first = terminals.Tail id (Some 0) None
                 let first = first |> expect
@@ -2702,7 +2737,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 let! answer = terminals.Tail id None None
                 Expect.equal (answer |> expect).Matched None "no wait, no verdict"
@@ -2715,7 +2750,7 @@ let private sourceTests =
                 let openTranscript, linesOf, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 let printed =
                     linesOf id
@@ -2734,7 +2769,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, written, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "make" ignore
                 let! events = eventsOf log
@@ -2759,7 +2794,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
                 let! taken = terminals.Take id (PeerRef ada)
                 Expect.isOk taken "a device can still be typed at — the lease is what arbitrates"
@@ -2776,7 +2811,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, written, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = opened |> expect
 
                 let! wrote = terminals.Write id ActorRef.Agent "AT\r"
@@ -2799,7 +2834,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
 
                 match! terminals.Tail (expect device) None None with
                 | Error e -> failwithf "a device has nothing but its transcript to read: %s" e
@@ -2819,7 +2854,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) (TerminalTitle.fromProse "USB serial")
                 let id = expect device
                 let! closed = terminals.Close id "the device went away"
                 Expect.isOk closed "the terminal closes"
@@ -2836,7 +2871,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
 
                 match! terminals.Tail (expect shell) None None with
                 | Ok _ -> failwith "a shell's output is its blocks', and reading it twice is two answers to one question"
@@ -2850,7 +2885,7 @@ let private sourceTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let attach, written, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 match! terminals.Write id ActorRef.Agent "rm -rf /\r" with
                 | Ok () -> failwith "raw bytes into a shell would be the door around the approval gate"
@@ -2866,7 +2901,7 @@ let private sourceTests =
 /// would make them tests of the projection with the rule as an afterthought.
 let private viewOf (isOpen: bool) (renewable: bool) : TerminalView =
     { TerminalId = terminalA
-      Title = "build"
+      Title = (TerminalTitle.fromProse "build")
       OpenedBy = PeerRef ada
       Sandbox = Some SandboxRef.defaultRef
       Renewable = renewable
@@ -3171,7 +3206,7 @@ let private shellProfileTests =
                 let terminals, _, ptySpawned, _, _ = fixture ()
                 let! set = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 Expect.isOk set "the directory is there, so the profile takes"
-                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 Expect.equal (ptyDirectories ptySpawned) [ Some checkout ] "the shell is spawned in the profile's directory"
             }
 
@@ -3180,7 +3215,7 @@ let private shellProfileTests =
                 // A shell's cwd is state its user is relying on. The one terminal that does
                 // move is the one nobody named, and it moves by being reopened.
                 let terminals, _, ptySpawned, _, _ = fixture ()
-                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 Expect.equal (ptyDirectories ptySpawned) [ None ] "nothing is re-spawned under a terminal already open"
             }
@@ -3200,7 +3235,7 @@ let private shellProfileTests =
                 let terminals, _, _ = makeTerminals log environment openTranscript readTranscript []
                 let! set = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 Expect.isOk set "this fixture answers the probe with the directory it landed in"
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "pwd" ignore
                 Expect.equal
@@ -3285,7 +3320,7 @@ let private shellProfileTests =
                 let terminals, _, ptySpawned, _, _ = fixture ()
                 let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef None
-                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 Expect.equal (ptyDirectories ptySpawned) [ None ] "back to what every terminal did before there were profiles"
             }
 
@@ -3294,7 +3329,7 @@ let private shellProfileTests =
                 let terminals, _, ptySpawned, _, _ = fixture ()
                 let other = SandboxRef.parse "test" |> expect
                 let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
-                let! _ = terminals.Open (PeerRef ada) (SandboxShell other) "build"
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell other) (TerminalTitle.fromProse "build")
                 Expect.equal (ptyDirectories ptySpawned) [ None ] "a path is only a path inside the filesystem that has it"
             }
 
@@ -3322,7 +3357,7 @@ let private shellProfileTests =
                         readTranscript
                         []
                         replayed
-                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 Expect.equal
                     (ptyDirectories ptySpawned)
                     [ Some checkout ]
@@ -3356,7 +3391,7 @@ let private shellProfileTests =
         testCaseAsync "a terminal a person opened is left alone" <|
             async {
                 let terminals, _, _, _, _ = fixture ()
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "mine"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "mine")
                 let id = opened |> expect
                 let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 Expect.isTrue (terminals.IsOpen id) "a human's shell is not a default's to end"
@@ -3390,7 +3425,7 @@ let private shellProfileTests =
                 let terminals, _, _, linesOf, vanish = fixture ()
                 let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 vanish ()
-                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 let id = opened |> expect
                 Expect.isTrue (terminals.IsOpen id) "the terminal opens"
                 let printed =
@@ -3455,7 +3490,7 @@ let private shellProfileTests =
                 let terminals, _, ptySpawned, _, _ = fixture ()
                 let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 let! _ = terminals.ClearProfilesUnder ActorRef.Agent checkout
-                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 Expect.equal (ptyDirectories ptySpawned) [ None ] "nothing is asked for a directory that has gone"
             }
 
@@ -3493,7 +3528,7 @@ let private shellProfileTests =
                 let terminals, _, _, _, vanish = fixture ()
                 let! _ = terminals.SetProfile ActorRef.Agent SandboxRef.defaultRef (Some checkout)
                 vanish ()
-                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "build"
+                let! _ = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "build")
                 Expect.equal
                     (terminals.Profiles () |> ShellProfileProjection.workingDirectory SandboxRef.defaultRef)
                     (Some checkout)
@@ -3529,7 +3564,7 @@ let private agentVerbTests =
                 Expect.isTrue (terminals.OpenedByAgent id) "the agent may close what it opened"
                 let! events = eventsOf log
                 let titles = events |> List.choose (function SessionEvent.TerminalOpened o -> Some o.Title | _ -> None)
-                Expect.equal titles [ "tests" ] "and everyone reads the name it gave"
+                Expect.equal titles [ (TerminalTitle.fromProse "tests") ] "and everyone reads the name it gave"
             }
 
         testCaseAsync "at the limit it is refused, and told the number" <|
@@ -3569,7 +3604,7 @@ let private agentVerbTests =
         testCaseAsync "a terminal a person opened is not the agent's" <|
             async {
                 let terminals, _ = fixture ()
-                let! theirs = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) "mine"
+                let! theirs = terminals.Open (PeerRef ada) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse "mine")
                 Expect.isFalse
                     (terminals.OpenedByAgent (theirs |> expect))
                     "a human typing in their own shell is not the agent's to end"
@@ -3607,4 +3642,5 @@ let tests =
         syncTests
         viewportTests
         transcriptCursorTests
+        terminalTitleTests
     ]

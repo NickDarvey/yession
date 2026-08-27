@@ -128,6 +128,10 @@ module Codec =
         { Encode = TerminalId.value >> Encode.string
           Decode = viaSmartCtor TerminalId.create Decode.string }
 
+    let terminalTitle : Codec<TerminalTitle> =
+        { Encode = TerminalTitle.value >> Encode.string
+          Decode = viaSmartCtor TerminalTitle.create Decode.string }
+
     /// The three parties behind an act, on the wire (Plan 20). Not a nested object: these
     /// keys sit at the payload's top level and always have, and an event log is read back for
     /// the life of its session — so what changed is where the value lives in F#, and nothing
@@ -732,7 +736,7 @@ module Codec =
                 Encode.object
                     [ "terminalId", terminalId.Encode p.TerminalId
                       "openedBy", actor.Encode p.OpenedBy
-                      "title", Encode.string p.Title
+                      "title", terminalTitle.Encode p.Title
                       "sandbox", Encode.option sandboxRef.Encode p.Sandbox
                       "renewable", Encode.bool p.Renewable ]
           Decode =
@@ -745,7 +749,7 @@ module Codec =
                 let written = get.Required.Raw Decode.keys |> List.contains "sandbox"
                 { TerminalOpened.TerminalId = get.Required.Field "terminalId" terminalId.Decode
                   TerminalOpened.OpenedBy = get.Required.Field "openedBy" actor.Decode
-                  TerminalOpened.Title = get.Required.Field "title" Decode.string
+                  TerminalOpened.Title = get.Required.Field "title" terminalTitle.Decode
                   // Absent in a log written before Plan 19, and false is the honest reading:
                   // nothing recorded a way back, so there is not one.
                   TerminalOpened.Renewable =
