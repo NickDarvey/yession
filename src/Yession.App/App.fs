@@ -73,6 +73,9 @@ module App =
           /// as a `TerminalOpened` event, not as a response — one source of truth for a
           /// durable fact, and it is the one every peer already reads.
           OpenTerminal : string -> unit
+          /// Consent to what a repo asks for (Plan 27). Carries the set that was SHOWN, so
+          /// the Process can refuse if the file moved between the screen and the button.
+          ApproveRepoCapabilities : RepoRef -> string list -> unit
           /// Ask the Session Process to close a terminal.
           CloseTerminal : TerminalId -> unit
           /// Take a terminal's stdin — enter live mode, stealing the lease if another peer
@@ -944,6 +947,10 @@ module App =
           OpenTerminal =
             fun title ->
                 Async.StartImmediate (channel.Send (Command (Request (RequestId.fresh (), OpenTerminal title))))
+          ApproveRepoCapabilities =
+            fun repo granted ->
+                Async.StartImmediate (
+                    channel.Send (Command (Request (RequestId.fresh (), ApproveRepoCapabilities (repo, granted)))))
           CloseTerminal =
             fun terminalId ->
                 Async.StartImmediate (channel.Send (Command (Request (RequestId.fresh (), CloseTerminal terminalId))))

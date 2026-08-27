@@ -12,6 +12,8 @@ open Fable.Core
 open Fable.Pyxpecto
 open Yession.Domain
 open Yession.Domain.Agent
+open Yession.Domain.Repos
+open Yession.Domain.Chat
 open Yession.Host
 
 let private expect = function Ok v -> v | Error e -> failwithf "%A" e
@@ -584,7 +586,12 @@ let foldTests =
                 | other -> failwithf "expected one row, got %A" other
             }
 
-        testCaseAsync "once a person approves it, it starts" <|
+        // Approving is not a note taken for later. The person clicked the button because
+        // they wanted the thing to run, and nothing else in this session is going to ask
+        // again on their behalf — so the fold runs on the approval, not on the next repo
+        // verb that happens along. Deliberately NO `Fold` call after `Approve` here: with
+        // one, this case is green whether or not approval does anything at all.
+        testCaseAsync "approving starts it, without waiting for another repo verb" <|
             async {
                 let r = repo "octo/hello"
                 let dir = checkout r (Some "version: 2\nsandboxes:\n  dev:\n    uses: [ web ]\n")
@@ -598,8 +605,7 @@ let foldTests =
                 let ada = UserRef (UserId.create "ada" |> expect)
                 let! approved = folded.Approve ada r [ "reaches anywhere (sensitive)" ]
                 Expect.equal approved (Ok ()) "a signed-in person may consent"
-                do! folded.Fold None
-                Expect.equal seen.Count 1 "and now it starts"
+                Expect.equal seen.Count 1 "and that alone starts it"
             }
 
         // The agent must not consent on a checkout's behalf. That is the whole reason the
@@ -615,25 +621,30 @@ let foldTests =
                         (sensitively [ "reaches anywhere (sensitive)" ])
                 match! folded.Approve ActorRef.Agent r [ "reaches anywhere (sensitive)" ] with
                 | Ok () -> failwith "the agent must not be able to consent"
-                | Error e -> Expect.isTrue (e.Contains "signed in") (sprintf "and is told why, said: %s" e)
+                | Error e -> Expect.isTrue (e.Contains "a person") (sprintf "and is told why, said: %s" e)
             }
 
-        // The other half of the same rule, and the half the agent case does NOT reach: a peer
-        // who never signed in is not somebody whose consent means anything, and `ActorRef`
-        // keeps them apart from a user precisely so this can be asked.
-        testCaseAsync "a peer who is not signed in cannot approve either" <|
+        // A peer who did not sign in is still a PERSON, and on a deployment that trusts
+        // whoever reaches it they are the only person there. What the record must not do is
+        // call them a signed-in user — `ActorRef` keeps the two apart, and the approval says
+        // which one actually consented.
+        testCaseAsync "a peer who did not sign in may approve, and is recorded as a peer" <|
             async {
                 let r = repo "octo/hello"
                 let dir = checkout r (Some "version: 2\nsandboxes:\n  dev:\n    uses: [ web ]\n")
+                let log = foldLog ()
                 let folded =
                     RepoSandboxes.create
                         dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable)
-                        (recordingGate (ResizeArray<GatedCall> ())) (foldLog ())
+                        (recordingGate (ResizeArray<GatedCall> ())) log
                         (sensitively [ "reaches anywhere (sensitive)" ])
                 let anonymous = PeerRef (PeerId.create "peer-1" |> expect)
-                match! folded.Approve anonymous r [ "reaches anywhere (sensitive)" ] with
-                | Ok () -> failwith "an unattributed peer must not be able to consent"
-                | Error e -> Expect.isTrue (e.Contains "signed in") (sprintf "and is told why, said: %s" e)
+                let! approved = folded.Approve anonymous r [ "reaches anywhere (sensitive)" ]
+                Expect.equal approved (Ok ()) "a person at a browser is a person"
+                let! page = log.Read None System.Int32.MaxValue
+                match page.Events |> List.choose (fun e -> match e.Event with SessionEvent.RepoCapabilitiesApproved a -> Some a.Actor | _ -> None) with
+                | [ actor ] -> Expect.equal actor anonymous "recorded as the peer they are, not promoted to a user"
+                | other -> failwithf "expected one approval, got %A" other
             }
 
         // A capability set is authored by whoever can push to the checkout, so it can change
@@ -655,6 +666,81 @@ let foldTests =
                     Expect.isTrue (e.Contains "changed since you looked") (sprintf "and says so, said: %s" e)
                     Expect.isTrue (e.Contains "reaches anywhere") "naming what it asks for now"
             }
+
+        // Both sides fold the same log: the Process to know what to gate, a client to know
+        // what to offer. A prompt somebody sees and a sandbox that is waiting have to be two
+        // readings of one fact rather than two answers free to disagree.
+        testCase "a sensitive ask with no approval is pending" <| fun () ->
+            let r = repo "octo/hello"
+            let asked =
+                SessionEvent.RepoCapabilitiesChanged
+                    { RepoCapabilitiesChanged.MessageId = MessageId.create "m1" |> expect
+                      RepoCapabilitiesChanged.Repo = r
+                      RepoCapabilitiesChanged.Granted = [ "reaches anywhere (sensitive)" ]
+                      RepoCapabilitiesChanged.Sensitive = true
+                      RepoCapabilitiesChanged.Actor = ActorRef.Configured r }
+            Expect.equal
+                (RepoApprovals.pending [ asked ])
+                [ r, [ "reaches anywhere (sensitive)" ] ]
+                "somebody has to decide about it"
+
+        testCase "an ordinary ask is never pending, however often it changes" <| fun () ->
+            let r = repo "octo/hello"
+            let asked granted =
+                SessionEvent.RepoCapabilitiesChanged
+                    { RepoCapabilitiesChanged.MessageId = MessageId.create "m1" |> expect
+                      RepoCapabilitiesChanged.Repo = r
+                      RepoCapabilitiesChanged.Granted = granted
+                      RepoCapabilitiesChanged.Sensitive = false
+                      RepoCapabilitiesChanged.Actor = ActorRef.Configured r }
+            Expect.equal (RepoApprovals.pending [ asked [ "/nix, read-only" ]; asked [ "/nix, read-only"; "/opt" ] ]) [] "nothing to ask"
+
+        testCase "an approval settles the set it names" <| fun () ->
+            let r = repo "octo/hello"
+            let ada = UserRef (UserId.create "ada" |> expect)
+            let asked =
+                SessionEvent.RepoCapabilitiesChanged
+                    { RepoCapabilitiesChanged.MessageId = MessageId.create "m1" |> expect
+                      RepoCapabilitiesChanged.Repo = r
+                      RepoCapabilitiesChanged.Granted = [ "reaches anywhere (sensitive)" ]
+                      RepoCapabilitiesChanged.Sensitive = true
+                      RepoCapabilitiesChanged.Actor = ActorRef.Configured r }
+            let approved granted =
+                SessionEvent.RepoCapabilitiesApproved
+                    { RepoCapabilitiesApproved.MessageId = MessageId.create "m2" |> expect
+                      RepoCapabilitiesApproved.Repo = r
+                      RepoCapabilitiesApproved.Granted = granted
+                      RepoCapabilitiesApproved.Actor = ada }
+            Expect.equal (RepoApprovals.pending [ asked; approved [ "reaches anywhere (sensitive)" ] ]) [] "settled"
+            Expect.equal
+                (RepoApprovals.pending [ asked; approved [ "something else entirely" ] ])
+                [ r, [ "reaches anywhere (sensitive)" ] ]
+                "an approval of something else leaves the ask standing"
+
+        // The case the whole rule exists for: yes to one set is not yes to a wider one.
+        testCase "a repo that widens what it asks for is pending again" <| fun () ->
+            let r = repo "octo/hello"
+            let ada = UserRef (UserId.create "ada" |> expect)
+            let asked granted =
+                SessionEvent.RepoCapabilitiesChanged
+                    { RepoCapabilitiesChanged.MessageId = MessageId.create "m1" |> expect
+                      RepoCapabilitiesChanged.Repo = r
+                      RepoCapabilitiesChanged.Granted = granted
+                      RepoCapabilitiesChanged.Sensitive = true
+                      RepoCapabilitiesChanged.Actor = ActorRef.Configured r }
+            let approved =
+                SessionEvent.RepoCapabilitiesApproved
+                    { RepoCapabilitiesApproved.MessageId = MessageId.create "m2" |> expect
+                      RepoCapabilitiesApproved.Repo = r
+                      RepoCapabilitiesApproved.Granted = [ "reaches anywhere (sensitive)" ]
+                      RepoCapabilitiesApproved.Actor = ada }
+            Expect.equal
+                (RepoApprovals.pending
+                    [ asked [ "reaches anywhere (sensitive)" ]
+                      approved
+                      asked [ "reaches anywhere (sensitive)"; "/etc, read-only" ] ])
+                [ r, [ "reaches anywhere (sensitive)"; "/etc, read-only" ] ]
+                "the old yes does not cover the new ask"
 
         testCaseAsync "a session with no repos service folds nothing rather than failing" <|
             async {

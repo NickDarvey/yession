@@ -65,6 +65,13 @@ and [<RequireQualifiedAccess>] RepoCapabilitiesChanged =
       /// the same rendering the operator's `resources` surface uses, so what is said here and
       /// what is read there cannot become two answers.
       Granted : string list
+      /// Whether this set is one somebody has to decide about.
+      ///
+      /// Carried rather than re-derived by every reader, because deriving it needs the
+      /// operator's profile and a client has none — and a client that guessed by looking for
+      /// a word in `Granted` would be a client whose prompt depends on the wording of a
+      /// sentence, which is a design and will move.
+      Sensitive : bool
       /// The repo's file, as the party asking.
       Actor : ActorRef }
 

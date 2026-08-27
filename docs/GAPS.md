@@ -724,6 +724,15 @@ Items are roughly ordered by how much they matter.
   would be the door around the classifier that `execute_command` is the one door for (Plan 23).
   The drain gate that accompanies live mode (Plan 13, stage 2e) is unchanged — a leased
   terminal holds its queue rather than typing into a session someone else owns.
+- **A rejected command is silent to whoever issued it.** `SessionCommandResult` carries
+  `CommandRejected reason`, and no client reads it — there is no notice surface in the
+  browser at all, so `grep CommandRejected src/Yession.App` finds nothing. Every refusal a
+  peer command can produce lands the same way: the button does nothing and the reason exists
+  only in the Process's answer. Found while building the capability-approval prompt (Plan 27),
+  whose own refusal — "what this repo asks for changed since you looked" — is exactly the
+  sentence somebody needs and cannot see. Not specific to that command, and not fixable
+  inside it: a rejection needs somewhere to be shown, and there is nowhere yet.
+
 - **A block waiting on a keystroke is announced to the agent and to nobody else.**
   `execute_command` answers `TerminalCommandInteractive` the moment detection hands the
   terminal over, and the agent has `write_terminal`/`read_terminal` to resolve it — but if it

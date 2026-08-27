@@ -140,6 +140,10 @@ module Dom =
         let agentPresence = "data-agent-presence"
         let noAgent = "data-no-agent"
         let noAgentConnect = "data-no-agent-connect"
+        /// One per repo waiting on somebody. Counted rather than read: what the prompt SAYS
+        /// is a design, that there is exactly one per waiting repo is a promise.
+        let approvalPrompt = "data-repo-approval"
+        let approvalAction = "data-repo-approve"
         // The reconnect offer (Plan 11): shown in place of the connection status word when
         // the session has stopped and this deployment can bring it back.
         let sessionGone = "data-session-gone"

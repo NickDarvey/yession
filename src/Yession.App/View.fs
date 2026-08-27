@@ -92,6 +92,9 @@ type ViewActions =
       /// Ask the Session Process to open a terminal (Plan 13). A command, so imperative:
       /// the terminal's id is minted by the Process and comes back as an event.
       OpenTerminal : string -> unit
+      /// Consent to what a repo asks for. Takes the set that is on screen, so a file that
+      /// changed under the reader cannot be approved by a click meant for something else.
+      ApproveRepoCapabilities : RepoRef -> string list -> unit
       /// Ask the Session Process to close a terminal.
       CloseTerminal : TerminalId -> unit
       /// Send a terminal composer slot: enqueue its command. Imperative for exactly the
@@ -160,6 +163,7 @@ module ViewActions =
           ReopenSession = ignore
           RetryNow = ignore
           OpenTerminal = ignore
+          ApproveRepoCapabilities = fun _ _ -> ()
           CloseTerminal = ignore
           SendTerminalDraft = fun _ _ -> ()
           TakeTerminal = ignore
@@ -519,6 +523,42 @@ module View =
                     </div>"""
             | None ->
                 html $"""<div class="{Style.person}" data-agent-presence="unknown"><span class="{Style.cls [ Style.avatar; Style.agentAvatar; Style.personAvatar ]} opacity-40"></span><span class="text-ink-faint">agent</span></div>"""
+
+        // What a checkout asks for, when somebody still has to decide about it.
+        //
+        // Beside the agent's own prompt rather than in the settings drawer: a sandbox that is
+        // not running is a thing somebody is waiting on RIGHT NOW, and a decision parked
+        // behind a disclosure is a decision nobody makes. Only sensitive sets appear — the
+        // operator decides which those are, and a prompt for every repo is a prompt people
+        // learn to dismiss without reading.
+        //
+        // The button carries the set that is ON SCREEN. If the file moved under the reader,
+        // the Process refuses rather than approving something they did not read.
+        let approvalPrompts =
+            RepoApprovals.waiting model.Approvals
+            |> List.map (fun (repo, granted) ->
+                // WRAPPED, not truncated. Somebody consenting has to see the whole of what
+                // they are consenting to, and an ellipsis in the middle of a hostname is a
+                // decision made about a string nobody finished reading. The rail is narrow,
+                // so this costs a line or two and buys the only thing the prompt is for.
+                let lines =
+                    granted |> List.map (fun line -> html $"""<li class="break-words">{line}</li>""")
+                html $"""
+                    <div class="{Style.cls [ Style.noAgentBlock; "min-w-0" ]}" data-repo-approval="{RepoRef.value repo}">
+                      <div class="{Style.person}">
+                        <span class="truncate min-w-0 text-ink-faint">{RepoRef.value repo}</span>
+                        <span class="{Style.label} ml-auto shrink-0">asks for</span>
+                      </div>
+                      <div class="{Style.noAgentPrompt}">
+                        <span class="{Style.noAgentEdge}"></span>
+                        <div class="{Style.noAgentBody}">
+                          <ul class="{Style.cls [ Style.label; "w-full min-w-0 whitespace-normal" ]}">{lines}</ul>
+                          <button type="button" class="{Style.cls [ Style.btnPrimary; Style.noAgentAction; "w-full min-w-0" ]}"
+                                  data-repo-approve="{RepoRef.value repo}"
+                                  @click={Ev(fun _ -> actions.ApproveRepoCapabilities repo granted)}>Approve</button>
+                        </div>
+                      </div>
+                    </div>""")
         // Everyone else who is here, and WHERE. The same roster row as yours and the agent's
         // — avatar, name, right-aligned slot — so the section is one list rather than a list
         // with an appendix, and a collaborator moving from the composer to a terminal changes
@@ -539,6 +579,7 @@ module View =
               <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.humanAvatar (PeerId.value model.Peer.PeerId); Style.personAvatar ]}"></span><span class="truncate" data-display-name>{model.Peer.DisplayName}</span><span class="{Style.label} ml-auto">you</span></div>
               {peerRows}
               {agentRow}
+              {approvalPrompts}
             </section>"""
 
     let private environmentStatus =

@@ -206,6 +206,7 @@ let create
                                             { RepoCapabilitiesChanged.MessageId = mintMessageId ()
                                               RepoCapabilitiesChanged.Repo = repo
                                               RepoCapabilitiesChanged.Granted = granted
+                                              RepoCapabilitiesChanged.Sensitive = capabilities.Sensitive
                                               RepoCapabilitiesChanged.Actor = actor })
                     // Which repos are waiting on somebody. Only a SENSITIVE set waits: a
                     // repo asking for a cache and a store is not a decision anybody wants to
@@ -322,13 +323,20 @@ let create
 
     /// Consent to what a repo asks for.
     ///
-    /// Refused unless the caller is an attributed HUMAN. The agent must not consent on a
-    /// repo's behalf — a checkout that could approve itself is a checkout nobody is deciding
-    /// about, which is the whole reason the repo is a separate principal.
+    /// A PERSON may, and `ActorRef` already says which kind: `UserRef` is somebody who signed
+    /// in, `PeerRef` somebody at a browser who did not. Both are people, and the record keeps
+    /// them apart rather than flattening one into the other — a deployment that trusts
+    /// whoever reaches it is a real trust model, and calling that person a signed-in user
+    /// would be this code pretending to know something it does not.
+    ///
+    /// What may NOT consent is everything that is not a person: the agent, the session
+    /// process, and the repo's own file. A checkout that could approve itself is a checkout
+    /// nobody is deciding about, which is the whole reason it is a separate principal.
     let approve (actor: ActorRef) (repo: RepoRef) (granted: string list) : Async<Result<unit, string>> =
         async {
             match actor with
-            | UserRef _ ->
+            | UserRef _
+            | PeerRef _ ->
                 match repos () with
                 | None -> return Error "this session has no repos"
                 | Some service ->
@@ -358,11 +366,21 @@ let create
                                           RepoCapabilitiesApproved.Repo = repo
                                           RepoCapabilitiesApproved.Granted = asked
                                           RepoCapabilitiesApproved.Actor = actor })
+                            // And then DO it. Consent that leaves the sandbox down until
+                            // somebody happens to touch a repo is a button that reports
+                            // success and changes nothing — which is the same class of fault
+                            // as a refusal nobody sees, arriving from the other direction.
+                            //
+                            // Safe to call here because the fold is idempotent by
+                            // construction: it re-asks for what is already running and
+                            // records nothing when nothing changed. It runs on the authority
+                            // of whoever approved, which is the truth of why it ran.
+                            do! fold (Some actor)
                             return Ok ()
             | _ ->
                 return
                     Error
-                        "only somebody signed in can approve what a repo asks for — an agent cannot consent on a checkout's behalf"
+                        "only a person in this session can approve what a repo asks for — an agent cannot consent on a checkout's behalf"
         }
 
     let undeclared () =
