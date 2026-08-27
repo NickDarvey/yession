@@ -2081,6 +2081,51 @@ let private sent (model: ClientModel) : PendingAct =
     | [ entry ] -> entry
     | other -> failwithf "expected one queued command, got %d" (List.length other)
 
+let private transcriptCursorTests =
+    // The read position is the NEXT unread line, never the last read one. Every case below
+    // reads against a cursor of 7, meaning lines 0..6 are read and 7 is the first that is not.
+    let readTo = 7
+
+    testList "What a client has not read of a transcript (Plan 22)" [
+        testCase "a live record at the read position has not been read" <| fun () ->
+            // The case that shipped broken. The shell's output is the LAST record, so it
+            // arrives at exactly the read position with nothing following to push the stream
+            // ahead — and this path is the only trigger to fetch history for a terminal
+            // opened mid-session. Answered `false` here, its bytes never reach the store and
+            // a reload replays the command with no output.
+            Expect.isTrue
+                (TranscriptCursor.unread readTo (RecordAt readTo))
+                "the first unread line is unread"
+
+        testCase "a live record before the read position has been read" <| fun () ->
+            Expect.isFalse
+                (TranscriptCursor.unread readTo (RecordAt (readTo - 1)))
+                "already read, so nothing to fetch"
+
+        testCase "a live record beyond the read position leaves a gap" <| fun () ->
+            Expect.isTrue
+                (TranscriptCursor.unread readTo (RecordAt (readTo + 3)))
+                "the records between are the ones to ask for"
+
+        testCase "a length equal to the read position holds nothing unread" <| fun () ->
+            // The other unit, and the reason the type exists: a COUNT of 7 means lines 0..6,
+            // all of which are read. The same number as an INDEX means the opposite.
+            Expect.isFalse
+                (TranscriptCursor.unread readTo (AvailableLength readTo))
+                "seven lines, all seven read"
+
+        testCase "a length past the read position holds something unread" <| fun () ->
+            Expect.isTrue
+                (TranscriptCursor.unread readTo (AvailableLength (readTo + 1)))
+                "an eighth line exists and has not been read"
+
+        testCase "an unread client at the start has read nothing" <| fun () ->
+            // A terminal whose transcript has never been read: the first record is unread and
+            // an empty transcript is not.
+            Expect.isTrue (TranscriptCursor.unread 0 (RecordAt 0)) "the very first record"
+            Expect.isFalse (TranscriptCursor.unread 0 (AvailableLength 0)) "nothing recorded yet"
+    ]
+
 let private viewportTests =
     let client () = ClientModel.init { PeerId = ada; DisplayName = "ada" }
 
@@ -3561,4 +3606,5 @@ let tests =
         schedulerTests
         syncTests
         viewportTests
+        transcriptCursorTests
     ]

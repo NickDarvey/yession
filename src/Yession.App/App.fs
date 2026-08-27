@@ -851,23 +851,18 @@ module App =
             | TerminalAvailableMsg (terminal, length) ->
                 // The terminal-feed counterpart of `EventsAvailable`: a hint that there is
                 // more, answered by a read rather than by trusting the hint's contents.
-                if length > readPositionOf terminal then fetchTranscript terminal
-            | TerminalRecordMsg (terminal, seq, _) when seq >= readPositionOf terminal ->
-                // A live record AT or beyond the read position means history exists that this
+                if TranscriptCursor.unread (readPositionOf terminal) (AvailableLength length) then
+                    fetchTranscript terminal
+            | TerminalRecordMsg (terminal, seq, _)
+                when TranscriptCursor.unread (readPositionOf terminal) (RecordAt seq) ->
+                // A live record at or beyond the read position means history exists that this
                 // client has not fetched — the records between where it read to and where the
                 // live stream now is. Ask for them.
                 //
-                // The boundary (`>=`, not `>`) is the whole point: `readPositionOf` is the NEXT
-                // unread line, not the last read one (`NextSeq = first + lines.Length`), so a
-                // record arriving at exactly that seq IS unread. And nothing else will re-arm it
-                // — `TerminalTranscriptAvailable` is sent once, at accept (`Host.fs`), never after
-                // a live record — so for a terminal opened mid-session this path is the only
-                // trigger. With `>`, the LAST record (the shell's output, seq == read position,
-                // no record following to push the stream ahead) was folded into the model, shown
-                // live, and never fetched to the store: a reload replayed a recording with the
-                // command in it and no output. It survived locally only because the async drain
-                // lagged the record arrivals, leaving the read position behind when the output
-                // landed — luck a loaded runner does not have.
+                // Which comparison that is belongs to `TranscriptCursor`, not here: the index
+                // vs count distinction that decides it is carried by `TranscriptSignal`, and
+                // getting it wrong at this call site is the bug that shipped a terminal whose
+                // output never reached the store. See `Yession.Domain.Terminals`.
                 fetchTranscript terminal
             | ConnectedMsg accepted ->
                 // The client's half of the initial full-state exchange: state restored

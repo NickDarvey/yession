@@ -17,6 +17,41 @@ open Yession.Domain.Terminals
 // seam, shared with every other gated act, because nothing about deciding whether an act
 // may happen is terminal-shaped.
 
+/// What a client has just learned about how far a terminal's transcript has got.
+///
+/// The two cases carry different UNITS, and that is the entire reason this type exists.
+/// `RecordAt` is an INDEX — the seq a live record arrived at. `AvailableLength` is a COUNT —
+/// how many lines the feed says the transcript holds. A client asking "is there something I
+/// have not read?" therefore needs `>=` for one and `>` for the other, against the same read
+/// position.
+///
+/// That comparison used to be made at each call site, and one of them made it with the wrong
+/// operator: `readPositionOf` is the NEXT unread line, so a live record arriving at exactly
+/// that seq IS unread, and `>` skipped it. For a terminal opened mid-session that path is the
+/// only trigger to fetch history — the availability hint is sent once, at accept — so the
+/// LAST record, the shell's output with nothing following to push the stream ahead, was shown
+/// live and never fetched to the store. A reload replayed the command with no output. It only
+/// ever failed on a loaded runner, because a slow local drain left the read position behind
+/// and hid it.
+///
+/// So the units live in the type and the rule lives with the cursor. A caller says what it
+/// SAW; it does not do arithmetic about somebody else's read position.
+type TranscriptSignal =
+    /// A live record arrived at this seq. An index into the transcript.
+    | RecordAt of seq: int
+    /// The feed says the transcript holds this many lines. A count.
+    | AvailableLength of length: int
+
+module TranscriptCursor =
+
+    /// Does this signal mean there are records at or after `readPosition` that have not been
+    /// read? `readPosition` is the NEXT unread line (`NextSeq = first + lines.Length`), never
+    /// the last read one.
+    let unread (readPosition: int) (signal: TranscriptSignal) =
+        match signal with
+        | RecordAt seq -> seq >= readPosition
+        | AvailableLength length -> length > readPosition
+
 /// A terminal's screen size in character cells (Plan 13, stage 2b).
 ///
 /// One size per terminal, not one per viewer. A pty has a single size and every peer is
