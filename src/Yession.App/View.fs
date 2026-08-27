@@ -542,7 +542,11 @@ module View =
                 // decision made about a string nobody finished reading. The rail is narrow,
                 // so this costs a line or two and buys the only thing the prompt is for.
                 let lines =
-                    granted |> List.map (fun line -> html $"""<li class="break-words">{line}</li>""")
+                    // `break-anywhere`, not `break-words`: the strings here are paths, and a
+                    // nix store path is one token with no break opportunity in it at all, so
+                    // the polite rule declines to break and the list runs off the rail. This
+                    // is the one surface where reading all of it is the point.
+                    granted |> List.map (fun line -> html $"""<li class="[overflow-wrap:anywhere]">{line}</li>""")
                 html $"""
                     <div class="{Style.cls [ Style.noAgentBlock; "min-w-0" ]}" data-repo-approval="{RepoRef.value repo}">
                       <div class="{Style.person}">
