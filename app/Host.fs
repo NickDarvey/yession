@@ -57,6 +57,10 @@ type SessionHost =
       /// composed — the Host owns the gate because it owns the doc and the log, and the
       /// table has to arrive from the layer above it.
       SetCommandDispatch : CommandDispatch -> unit
+      /// Tell the peer command surface how a person's consent to a repo's capability set is
+      /// carried out (Plan 27). Set once, from SessionMain, for the same reason the dispatch
+      /// table is: the fold that knows what a repo asks for is composed a layer above this.
+      SetApproveCapabilities : (ActorRef -> RepoRef -> string list -> Async<Result<unit, string>>) -> unit
       /// The gate itself, for the one caller that is not a turn: the fold over every
       /// checkout's `yession.yaml` (Plan 27). It goes through the SAME door the agent's
       /// calls do — which is the reason the gate was made a capability rather than a detail
@@ -372,6 +376,12 @@ let startFull
         // SessionMain has composed the services; empty until then, which is honest — a
         // command proposed before the session is up has nothing to run it.
         let commandDispatch : CommandDispatch ref = ref Map.empty
+        // Until SessionMain sets it, nothing can be consented to — which is the honest state
+        // for a session whose repos are not composed yet, rather than a silent yes.
+        let approveCapabilitiesRef
+            : (ActorRef -> RepoRef -> string list -> Async<Result<unit, string>>) ref =
+            ref (fun _ _ _ -> async { return Error "this session cannot approve anything yet" })
+        let approveCapabilities actor repo granted = approveCapabilitiesRef.Value actor repo granted
 
         // The gate for structured commands (Plan 15, stage 3b; Plan 23): every command
         // passes the classifier on its way to the dispatch table, and hands back the same
@@ -711,6 +721,7 @@ let startFull
                         terminals.Release
                         terminals.Rearm
                         streamAttacher.Reattach
+                        approveCapabilities
                         actorFor
                   OnPresence = fun payload -> broadcastPresenceExcept connectionId payload
                   // Live-mode traffic (Plan 13, stage 2e). Only the two peer-authored frames
@@ -870,6 +881,7 @@ let startFull
               Sandboxes = sandboxes
               Terminals = terminals
               SetCommandDispatch = fun table -> commandDispatch.Value <- table
+              SetApproveCapabilities = fun approve -> approveCapabilitiesRef.Value <- approve
               RunGated = commandGate.Run
               TerminalCommands = terminalCommands
               WaitForNextSessionEnd = waitForNextSessionEnd

@@ -33,12 +33,19 @@ module SessionCommands =
         // the rest, so a session that was given no providers simply cannot: the composition
         // decides, not a flag.
         (reattachTerminal: TerminalId -> Async<Result<TerminalId, string>>)
+        // Consent to a repo's capability set (Plan 27). A function like the rest, so a
+        // session composed without repos simply cannot be asked.
+        (approveCapabilities: ActorRef -> RepoRef -> string list -> Async<Result<unit, string>>)
         (actorFor: PeerId -> ActorRef)
         (peerId: PeerId)
         (command: SessionCommand)
         : Async<SessionCommandResult> =
         async {
             match command with
+            | ApproveRepoCapabilities (repo, granted) ->
+                match! approveCapabilities (actorFor peerId) repo granted with
+                | Ok () -> return CommandAccepted
+                | Error reason -> return CommandRejected reason
             | InterruptAgentTurn turnId ->
                 match requestInterrupt peerId turnId with
                 | Ok () -> return CommandAccepted

@@ -46,6 +46,14 @@ type SessionCommand =
     /// tool call that produced the stream in the first place, and only when the provider
     /// declared that asking again is safe. A new terminal arrives as `TerminalOpened`.
     | ReattachTerminal of TerminalId
+    /// Consent to what a repo's file asks this session for (Plan 27).
+    ///
+    /// Carries the set the person was SHOWN, not just the repo. A capability set is authored
+    /// by whoever can push to the checkout and can change between the screen being drawn and
+    /// the button being pressed — so the Process compares what arrives against what is asked
+    /// now, and refuses if they differ. Approving something other than what you read is the
+    /// failure this exists to prevent, and it would be the easy one to build.
+    | ApproveRepoCapabilities of repo: RepoRef * granted: string list
 
 type SessionCommandResult =
     | CommandAccepted

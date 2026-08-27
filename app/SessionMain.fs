@@ -819,13 +819,20 @@ Async.StartImmediate (
                 // is said to ask for and what an operator reads about a name cannot become
                 // two answers.
                 (fun selection ->
-                    grantsFor selection
-                    |> Result.map (fun leaves ->
-                        leaves |> List.map ResourceLeaf.describe |> List.distinct |> List.sort))
+                    match selection, resourceProfile with
+                    | [], _ -> Ok { RepoSandboxes.Granted = []; RepoSandboxes.Sensitive = false }
+                    | _, None -> grantsFor selection |> Result.map (fun _ -> { RepoSandboxes.Granted = []; RepoSandboxes.Sensitive = false })
+                    | selection, Some file ->
+                        ResourceProfile.resolve file.Resources selection
+                        |> Result.map (fun closure ->
+                            { RepoSandboxes.Granted = ResourceClosure.describe closure
+                              RepoSandboxes.Sensitive = ResourceClosure.isSensitive closure }))
         // How each gated command is carried out, handed to the gate the Host owns. Here —
         // and not closed over a turn — because the table is built from the services, and the
         // services are composed here.
         host.SetCommandDispatch (Commands.dispatch commandServices)
+        // Consent reaches the fold that knows what each repo asks for.
+        host.SetApproveCapabilities (fun actor repo granted -> repoSandboxes.Approve actor repo granted)
         // The reverse leg starts LAST, after the query registry exists and the Host is up:
         // a set frame rebuilds a registry and invalidates a query, and both of those have
         // to be there before the first frame can arrive.

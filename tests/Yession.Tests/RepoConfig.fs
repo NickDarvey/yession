@@ -223,7 +223,16 @@ let private cell (value: 'a) = fun () -> value
 
 /// A session whose host declares no resources: every selection comes to nothing. The
 /// capability notes have their own cases, where a real vocabulary is worth the setup.
-let private noCapabilities : ResourceName list -> Result<string list, string> = fun _ -> Ok []
+let private noCapabilities : ResourceName list -> Result<RepoSandboxes.RepoCapabilities, string> =
+    fun _ -> Ok { RepoSandboxes.Granted = []; RepoSandboxes.Sensitive = false }
+
+/// A vocabulary that grants exactly these lines, and nothing an operator marked sensitive —
+/// so the fold's approval gate stays out of the way of cases about something else.
+let private sensitively (lines: string list) : ResourceName list -> Result<RepoSandboxes.RepoCapabilities, string> =
+    fun _ -> Ok { RepoSandboxes.Granted = lines; RepoSandboxes.Sensitive = true }
+
+let private granting (lines: string list) : ResourceName list -> Result<RepoSandboxes.RepoCapabilities, string> =
+    fun _ -> Ok { RepoSandboxes.Granted = lines; RepoSandboxes.Sensitive = false }
 
 /// A log for the fold to read its own history from and append its notes to. Fresh per case:
 /// what a fold says is a delta against what the session was already told, so a shared log
@@ -475,7 +484,7 @@ let foldTests =
                         (cell WorkSandboxes.unavailable)
                         (recordingGate (ResizeArray<GatedCall> ()))
                         log
-                        (fun _ -> Ok [ "/nix, read-only"; "reaches cache.nixos.org" ])
+                        (granting [ "/nix, read-only"; "reaches cache.nixos.org" ])
                 do! folded.Fold None
                 let! page = log.Read None System.Int32.MaxValue
                 match page.Events |> List.choose (fun e -> match e.Event with SessionEvent.RepoCapabilitiesChanged c -> Some c | _ -> None) with
@@ -500,7 +509,7 @@ let foldTests =
                         (cell WorkSandboxes.unavailable)
                         (recordingGate (ResizeArray<GatedCall> ()))
                         log
-                        (fun _ -> Ok [ "/nix, read-only" ])
+                        (granting [ "/nix, read-only" ])
                 do! folded.Fold None
                 do! folded.Fold None
                 do! folded.Fold None
@@ -524,7 +533,7 @@ let foldTests =
                         (cell WorkSandboxes.unavailable)
                         (recordingGate (ResizeArray<GatedCall> ()))
                         log
-                        (fun _ -> Ok granted)
+                        (granting granted)
                 do! folded.Fold None
                 granted <- [ "/nix, read-only"; "reaches anywhere (sensitive)" ]
                 do! folded.Fold None
@@ -535,6 +544,116 @@ let foldTests =
                 Expect.isTrue
                     (notes |> List.last |> List.exists (fun line -> line.Contains "sensitive"))
                     "and the second note carries the whole set, so a person reads what it is now rather than what moved"
+            }
+
+        // Only a SENSITIVE set waits on somebody. A prompt that appears for every repo is a
+        // prompt people learn to dismiss without reading, which is worse than none — it
+        // launders the one that mattered.
+        testCaseAsync "an ordinary capability set starts without asking anybody" <|
+            async {
+                let r = repo "octo/hello"
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev:\n    uses: [ nix ]\n")
+                let seen = ResizeArray<GatedCall> ()
+                let folded =
+                    RepoSandboxes.create
+                        dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable)
+                        (recordingGate seen) (foldLog ()) (granting [ "/nix, read-only" ])
+                do! folded.Fold None
+                Expect.equal seen.Count 1 "the declaration reached the gate"
+            }
+
+        testCaseAsync "a sensitive capability set starts nothing until somebody approves it" <|
+            async {
+                let r = repo "octo/hello"
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev:\n    uses: [ web ]\n")
+                let seen = ResizeArray<GatedCall> ()
+                let folded =
+                    RepoSandboxes.create
+                        dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable)
+                        (recordingGate seen) (foldLog ()) (sensitively [ "reaches anywhere (sensitive)" ])
+                do! folded.Fold None
+                Expect.equal seen.Count 0 "nothing was started"
+                match folded.Outcomes () with
+                | [ outcome ] ->
+                    Expect.isTrue
+                        (outcome.Problem |> Option.defaultValue "" |> fun p -> p.Contains "approve")
+                        (sprintf "the row says what is waited on, said: %A" outcome.Problem)
+                    Expect.isTrue
+                        (outcome.Problem |> Option.defaultValue "" |> fun p -> p.Contains "reaches anywhere")
+                        "and what is being asked for, so the answer is beside the question"
+                | other -> failwithf "expected one row, got %A" other
+            }
+
+        testCaseAsync "once a person approves it, it starts" <|
+            async {
+                let r = repo "octo/hello"
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev:\n    uses: [ web ]\n")
+                let seen = ResizeArray<GatedCall> ()
+                let log = foldLog ()
+                let folded =
+                    RepoSandboxes.create
+                        dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable)
+                        (recordingGate seen) log (sensitively [ "reaches anywhere (sensitive)" ])
+                do! folded.Fold None
+                let ada = UserRef (UserId.create "ada" |> expect)
+                let! approved = folded.Approve ada r [ "reaches anywhere (sensitive)" ]
+                Expect.equal approved (Ok ()) "a signed-in person may consent"
+                do! folded.Fold None
+                Expect.equal seen.Count 1 "and now it starts"
+            }
+
+        // The agent must not consent on a checkout's behalf. That is the whole reason the
+        // repo is a separate principal from the people in the session.
+        testCaseAsync "the agent cannot approve what a repo asks for" <|
+            async {
+                let r = repo "octo/hello"
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev:\n    uses: [ web ]\n")
+                let folded =
+                    RepoSandboxes.create
+                        dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable)
+                        (recordingGate (ResizeArray<GatedCall> ())) (foldLog ())
+                        (sensitively [ "reaches anywhere (sensitive)" ])
+                match! folded.Approve ActorRef.Agent r [ "reaches anywhere (sensitive)" ] with
+                | Ok () -> failwith "the agent must not be able to consent"
+                | Error e -> Expect.isTrue (e.Contains "signed in") (sprintf "and is told why, said: %s" e)
+            }
+
+        // The other half of the same rule, and the half the agent case does NOT reach: a peer
+        // who never signed in is not somebody whose consent means anything, and `ActorRef`
+        // keeps them apart from a user precisely so this can be asked.
+        testCaseAsync "a peer who is not signed in cannot approve either" <|
+            async {
+                let r = repo "octo/hello"
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev:\n    uses: [ web ]\n")
+                let folded =
+                    RepoSandboxes.create
+                        dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable)
+                        (recordingGate (ResizeArray<GatedCall> ())) (foldLog ())
+                        (sensitively [ "reaches anywhere (sensitive)" ])
+                let anonymous = PeerRef (PeerId.create "peer-1" |> expect)
+                match! folded.Approve anonymous r [ "reaches anywhere (sensitive)" ] with
+                | Ok () -> failwith "an unattributed peer must not be able to consent"
+                | Error e -> Expect.isTrue (e.Contains "signed in") (sprintf "and is told why, said: %s" e)
+            }
+
+        // A capability set is authored by whoever can push to the checkout, so it can change
+        // between a screen being drawn and a button being pressed. Approving something other
+        // than what was read is the failure worth preventing.
+        testCaseAsync "approving a set the repo no longer asks for is refused" <|
+            async {
+                let r = repo "octo/hello"
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev:\n    uses: [ web ]\n")
+                let folded =
+                    RepoSandboxes.create
+                        dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable)
+                        (recordingGate (ResizeArray<GatedCall> ())) (foldLog ())
+                        (sensitively [ "reaches anywhere (sensitive)" ])
+                let ada = UserRef (UserId.create "ada" |> expect)
+                match! folded.Approve ada r [ "reaches nowhere much" ] with
+                | Ok () -> failwith "consent to a set that is not what is asked must not stand"
+                | Error e ->
+                    Expect.isTrue (e.Contains "changed since you looked") (sprintf "and says so, said: %s" e)
+                    Expect.isTrue (e.Contains "reaches anywhere") "naming what it asks for now"
             }
 
         testCaseAsync "a session with no repos service folds nothing rather than failing" <|

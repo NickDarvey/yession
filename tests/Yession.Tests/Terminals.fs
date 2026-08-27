@@ -975,6 +975,7 @@ let private leaseCommandTests =
                                 calls.Add (sprintf "reattach:%s" (TerminalId.value id))
                                 return Ok id
                             })
+                        (fun _ _ _ -> async { return Error "no repos in this composition" })
                         PeerRef
                 let! taken = handle ada (TakeTerminalLease terminalA)
                 Expect.equal taken CommandAccepted "a take always succeeds — it steals rather than asks"

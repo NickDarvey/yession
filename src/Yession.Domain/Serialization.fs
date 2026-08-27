@@ -998,6 +998,21 @@ module Codec =
                   RepoCapabilitiesChanged.Granted = get.Required.Field "granted" (Decode.list Decode.string)
                   RepoCapabilitiesChanged.Actor = get.Required.Field "actor" actor.Decode }) }
 
+    let private repoCapabilitiesApproved : Codec<RepoCapabilitiesApproved> =
+        { Encode =
+            fun (p: RepoCapabilitiesApproved) ->
+                Encode.object
+                    [ "messageId", messageId.Encode p.MessageId
+                      "repo", repoRef.Encode p.Repo
+                      "granted", Encode.list (p.Granted |> List.map Encode.string)
+                      "actor", actor.Encode p.Actor ]
+          Decode =
+            Decode.object (fun get ->
+                { RepoCapabilitiesApproved.MessageId = get.Required.Field "messageId" messageId.Decode
+                  RepoCapabilitiesApproved.Repo = get.Required.Field "repo" repoRef.Decode
+                  RepoCapabilitiesApproved.Granted = get.Required.Field "granted" (Decode.list Decode.string)
+                  RepoCapabilitiesApproved.Actor = get.Required.Field "actor" actor.Decode }) }
+
     let private repoConfigRefused : Codec<RepoConfigRefused> =
         { Encode =
             fun (p: RepoConfigRefused) ->
@@ -1206,6 +1221,10 @@ module Codec =
                     Encode.object
                         [ "type", Encode.string "repoCapabilitiesChanged"
                           "payload", repoCapabilitiesChanged.Encode p ]
+                | RepoCapabilitiesApproved p ->
+                    Encode.object
+                        [ "type", Encode.string "repoCapabilitiesApproved"
+                          "payload", repoCapabilitiesApproved.Encode p ]
                 | ShellProfileSet p ->
                     Encode.object [ "type", Encode.string "shellProfileSet"; "payload", shellProfileSet.Encode p ]
                 | SessionEvent.CommandRefused p ->
@@ -1263,6 +1282,8 @@ module Codec =
                 | "repoConfigRefused" -> Decode.field "payload" repoConfigRefused.Decode |> Decode.map RepoConfigRefused
                 | "repoCapabilitiesChanged" ->
                     Decode.field "payload" repoCapabilitiesChanged.Decode |> Decode.map RepoCapabilitiesChanged
+                | "repoCapabilitiesApproved" ->
+                    Decode.field "payload" repoCapabilitiesApproved.Decode |> Decode.map RepoCapabilitiesApproved
                 | "workSandboxStopped" -> Decode.field "payload" workSandboxStopped.Decode |> Decode.map WorkSandboxStopped
                 | "shellProfileSet" -> Decode.field "payload" shellProfileSet.Decode |> Decode.map ShellProfileSet
                 | "commandRefused" -> Decode.field "payload" commandRefused.Decode |> Decode.map SessionEvent.CommandRefused
@@ -1484,11 +1505,21 @@ module Codec =
                 | RearmTerminal id ->
                     Encode.object [ "kind", Encode.string "rearmTerminal"; "terminalId", terminalId.Encode id ]
                 | ReattachTerminal id ->
-                    Encode.object [ "kind", Encode.string "reattachTerminal"; "terminalId", terminalId.Encode id ])
+                    Encode.object [ "kind", Encode.string "reattachTerminal"; "terminalId", terminalId.Encode id ]
+                | ApproveRepoCapabilities (repo, granted) ->
+                    Encode.object
+                        [ "kind", Encode.string "approveRepoCapabilities"
+                          "repo", repoRef.Encode repo
+                          "granted", Encode.list (granted |> List.map Encode.string) ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
                 | "interruptAgentTurn" -> Decode.field "agentTurnId" agentTurnId.Decode |> Decode.map InterruptAgentTurn
+                | "approveRepoCapabilities" ->
+                    Decode.map2
+                        (fun repo granted -> ApproveRepoCapabilities (repo, granted))
+                        (Decode.field "repo" repoRef.Decode)
+                        (Decode.field "granted" (Decode.list Decode.string))
                 | "openTerminal" -> Decode.field "title" Decode.string |> Decode.map OpenTerminal
                 | "closeTerminal" -> Decode.field "terminalId" terminalId.Decode |> Decode.map CloseTerminal
                 | "takeTerminalLease" -> Decode.field "terminalId" terminalId.Decode |> Decode.map TakeTerminalLease

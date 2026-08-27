@@ -22,9 +22,16 @@ module Yession.Host.RepoSandboxes
 
 open Yession.Domain
 open Yession.Domain.Repos
+open Yession.Domain.Sandboxes
 open Yession.Domain.Agent
 open Yession.Domain.Tools
 open Yession.SessionProcess
+
+/// What a repo's selection comes to: the lines a person reads, and whether any of it is
+/// something the operator marked as worth being asked about.
+type RepoCapabilities =
+    { Granted : string list
+      Sensitive : bool }
 
 /// What the last fold made of one repo. `Sandbox = None` is about the FILE itself — it
 /// could not be read — and the distinction matters because those are fixed in different
@@ -44,14 +51,22 @@ type RepoSandboxes =
       Outcomes : unit -> FoldOutcome list
       /// Sandboxes this session is running that no file declares any more. Named rather
       /// than stopped.
-      Undeclared : unit -> SandboxRef list }
+      Undeclared : unit -> SandboxRef list
+      /// Consent to what a repo asks for, on the authority of a person.
+      ///
+      /// Takes the set the person was SHOWN and refuses if it is not the set asked for now.
+      /// A capability set is authored by whoever can push to the checkout and can change
+      /// between a screen being drawn and a button being pressed — approving something other
+      /// than what was read is the failure worth preventing, and it is the easy one to build.
+      Approve : ActorRef -> RepoRef -> string list -> Async<Result<unit, string>> }
 
 /// A session with nothing to fold: no repos service, or a composition without one. Total,
 /// so a caller never branches on whether the fold exists.
 let none : RepoSandboxes =
     { Fold = fun _ -> async { return () }
       Outcomes = fun () -> []
-      Undeclared = fun () -> [] }
+      Undeclared = fun () -> []
+      Approve = fun _ _ _ -> async { return Error "this session has no repos to approve anything for" } }
 
 /// What the log already says about one declaration: the reason it was last refused, when
 /// that refusal is still the last word about it.
@@ -93,16 +108,30 @@ let private lastCapabilities (events: SessionEvent list) (repo: RepoRef) : strin
         | _ -> None)
     |> List.tryLast
 
+/// What a person last consented to for this repo.
+let private lastApproved (events: SessionEvent list) (repo: RepoRef) : string list option =
+    events
+    |> List.choose (fun event ->
+        match event with
+        | SessionEvent.RepoCapabilitiesApproved a when RepoRef.value a.Repo = RepoRef.value repo ->
+            Some a.Granted
+        | _ -> None)
+    |> List.tryLast
+
 let create
     (reposDir: string)
     (repos: unit -> Repos.ReposService option)
     (sandboxes: unit -> WorkSandboxes.WorkSandboxes)
     (run: RunGatedCommand)
     (log: EventLog<SessionEvent>)
-    // What a selection of resource names comes to, in the words a person is shown. The fold
-    // needs it because a capability set is a fact about a REPO, not about one of its
-    // sandboxes, and only the fold sees all of a repo's declarations at once.
-    (capabilitiesOf: ResourceName list -> Result<string list, string>)
+    // What a selection of resource names comes to. The fold needs it because a capability
+    // set is a fact about a REPO, not about one of its sandboxes, and only the fold sees all
+    // of a repo's declarations at once.
+    //
+    // Sensitivity is REPORTED rather than inferred from the words: reading it back out of a
+    // rendered description would make the prompt depend on the wording of a sentence, and the
+    // wording is a design that will move.
+    (capabilitiesOf: ResourceName list -> Result<RepoCapabilities, string>)
     : RepoSandboxes =
 
     let mintMessageId () : MessageId =
@@ -166,7 +195,8 @@ let create
                         // down, said per declaration and with the reason. Saying it twice
                         // here, in different words, would be two accounts of one fault.
                         | Error _ -> ()
-                        | Ok granted ->
+                        | Ok capabilities ->
+                            let granted = capabilities.Granted
                             if lastCapabilities told repo <> Some granted then
                                 let actor = ActorRef.Configured repo
                                 do!
@@ -177,6 +207,22 @@ let create
                                               RepoCapabilitiesChanged.Repo = repo
                                               RepoCapabilitiesChanged.Granted = granted
                                               RepoCapabilitiesChanged.Actor = actor })
+                    // Which repos are waiting on somebody. Only a SENSITIVE set waits: a
+                    // repo asking for a cache and a store is not a decision anybody wants to
+                    // be asked to make, and a prompt that appears for everything is a prompt
+                    // people learn to dismiss without reading — which is worse than none,
+                    // because it launders the one that mattered.
+                    let awaiting =
+                        byRepo
+                        |> List.choose (fun (_, entries) ->
+                            let repo = entries |> List.head |> fst
+                            let asked = entries |> List.collect (fun (_, decl) -> decl.Uses) |> List.distinct
+                            match capabilitiesOf asked with
+                            | Ok capabilities when
+                                capabilities.Sensitive && lastApproved told repo <> Some capabilities.Granted ->
+                                Some (RepoRef.value repo, capabilities.Granted)
+                            | _ -> None)
+                        |> Map.ofList
                     let! declarations =
                         declared
                         |> Map.toList
@@ -187,6 +233,21 @@ let create
                                 // writes a repo scope. A session-owned one here would mean
                                 // the union had been fed something no file produced.
                                 | SessionOwned -> return None
+                                | RepoOwned repo when Map.containsKey (RepoRef.value repo) awaiting ->
+                                    // Nothing starts until somebody says yes. The row says
+                                    // what is being asked, so the answer to "why is my
+                                    // sandbox not running" is in the same place as what to do
+                                    // about it.
+                                    return
+                                        Some
+                                            { Repo = repo
+                                              Sandbox = Some ref
+                                              Problem =
+                                                Some (
+                                                    sprintf
+                                                        "waiting for somebody in this session to approve what %s asks for: %s"
+                                                        (RepoRef.value repo)
+                                                        (String.concat "; " (Map.find (RepoRef.value repo) awaiting))) }
                                 | RepoOwned repo ->
                                     let call =
                                         Commands.startWorkSandboxCall
@@ -245,6 +306,65 @@ let create
                                           RepoConfigRefused.Actor = actor })
         }
 
+    /// What this repo asks for right now, or nothing when its selection does not resolve.
+    let askedBy (declared: Map<SandboxRef, SandboxDecl>) (repo: RepoRef) =
+        declared
+        |> Map.toList
+        |> List.choose (fun (ref, decl) ->
+            match SandboxRef.scope ref with
+            | RepoOwned owner when RepoRef.value owner = RepoRef.value repo -> Some decl.Uses
+            | _ -> None)
+        |> List.collect id
+        |> List.distinct
+        |> capabilitiesOf
+        |> Result.toOption
+        |> Option.map (fun capabilities -> capabilities.Granted)
+
+    /// Consent to what a repo asks for.
+    ///
+    /// Refused unless the caller is an attributed HUMAN. The agent must not consent on a
+    /// repo's behalf — a checkout that could approve itself is a checkout nobody is deciding
+    /// about, which is the whole reason the repo is a separate principal.
+    let approve (actor: ActorRef) (repo: RepoRef) (granted: string list) : Async<Result<unit, string>> =
+        async {
+            match actor with
+            | UserRef _ ->
+                match repos () with
+                | None -> return Error "this session has no repos"
+                | Some service ->
+                    match! service.ListRepos () with
+                    | Error reason -> return Error reason
+                    | Ok listings ->
+                        let declared, _ =
+                            RepoConfig.readAll reposDir (listings |> List.map (fun listing -> listing.Repo))
+                        match askedBy declared repo with
+                        | None -> return Error (sprintf "%s asks for nothing this session can resolve" (RepoRef.value repo))
+                        // The set that arrived is the set a person read. If it is not what
+                        // the repo asks for now, the file moved under them and the decision
+                        // they made is not the one they would make.
+                        | Some asked when asked <> granted ->
+                            return
+                                Error (
+                                    sprintf
+                                        "what %s asks for changed since you looked — it now asks for %s"
+                                        (RepoRef.value repo)
+                                        (String.concat "; " asked))
+                        | Some asked ->
+                            do!
+                                append
+                                    actor
+                                    (SessionEvent.RepoCapabilitiesApproved
+                                        { RepoCapabilitiesApproved.MessageId = mintMessageId ()
+                                          RepoCapabilitiesApproved.Repo = repo
+                                          RepoCapabilitiesApproved.Granted = asked
+                                          RepoCapabilitiesApproved.Actor = actor })
+                            return Ok ()
+            | _ ->
+                return
+                    Error
+                        "only somebody signed in can approve what a repo asks for — an agent cannot consent on a checkout's behalf"
+        }
+
     let undeclared () =
         (sandboxes ()).Listed ()
         |> List.map (fun entry -> entry.Ref)
@@ -257,7 +377,8 @@ let create
 
     { Fold = fold
       Outcomes = fun () -> outcomes
-      Undeclared = undeclared }
+      Undeclared = undeclared
+      Approve = approve }
 
 // --- the `repo_config` query ------------------------------------------------------------
 
