@@ -211,6 +211,9 @@ let sdpField (json: string) : string = jsNative
 [<Emit("process.env[$0] || $1")>]
 let envOr (name: string) (fallback: string) : string = jsNative
 
+[<Emit("process.env[$0] = $1")>]
+let setEnv (name: string) (value: string) : unit = jsNative
+
 /// How this deployment is reached from outside: the two operator
 /// variables, parsed into the one value that decides both the Manager's public origin
 /// and where sessions live. Error = a combination that cannot be deployed; every caller

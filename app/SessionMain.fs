@@ -167,6 +167,13 @@ let private secretsCapabilitiesFor (sessionId: SessionId) =
 // workspace a terminal opens in and not something this file can decide alone.
 let private reposDir = Sandboxes.SessionLayout.prepareReposDir dataDir
 
+// Prepared HERE, at module scope beside the repos directory, because srt reads
+// `CLAUDE_CODE_TMPDIR` off this process at every wrap: it has to be settled before the
+// first sandbox is built, and every route to one goes through this file. Bound rather than
+// discarded so the compiler keeps it, and so a reader can see the path the session's
+// commands will write their temporary files to.
+let private tmpDir = Sandboxes.SessionLayout.prepareTmpDir dataDir
+
 /// Where a work sandbox works. Host-family sandboxes work under the session's own data
 /// directory; a docker sandbox's workspace is the image's, which nothing here composes.
 ///
