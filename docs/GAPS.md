@@ -201,6 +201,40 @@ Items are roughly ordered by how much they matter.
       is not a policy this can compute — the honest fix is srt allowing the symlink nodes on
       the way to a granted path, which is the same one-line widening `/usr/bin/git` ->
       `/var/select` wanted above.
+    - **`dotnet` cannot run a build in an srt sandbox on macOS, and no resource fixes it.**
+      .NET's named mutexes `stat("/tmp/")` — hardcoded, so redirecting `TMPDIR` does not
+      reach it — and the SDK takes one on first use, from `NuGet.Common.Migrations`. `/tmp`
+      is a symlink, so it is denied for the reason above, and `check` inside a sandbox dies
+      before it compiles anything:
+
+          System.IO.IOException: ... 'NuGet-Migrations'. One or more system calls failed:
+          stat("/tmp/", ...) == -1; errno == EPERM
+
+      An operator cannot grant it. Declaring `/tmp` is refused as non-canonical (#330);
+      declaring `/private/tmp` is accepted and leaves `stat("/tmp/")` refused, measured.
+      `DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1` does not skip it either — set and verified
+      present in the sandbox's env, same failure.
+
+      **What was tried, so it is not tried again.** The deny is `["/"]`, and srt denies that
+      subpath literally on macOS, which is what catches the link. Three variants, each
+      measured in a real sandbox:
+
+      - **Deny `/`'s non-symlink children instead.** `stat("/tmp/")` succeeds — and
+        `/etc/passwd` becomes readable. Seatbelt matches the path as WRITTEN, not
+        canonicalised, so a `/private` deny does not cover `/etc/...`. A confinement
+        regression, not a fix.
+      - **…plus deny `<link>/**` for each.** `/etc/passwd` denied again, and `stat("/tmp/")`
+        refused again: `globToRegex` turns `**` into `.*`, which matches the empty string, so
+        the trailing slash lands back inside the deny.
+      - **…plus deny `<link>/?**`** (`^/etc/[^/].*$`, at least one character past the link).
+        `stat("/tmp/")` succeeds and BOTH `/etc/passwd` and `/tmp` are readable again — the
+        glob deny stops applying, for a reason not visible from outside Seatbelt.
+
+      Reverted rather than shipped on the third reading, because two of the three states are
+      a leak and the difference between them is not understood. The fix is srt's: allow
+      `file-read-metadata` on the symlink NODES on the way to a granted path, the same
+      one-line widening `/usr/bin/git` -> `/var/select` has wanted since before this. Until
+      then a work sandbox on macOS can run nix, node and git, and cannot run the .NET SDK.
     - **A granted executable that cannot RUN is invisible to the start-up checks.** Measured:
       the `nix` an operator would name on nix-darwin (`/run/current-system/sw/bin/nix`,
       canonically `…-nix-2.34.6+1/bin/nix`) aborts under Seatbelt — `Abort trap: 6`, exit 134
