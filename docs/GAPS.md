@@ -538,6 +538,28 @@ Items are roughly ordered by how much they matter.
   durably on `AgentTurnStarted.Woke` and shows it in the chat — and by the human interrupt,
   which is no bound at all for a session nobody is watching. A per-session woken-turn budget
   is the next dial and is deliberately not built in advance.
+- **Watching a pull request is polling, deliberately.** A session asks GitHub about each
+  watched pull request every 60 seconds rather than being told
+  ([ADR](decisions/2026-08-27-pr-state-by-polling.md)); the reasons are that a repo webhook
+  needs admin on the repo, and inbound delivery needs a deployment github.com can reach,
+  which the loopback default is not. What follows from that, all accepted:
+  - **Up to a minute of latency**, and no way to ask for less short of editing
+    `GitHubPrs.PollIntervalMs`. The hosted dispatching service the ADR describes is the
+    exit, and it does not exist.
+  - **Check runs only.** The legacy commit-status API is not read, so a repo whose CI
+    reports only statuses (no check runs) reads as having no checks rather than as
+    failing — the safe direction, and invisible.
+  - **The first 100 check runs on a commit.** No pagination; a commit with more is
+    rolled up from a prefix, biased toward pending.
+  - **Only rollup FLIPS are announced.** A push that resets checks to pending and ends
+    green again says nothing, because entering pending is the ordinary rhythm of work and
+    a notification per push is a notification nobody reads.
+  - **A rate-limited watch waits out GitHub's own reset window** and says so in the
+    `github_prs` query's status column — it does not fail, and it does not retry sooner.
+  - **A transition wakes a turn**, which joins the wake→turn loop above as a third source.
+    Flapping CI can wake once per genuine flip, and the per-session woken-turn budget is
+    still deliberately unbuilt. The log-anchored baseline bounds it to one turn per
+    transition; it does not bound how many transitions a flapping suite produces.
 - **Repo integration is the read-only bootstrap slice** (Plan 14): typed clone-and-orient verbs
   beside the agent, one repos dir shared into the WorkSandbox, GitHub sign-in per user over the
   device flow. Remaining, deliberate:
