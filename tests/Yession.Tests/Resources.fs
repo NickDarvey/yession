@@ -61,6 +61,19 @@ let private genLeafFor (i: int) : Gen<ResourceLeaf> =
             | _ -> Exec (sprintf "/bin/tool%d" i)
     }
 
+/// A host that can express some arbitrary subset of the distinctions.
+let private genLimits : Gen<HostLimits> =
+    gen {
+        let! sockets = Gen.int32 (Range.linear 0 1)
+        let! egress = Gen.int32 (Range.linear 0 1)
+        let! overlay = Gen.int32 (Range.linear 0 1)
+        return
+            HostLimits.of' (
+                [ if sockets = 1 then HostDistinction.SocketsByPath
+                  if egress = 1 then HostDistinction.EgressByHost
+                  if overlay = 1 then HostDistinction.OverlayMounts ])
+    }
+
 let private genSensitivity : Gen<Sensitivity> =
     Gen.int32 (Range.linear 0 3)
     |> Gen.map (fun n -> if n = 0 then Sensitivity.Sensitive else Sensitivity.Ordinary)
@@ -567,5 +580,119 @@ let tests =
                     (lines |> List.filter (fun line -> line.Contains "(sensitive)") |> List.length)
                     (Set.count (ResourceClosure.sensitiveLeaves closure))
                     "and every sensitive leaf carries the mark"
+            }
+
+        // --- the third author: what this host can actually express -------------------------
+
+        // The rule that makes this an algebra rather than a table of platform quirks: a leaf
+        // is realised exactly when the host can make the distinction its KIND requires. A
+        // host that can make all of them changes nothing at all — which is what says the
+        // machinery costs nothing where it is not needed.
+        check "a host that can express everything grants exactly what was asked" <| fun () ->
+            property {
+                let! declarations = genDag
+                let! selection = genSelection declarations
+                let profile = ResourceProfile.load declarations |> expect
+                let closure = ResourceProfile.resolve profile selection |> expect
+                let realised = RealisedClosure.of' HostLimits.unlimited closure
+                Expect.equal (RealisedClosure.differences realised) [] "nothing differs"
+                Expect.equal (RealisedClosure.held realised) (ResourceClosure.leaves closure)
+                    "and everything asked for is held"
+            }
+
+        // The leaves that need no distinction are the ones every backend expresses the same
+        // way, and they must never appear as a difference however poor the host. Without this
+        // the rule could quietly grow into "anything might degrade", which is a table again.
+        check "a mount, a variable and an executable are the same grant on every host" <| fun () ->
+            property {
+                let! declarations = genDag
+                let! selection = genSelection declarations
+                let! limits = genLimits
+                let profile = ResourceProfile.load declarations |> expect
+                let closure = ResourceProfile.resolve profile selection |> expect
+                let realised = RealisedClosure.of' limits closure
+                let differing = RealisedClosure.differences realised |> List.map fst
+                for leaf in differing do
+                    match leaf with
+                    | Variable _
+                    | Exec _ -> failwithf "%A cannot depend on the host" leaf
+                    | Mount mount ->
+                        Expect.equal mount.Mode ResourceMountMode.Overlay
+                            "only an overlay mount can, and only because no backend has a union mount"
+                    | Socket _
+                    | Endpoint _ -> ()
+            }
+
+        // Every difference is one of the two directions, and which one is not a detail: a
+        // coarsening is still HELD — wider than asked — and a withholding is not held at all.
+        // A materialiser that dropped a coarsened leaf would give a sandbox less than the
+        // person approved rather than more, which is the opposite mistake and just as wrong.
+        check "a coarsened grant is still held, a withheld one is not" <| fun () ->
+            property {
+                let! declarations = genDag
+                let! selection = genSelection declarations
+                let! limits = genLimits
+                let profile = ResourceProfile.load declarations |> expect
+                let closure = ResourceProfile.resolve profile selection |> expect
+                let realised = RealisedClosure.of' limits closure
+                let held = RealisedClosure.held realised
+                for leaf, outcome in RealisedClosure.differences realised do
+                    match outcome with
+                    | LeafRealisation.Coarsened _ ->
+                        Expect.isTrue (Set.contains leaf held) (sprintf "%A is wider, not absent" leaf)
+                    | LeafRealisation.Withheld _ ->
+                        Expect.isFalse (Set.contains leaf held) (sprintf "%A is not granted" leaf)
+                    | LeafRealisation.AsAsked -> failwith "an unchanged leaf is not a difference"
+            }
+
+        // Held is always a subset of asked. The coarsening is a widening of what ONE leaf
+        // means, never a new leaf — so nothing a person was not shown can appear here, which
+        // is the invariant the whole module exists for, still true after a third author.
+        check "a host never adds a leaf nobody asked for" <| fun () ->
+            property {
+                let! declarations = genDag
+                let! selection = genSelection declarations
+                let! limits = genLimits
+                let profile = ResourceProfile.load declarations |> expect
+                let closure = ResourceProfile.resolve profile selection |> expect
+                let realised = RealisedClosure.of' limits closure
+                Expect.isTrue
+                    (Set.isSubset (RealisedClosure.held realised) (ResourceClosure.leaves closure))
+                    "held is within asked"
+            }
+
+        // Realising is a projection: putting an answer through the same host again changes
+        // nothing. Without this a caller could not safely re-derive the actual grant, which is
+        // what a page re-render and a sandbox restart both do.
+        check "realising the same selection twice says the same thing" <| fun () ->
+            property {
+                let! declarations = genDag
+                let! selection = genSelection declarations
+                let! limits = genLimits
+                let profile = ResourceProfile.load declarations |> expect
+                let closure = ResourceProfile.resolve profile selection |> expect
+                let once = RealisedClosure.of' limits closure
+                let twice = RealisedClosure.of' limits (ResourceProfile.resolve profile selection |> expect)
+                Expect.equal (RealisedClosure.differences twice) (RealisedClosure.differences once) "same differences"
+                Expect.equal (RealisedClosure.held twice) (RealisedClosure.held once) "same held"
+            }
+
+        // Every difference is SAID, because a difference nobody is told about is the fault
+        // this whole layer exists to remove — the Linux socket grant that resolved, prompted,
+        // started, and then did not work.
+        check "every difference gets a line a person can read" <| fun () ->
+            property {
+                let! declarations = genDag
+                let! selection = genSelection declarations
+                let! limits = genLimits
+                let profile = ResourceProfile.load declarations |> expect
+                let closure = ResourceProfile.resolve profile selection |> expect
+                let realised = RealisedClosure.of' limits closure
+                Expect.equal
+                    (List.length (RealisedClosure.describeDifferences realised))
+                    (List.length (RealisedClosure.differences realised))
+                    "one line each"
+                for line in RealisedClosure.describeDifferences realised do
+                    Expect.isFalse (line = "") "and none of them empty"
             }
     ]
