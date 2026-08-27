@@ -43,6 +43,7 @@ let emptyPolicy : SandboxPolicy =
       WritePaths = []
       AllowedDomains = None
       Sockets = []
+      Realisation = []
       Env = Map.empty
       WorkingDirectory = None
       Filesystem = Confined }

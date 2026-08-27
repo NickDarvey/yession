@@ -69,6 +69,7 @@ let private policyIn (workspace: string) (domains: string list) : SandboxPolicy 
       WritePaths = [ workspace ]
       AllowedDomains = Some domains
       Sockets = []
+      Realisation = []
       Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
       WorkingDirectory = Some workspace
       Filesystem = Confined }

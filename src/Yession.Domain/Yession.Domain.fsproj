@@ -29,6 +29,11 @@
     <Compile Include="Ansi.fs" />
     <Compile Include="Transcript.fs" />
     <Compile Include="EventLog.fs" />
+    <!-- The operator's vocabulary and the algebra that flattens it. Before Sandbox.fs,
+         because a POLICY carries what this host could actually make of a selection and so
+         has to know what a leaf is. Depends on nothing but Identity.fs — it knows nothing
+         of sandboxes, backends or toolchains, which is what lets it sit this early. -->
+    <Compile Include="Resources.fs" />
     <Compile Include="Sandbox.fs" />
     <!-- Where a terminal's bytes come from (Plan 16, part D). Right after Sandbox.fs
          because it reuses `PtyHandle` rather than minting a parallel handle. -->
@@ -61,12 +66,6 @@
          (a declaration is an `EnvironmentSpec` serialization), Identity.fs (it is keyed
          by `SandboxRef`) and Repos.fs, which owns the repo it belongs to. Pure and
          parser-free: it decodes a tree somebody else parsed. -->
-    <!-- The operator's vocabulary, and the algebra that flattens a selection of it.
-         Before Config.fs, which decodes a repo's SELECTION from it: a repo names
-         resources and can never write a host path, so the names have to mean something
-         before the file that uses them is read. Depends on nothing but Identity.fs —
-         it knows nothing of sandboxes, backends or toolchains. -->
-    <Compile Include="Resources.fs" />
     <!-- What an OPERATOR writes: the counterpart of Config.fs, and the only place a
          path or a hostname is named. After Resources.fs, whose algebra it decodes
          into and whose refusals it reaches through rather than repeating. -->

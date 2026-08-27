@@ -330,6 +330,64 @@ let private sandboxPolicyTests =
             let config = Sandboxes.SrtSandbox.configFor (toolsWithRuntime []) Support.emptyPolicy
             Expect.equal config.AllowUnixSockets [] "no sockets, none allowed"
 
+        // --- what this host can actually express -------------------------------------------
+
+        // The measured split, and the reason the whole layer exists: one declaration is a
+        // scoped grant on a Mac and, on Linux, either every unix socket or none.
+        testCase "srt scopes a socket by path on macOS and cannot on Linux" <| fun () ->
+            Expect.isTrue
+                (Sandboxes.limitsFor SrtBackend "darwin" |> HostLimits.can HostDistinction.SocketsByPath)
+                "Seatbelt takes a network-outbound rule on the path"
+            Expect.isFalse
+                (Sandboxes.limitsFor SrtBackend "linux" |> HostLimits.can HostDistinction.SocketsByPath)
+                "seccomp-bpf cannot read a socket path out of user-space memory"
+            for platform in [ "darwin"; "linux" ] do
+                Expect.isTrue
+                    (Sandboxes.limitsFor SrtBackend platform |> HostLimits.can HostDistinction.EgressByHost)
+                    (sprintf "egress it scopes on both, through its own proxy (%s)" platform)
+
+        // docker's egress is unfiltered, which until now was `AllowedDomains = None` and
+        // unsaid anywhere a person could read it.
+        testCase "docker binds a socket by path and filters no egress" <| fun () ->
+            let docker = Sandboxes.limitsFor DockerBackend "linux"
+            Expect.isTrue (HostLimits.can HostDistinction.SocketsByPath docker) "a bind mount is per path"
+            Expect.isFalse (HostLimits.can HostDistinction.EgressByHost docker) "and it filters nothing"
+
+        // A granted socket on Linux is COARSENED, not lost: the policy still holds it, says so,
+        // and the backend is told to do the wider thing. All three, because any two without
+        // the third is a lie — a report about something that did not happen, or a widening
+        // nobody was told about.
+        testCase "a socket this host cannot scope is still granted, said, and widened" <| fun () ->
+            let policy =
+                Sandboxes.policyFor
+                    // Linux: the host that cannot make this distinction, which is the whole
+                    // case. On darwin there is nothing to coarsen and nothing to report.
+                    SrtBackend (Sandboxes.limitsFor SrtBackend "linux") Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
+                    [ Socket "/run/docker.sock" ]
+                    EnvironmentSpec.defaults
+                |> expect
+            Expect.equal policy.Sockets [ "/run/docker.sock" ] "still granted"
+            match policy.Realisation with
+            | [ Socket "/run/docker.sock", LeafRealisation.Coarsened got ] ->
+                Expect.isTrue (got.Contains "any unix socket") (sprintf "and said, as: %s" got)
+            | other -> failwithf "expected one coarsened socket, got %A" other
+            let config = Sandboxes.SrtSandbox.configFor (toolsWithRuntime []) policy
+            Expect.isTrue config.AllowAllUnixSockets "and the backend does the wider thing it said it would"
+
+        // The common case says nothing. A host that can express the whole selection must not
+        // produce a "no degradations" report for somebody to read past.
+        testCase "a host that can express the grant reports nothing" <| fun () ->
+            let policy =
+                Sandboxes.policyFor
+                    SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
+                    [ Mount { From = "/opt/tools"; At = "/opt/tools"; Mode = ResourceMountMode.Read }
+                      Variable ("LANG", "C.UTF-8") ]
+                    EnvironmentSpec.defaults
+                |> expect
+            Expect.equal policy.Realisation [] "nothing to say"
+            let config = Sandboxes.SrtSandbox.configFor (toolsWithRuntime []) policy
+            Expect.isFalse config.AllowAllUnixSockets "and nothing widened"
+
         // --- what a sandbox is asked to prove before it is declared started -----------------
 
         // The order is the whole design. A HOME that cannot be written makes half the list
@@ -650,7 +708,7 @@ let private sandboxPolicyTests =
             let ambient = Map.ofList [ "PATH", "/usr/bin"; "HOME", "/home/u" ]
             let resolved = Map.ofList [ "HOME", "/workspace-home"; "TOKEN", "t" ]
             let host =
-                Sandboxes.policyFor HostBackend ambient resolved (Some "/ws") (Some "/repos") (Some "/ws/home") [] EnvironmentSpec.defaults
+                Sandboxes.policyFor HostBackend (Sandboxes.limitsFor HostBackend "linux") ambient resolved (Some "/ws") (Some "/repos") (Some "/ws/home") [] EnvironmentSpec.defaults
                 |> expect
             Expect.equal (Map.tryFind "HOME" host.Env) (Some "/workspace-home") "the spec's variable wins"
             Expect.equal (Map.tryFind "PATH" host.Env) (Some "/usr/bin") "the baseline fills the rest"
@@ -658,7 +716,7 @@ let private sandboxPolicyTests =
             Expect.isTrue
                 (List.contains "/repos" host.WritePaths)
                 "the repos dir is a write path of its own (Plan 14)"
-            let docker = Sandboxes.policyFor DockerBackend ambient resolved None None None [] EnvironmentSpec.defaults |> expect
+            let docker = Sandboxes.policyFor DockerBackend (Sandboxes.limitsFor DockerBackend "linux") ambient resolved None None None [] EnvironmentSpec.defaults |> expect
             Expect.equal (Map.tryFind "PATH" docker.Env) None "a docker image supplies its own base env"
             Expect.equal (Map.tryFind "TOKEN" docker.Env) (Some "t") "only the spec's variables inject"
 
@@ -670,6 +728,7 @@ let private sandboxPolicyTests =
             let policy =
                 Sandboxes.policyFor
                     SrtBackend
+                    (Sandboxes.limitsFor SrtBackend "darwin")
                     (Map.ofList [ "HOME", "/Users/operator" ])
                     Map.empty
                     (Some "/data/s/workspace")
@@ -702,7 +761,7 @@ let private sandboxPolicyTests =
         testCase "what the operator granted reaches the sandbox without it asking" <| fun () ->
             let policy =
                 Sandboxes.policyFor
-                    SrtBackend Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
+                    SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
                     [ Mount { From = "/nix"; At = "/nix"; Mode = ResourceMountMode.Read }
                       Socket "/nix/var/nix/daemon-socket"
                       Endpoint "cache.nixos.org"
@@ -723,7 +782,7 @@ let private sandboxPolicyTests =
         testCase "a grant is not bounded by the ceiling a repo is held to" <| fun () ->
             let policy =
                 Sandboxes.policyFor
-                    SrtBackend Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
+                    SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
                     [ Endpoint "cache.nixos.org" ]
                     EnvironmentSpec.defaults
                 |> expect
@@ -737,7 +796,7 @@ let private sandboxPolicyTests =
         testCase "an overlay is refused rather than quietly becoming a write" <| fun () ->
             match
                 Sandboxes.policyFor
-                    SrtBackend Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
+                    SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
                     [ Mount { From = "/h/.npm"; At = "/h/.npm"; Mode = ResourceMountMode.Overlay } ]
                     EnvironmentSpec.defaults
             with
@@ -751,7 +810,7 @@ let private sandboxPolicyTests =
         testCase "a granted executable's directory leads PATH" <| fun () ->
             let policy =
                 Sandboxes.policyFor
-                    SrtBackend (Map.ofList [ "PATH", "/usr/bin" ]) Map.empty (Some "/ws") None (Some "/ws/home")
+                    SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") (Map.ofList [ "PATH", "/usr/bin" ]) Map.empty (Some "/ws") None (Some "/ws/home")
                     [ Exec "/nix/store/abc/bin/git" ]
                     EnvironmentSpec.defaults
                 |> expect
@@ -772,6 +831,7 @@ let private sandboxPolicyTests =
             let policy =
                 Sandboxes.policyFor
                     SrtBackend
+                    (Sandboxes.limitsFor SrtBackend "darwin")
                     Map.empty
                     Map.empty
                     (Some "/data/s/workspace")
@@ -796,6 +856,7 @@ let private sandboxPolicyTests =
             let policy =
                 Sandboxes.policyFor
                     SrtBackend
+                    (Sandboxes.limitsFor SrtBackend "darwin")
                     Map.empty
                     Map.empty
                     (Some "/data/s/workspace")
@@ -1564,7 +1625,7 @@ let private acceptanceE2eTests =
                 let name = SessionId.value (SessionId.mint ())
                 let spec = { EnvironmentSpec.defaults with Runtime = Container { ContainerSpec.defaults with Image = Some { Name = "alpine"; Tag = Some "3" } } }
                 let createSandbox = Sandboxes.forBackend DockerBackend name spec |> expect
-                match! createSandbox ((Sandboxes.policyFor DockerBackend Map.empty Map.empty None None None [] EnvironmentSpec.defaults |> expect)) with
+                match! createSandbox ((Sandboxes.policyFor DockerBackend (Sandboxes.limitsFor DockerBackend "linux") Map.empty Map.empty None None None [] EnvironmentSpec.defaults |> expect)) with
                 | Error reason -> failwithf "docker sandbox failed: %s" reason
                 | Ok sandbox ->
                     let! run, out, _ = runInSandbox sandbox "echo" [ "hello-from-docker" ] Map.empty None
