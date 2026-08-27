@@ -30,6 +30,31 @@ let private mkdtemp (fs: obj) (os: obj) : string = jsNative
 
 /// A directory nothing else in this run writes to.
 let private tempDir () : string = mkdtemp nodeFs nodeOs
+
+/// A sandbox whose only behaviour is how its one spawn ends. Enough to drive
+/// `SessionEnvironment.verify`, which asks a sandbox exactly one question.
+let private sandboxAnswering (answer: (OutputStream * string -> unit) -> Async<Result<SandboxProcessHandle, string>>) : Sandbox =
+    { Ref = "fake"
+      Spawn = fun _ onChunk -> answer onChunk
+      SpawnPty = None
+      Dispose = fun () -> async { return () } }
+
+/// A sandbox whose verification program reports the check at `index` as the first failure —
+/// which is what the real program prints, so the index this writes and the index `explain`
+/// reads have to agree or these tests go red.
+let private failingAt (index: int) : Sandbox =
+    sandboxAnswering (fun onChunk ->
+        async {
+            onChunk (Stdout, string index)
+            return Ok { WriteStdin = ignore
+                        CloseStdin = ignore
+                        Kill = ignore
+                        Exited = async { return SandboxExited 1 } }
+        })
+
+/// A sandbox that cannot start a process.
+let private cannotSpawn : Sandbox =
+    sandboxAnswering (fun _ -> async { return Error "no shell here" })
 open Yession.Host
 open Yession.Tests.Support
 
@@ -270,12 +295,132 @@ let private sandboxPolicyTests =
                 config.AllowRead
                 [ "/opt/tools"
                   "/data/workspace"
-                  (Sandboxes.SrtSandbox.tmpDir ())
+                  (Sandboxes.SessionLayout.tmpDir ())
                   "/dev/stdout"
                   "/dev/stderr"
                   "/dev/null"
                   "/usr" ]
                 "read paths, everything writable (a workspace that cannot be read is no workspace), and the host runtime"
+
+        // --- what a sandbox is asked to prove before it is declared started -----------------
+
+        // The order is the whole design. A HOME that cannot be written makes half the list
+        // fail, so it goes first and only the first failure is reported — a report naming all
+        // twenty buries the one that explains the other nineteen.
+        testCase "the checks lead with the two places every toolchain writes" <| fun () ->
+            let policy =
+                { Support.emptyPolicy with
+                    WritePaths = [ "/data/workspace" ]
+                    ReadPaths = [ "/opt/tools" ]
+                    Env = Map.ofList [ "HOME", "/data/home"; "TMPDIR", "/data/tmp" ] }
+            match SandboxVerification.plan policy |> List.map (fun c -> c.What) with
+            | first :: second :: rest ->
+                Expect.isTrue (first.Contains "/data/home") (sprintf "HOME first, said: %s" first)
+                Expect.isTrue (second.Contains "/data/tmp") (sprintf "then TMPDIR, said: %s" second)
+                Expect.isTrue (rest |> List.exists (fun w -> w.Contains "/data/workspace"))
+                    (sprintf "then what was granted, said: %A" rest)
+                Expect.isTrue (rest |> List.exists (fun w -> w.Contains "/opt/tools"))
+                    (sprintf "including what was granted read-only, said: %A" rest)
+            | other -> failwithf "expected a list leading with HOME and TMPDIR, got %A" other
+
+        // A path that is writable is readable — #320 made that a rule — so checking the read
+        // of it says the less useful half of something already asserted, and costs a probe on
+        // the path to every sandbox start.
+        testCase "a path granted writable is not checked twice" <| fun () ->
+            let policy =
+                { Support.emptyPolicy with
+                    WritePaths = [ "/data/workspace" ]
+                    ReadPaths = [ "/data/workspace"; "/opt/tools" ] }
+            let mentions = SandboxVerification.plan policy |> List.filter (fun c -> c.What.Contains "/data/workspace")
+            Expect.equal (List.length mentions) 1 "once, as a write"
+
+        // Nothing is enforced, so nothing can fail — and a check that always passes reads as
+        // coverage while being none.
+        testCase "an unconfined sandbox is asked to prove nothing" <| fun () ->
+            let policy =
+                { Support.emptyPolicy with
+                    Filesystem = Unconfined
+                    WritePaths = [ "/data/workspace" ]
+                    Env = Map.ofList [ "HOME", "/data/home" ] }
+            Expect.equal (SandboxVerification.plan policy) [] "no confinement, no claim to check"
+
+        // What a person actually reads. The probe exits with a number and says nothing; the
+        // sentence has to come from the plan, and it has to say that the rest went unchecked
+        // or a reader assumes everything else passed.
+        testCase "the first failure is explained in the words of whoever has to fix it" <| fun () ->
+            let policy =
+                { Support.emptyPolicy with Env = Map.ofList [ "HOME", "/data/home" ] }
+            let checks = SandboxVerification.plan policy
+            let said = SandboxVerification.explain checks "0"
+            Expect.isTrue (said.Contains "/data/home") (sprintf "names the path, said: %s" said)
+            Expect.isTrue (said.Contains "$HOME") (sprintf "and why it matters, said: %s" said)
+            Expect.isTrue (said.Contains "Nothing after that was checked")
+                (sprintf "and does not let the rest read as passed, said: %s" said)
+
+        // A probe that failed in a way this code cannot place still has to produce a
+        // sentence. Silence here would be a sandbox refusing to start for no stated reason,
+        // which is the exact fault the whole check exists to remove.
+        testCase "a failure it cannot place still says something" <| fun () ->
+            let checks = SandboxVerification.plan { Support.emptyPolicy with Env = Map.ofList [ "HOME", "/h" ] }
+            let said = SandboxVerification.explain checks ""
+            Expect.isTrue (said.Contains "did not say which") (sprintf "said: %s" said)
+
+        // --- and what happens when one of them says no --------------------------------------
+
+        // The contract between the two halves, and the one thing neither half can be tested
+        // for alone: the number a probe prints when it fails is the number that names that
+        // probe. They are written in different functions, so nothing but this stops them
+        // drifting one apart — and a sentence naming the wrong check is worse than none,
+        // because somebody will go and fix the path it names.
+        testCase "the index a probe prints is the index the sentence reads" <| fun () ->
+            let policy =
+                { Support.emptyPolicy with
+                    WritePaths = [ "/data/one"; "/data/two" ]
+                    ReadPaths = [ "/opt/three" ]
+                    Env = Map.ofList [ "HOME", "/data/home"; "TMPDIR", "/data/tmp" ] }
+            let checks = SandboxVerification.plan policy
+            let lines = (SandboxVerification.program checks).Split '\n'
+            Expect.equal (Array.length lines) (List.length checks) "one line per check"
+            checks
+            |> List.iter (fun check ->
+                let line = lines |> Array.find (fun l -> l.Contains check.Probe)
+                let echoed = line.Substring(line.IndexOf "echo " + 5).Split ';' |> Array.head
+                let said = SandboxVerification.explain checks echoed
+                Expect.isTrue (said.Contains check.What)
+                    (sprintf "index %s should name %s, said: %s" echoed check.What said))
+
+        // The wiring, driven end to end without a sandbox: the checks are turned into a
+        // program, the program's answer is turned into a sentence, and the sentence names the
+        // check that failed. Pins what the pure tests above cannot — that the index a probe
+        // prints and the index `explain` reads are the same index.
+        testCaseAsync "a sandbox that fails a check does not start, and says which one" <|
+            async {
+                let policy =
+                    { Support.emptyPolicy with
+                        WritePaths = [ "/data/workspace" ]
+                        Env = Map.ofList [ "HOME", "/data/home" ] }
+                // A shell that fails the FIRST check and no other, which is what a real
+                // unwritable HOME does.
+                match! Yession.SessionProcess.SessionEnvironment.verify policy (failingAt 0) with
+                | Ok () -> failwith "expected the sandbox to be refused"
+                | Error reason ->
+                    Expect.isTrue (reason.Contains "/data/home")
+                        (sprintf "names the check that failed, said: %s" reason)
+                    Expect.isFalse (reason.Contains "/data/workspace")
+                        (sprintf "and not the ones that never ran, said: %s" reason)
+            }
+
+        // A sandbox that cannot run a shell cannot run a command, which is the only thing
+        // anybody wants one for. Not a false alarm, and it must not read as a policy fault.
+        testCaseAsync "a sandbox that cannot run a command at all is refused in those words" <|
+            async {
+                let policy = { Support.emptyPolicy with Env = Map.ofList [ "HOME", "/data/home" ] }
+                match! Yession.SessionProcess.SessionEnvironment.verify policy cannotSpawn with
+                | Ok () -> failwith "expected the sandbox to be refused"
+                | Error reason ->
+                    Expect.isTrue (reason.Contains "cannot run a command at all")
+                        (sprintf "said: %s" reason)
+            }
 
         // The invariant the verb exists for, and the only one: srt reads `CLAUDE_CODE_TMPDIR`
         // off this process at wrap time and bakes it into the child's `TMPDIR`, while the
@@ -311,7 +456,7 @@ let private sandboxPolicyTests =
                         Ripgrep = Some "/usr/bin/rg" }
                     policy
             Expect.isTrue (List.contains "/data/workspace" config.AllowWrite) "the policy's write paths"
-            Expect.isTrue (List.contains (Sandboxes.SrtSandbox.tmpDir ()) config.AllowWrite) "and the temp dir srt redirects TMPDIR to"
+            Expect.isTrue (List.contains (Sandboxes.SessionLayout.tmpDir ()) config.AllowWrite) "and the temp dir srt redirects TMPDIR to"
             Expect.equal config.AllowedDomains [ "api.example.com" ] "the egress allowlist rides through"
             Expect.equal config.Bwrap (Some "/usr/bin/bwrap") "the named confinement tool rides through"
             Expect.equal config.Ripgrep (Some "/usr/bin/rg") "and so does the scanner srt will not start without"

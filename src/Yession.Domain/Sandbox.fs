@@ -198,6 +198,138 @@ type PtyHandle =
       /// Resolves exactly once, when the process ends.
       Exited : Async<SandboxRun> }
 
+/// One thing that has to be true before a sandbox is worth handing to anybody.
+///
+/// `Probe` is shell, and it says nothing: it exits 0 or it does not. What a person reads is
+/// `What` and `Because`, which is why they are here rather than inferred from a failing
+/// command's stderr — the faults this catches produce no stderr worth reading, and several
+/// produce none at all.
+type SandboxCheck =
+    { /// What is being asserted, in the words of whoever has to fix it.
+      What : string
+      /// A `/bin/sh` expression that exits 0 when `What` holds.
+      Probe : string
+      /// What stops working when it does not.
+      Because : string }
+
+/// What must hold before a sandbox is declared started.
+///
+/// Every fault this catches was MEASURED as a silent one. A sandbox granted
+/// `/etc/ssl/cert.pem` on macOS is denied it, because `/etc` is a symlink and the grant
+/// canonicalises past it; a sandbox whose `TMPDIR` is srt's default cannot write it, for the
+/// same reason; a sandbox that inherits the operator's `HOME` cannot write a byte of it.
+/// None of the three says anything at the point it is wrong. The first two now cannot happen
+/// — they are refused where the path is written — and this is what catches the NEXT one: a
+/// different cause arriving at the same place, turned into a sentence instead of a tool
+/// failing strangely an hour later.
+///
+/// Ordered most-upstream first, and only the FIRST failure is reported, because the rest are
+/// usually its consequences. A HOME that cannot be written makes half the list fail, and a
+/// report naming all of them buries the one that explains the others.
+module SandboxVerification =
+
+    /// Shell-quote for `/bin/sh`. Paths here come from an operator's file and a repo's
+    /// selection, so they are not trusted to be free of spaces — or of quotes.
+    let private quoted (value: string) : string =
+        "'" + value.Replace ("'", "'\''") + "'"
+
+    /// The checks for this policy, in the order they should run.
+    ///
+    /// Pure, and that is the point: WHICH checks a policy deserves is decided here, where a
+    /// test can read the list without a sandbox to run it in.
+    ///
+    /// Deliberately not checked: whether an endpoint answers. That is seconds per host, and
+    /// it turns a registry having a bad minute into a sandbox that refuses to start — a check
+    /// that fails when the thing checked is fine is worse than no check at all.
+    let plan (policy: SandboxPolicy) : SandboxCheck list =
+        match policy.Filesystem with
+        // Nothing to verify where nothing is enforced. A check that always passes reads as
+        // coverage and is not.
+        | Unconfined -> []
+        | Confined ->
+            let home = policy.Env |> Map.tryFind "HOME"
+            let tmp = policy.Env |> Map.tryFind "TMPDIR"
+            // A place that cannot be written is reported as the FIRST thing wrong with it,
+            // so `HOME` and `TMPDIR` lead: every toolchain keeps state in one or the other,
+            // and a failure in either makes everything after it fail too.
+            // `touch` and `>>` rather than `test -w`: on a Seatbelt host `test -w` consults
+            // the file MODE, which is the operator's and says yes, while the write itself is
+            // refused by the sandbox profile. The question is whether a write SUCCEEDS, so
+            // the probe writes.
+            //
+            // Three shapes, because a write path is not always a directory and the wrong
+            // probe is a false alarm — measured: a granted nix daemon socket is a write path
+            // (a socket is read AND written by anything that talks to it), and asking
+            // whether a file could be created inside it refused a sandbox that was fine.
+            //
+            // The third arm is a known LIMIT, not a check: for a socket or a device, "can
+            // this be written" is "can this be connected to", which cannot be asked without
+            // doing it. Existence is all this can honestly assert there, and a socket whose
+            // far end is gone will pass. Said out loud rather than left to be discovered.
+            let writable (what: string) (path: string) (because: string) =
+                // Phrased as the FAILURE, because that is the only state this is ever
+                // read in. A claim rendered in the affirmative and then reported as a
+                // refusal reads, at a glance, as the opposite of what happened.
+                { What = sprintf "%s (%s) is not usable as granted" what path
+                  Probe =
+                    sprintf
+                        "d=%s; if [ -d \"$d\" ] || [ ! -e \"$d\" ]; then mkdir -p \"$d\" && touch \"$d/.yession-check\" && rm -f \"$d/.yession-check\"; elif [ -f \"$d\" ]; then : >> \"$d\"; else test -e \"$d\"; fi"
+                        (quoted path)
+                  Because = because }
+            let readable (path: string) =
+                { What = sprintf "%s cannot be read" path
+                  Probe = sprintf "test -r %s" (quoted path)
+                  Because = "it was granted to this sandbox, and something that was granted and is not held is the fault this check exists for" }
+            [ match home with
+              | Some path ->
+                  yield writable "the sandbox's home" path
+                            "every toolchain keeps state under $HOME, and a tool given a home it cannot touch fails where a tool given none would have fallen back"
+              | None -> ()
+              match tmp with
+              | Some path ->
+                  yield writable "the sandbox's temporary directory" path
+                            "anything that writes a temporary file — a compiler, an archive tool, a package manager — writes here"
+              | None -> ()
+              for path in policy.WritePaths do
+                  yield writable "a granted path" path
+                            "it was granted writable, and a grant that is not held is the fault this check exists for"
+              // Read paths after the writable ones, because everything writable is also
+              // readable and a read that fails on a path that could not be written says the
+              // less useful half of the same thing.
+              for path in policy.ReadPaths do
+                  if not (List.contains path policy.WritePaths) then yield readable path ]
+
+    /// One shell program that runs the whole list and names the first thing that failed.
+    ///
+    /// ONE spawn, not one per check. A wrapped spawn costs tens of milliseconds and this runs
+    /// on the path to every sandbox start, so a list of twenty checks is the difference
+    /// between a rounding error and something a person notices.
+    ///
+    /// Exits 0 when everything holds; otherwise prints the index of the first failure and
+    /// exits non-zero, which is the only thing the caller has to parse.
+    let program (checks: SandboxCheck list) : string =
+        checks
+        |> List.mapi (fun index check ->
+            sprintf "if ! { %s; } >/dev/null 2>&1; then echo %d; exit 1; fi" check.Probe index)
+        |> String.concat "\n"
+
+    /// The sentence for a failure at `index`, or a fallback when the probe said something
+    /// this code cannot place.
+    ///
+    /// Says what nothing after it was checked, because that is true and because a person
+    /// reading one fault out of a list of twenty will otherwise assume the other nineteen
+    /// passed.
+    let explain (checks: SandboxCheck list) (output: string) : string =
+        let said = output.Trim ()
+        match System.Int32.TryParse said with
+        | true, index when index >= 0 && index < List.length checks ->
+            let check = List.item index checks
+            sprintf "%s — %s. Nothing after that was checked." check.What check.Because
+        | _ ->
+            sprintf
+                "a start-up check failed and did not say which: %s"
+                (if said = "" then "it printed nothing" else said)
+
 /// One confined place to run processes. Created by, and dying with, its session.
 type Sandbox =
     { /// The backend's reference for this sandbox (a container id, "host", ...) —
