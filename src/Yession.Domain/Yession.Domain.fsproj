@@ -16,6 +16,7 @@
          rather than living on one side of it, and its field labels stay out of the
          namespace every file opens. -->
     <Compile Include="RepoFacts.fs" />
+    <Compile Include="PrFacts.fs" />
     <Compile Include="LinkFacts.fs" />
     <Compile Include="ToolsFacts.fs" />
     <Compile Include="SandboxesFacts.fs" />
@@ -53,6 +54,9 @@
     <Compile Include="Models.fs" />
     <Compile Include="Conversation.fs" />
     <Compile Include="Repos.fs" />
+    <!-- Watched pull requests (the projection and the transition algebra). After
+         Events.fs like every projection; beside Repos.fs, whose shape it mirrors. -->
+    <Compile Include="PrWatches.fs" />
     <!-- What a repo asks a session for (`yession.yaml`, Plan 27). After Environment.fs
          (a declaration is an `EnvironmentSpec` serialization), Identity.fs (it is keyed
          by `SandboxRef`) and Repos.fs, which owns the repo it belongs to. Pure and

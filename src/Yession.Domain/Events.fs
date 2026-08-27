@@ -8,6 +8,7 @@ open Yession.Domain.Sandboxes
 open Yession.Domain.Tools
 open Yession.Domain.Link
 open Yession.Domain.Repos
+open Yession.Domain.Prs
 
 /// The generic envelope wrapping every persisted event. The wire format is a boundary
 /// concern handled in Serialization.fs; this is the in-memory domain shape.
@@ -124,6 +125,14 @@ type SessionEvent =
     // do it" but "does a future turn need to be told?".
     | McpServerAvailable of McpServerNoted
     | McpServerUnavailable of McpServerNoted
+    // Watched pull requests: durable facts about PRs this session keeps an eye on. The
+    // watch is an attributed act like a repo add; a transition is the session observing
+    // on the watcher's behalf (envelope actor System, watcher on the payload). The
+    // watch's Initial snapshot plus the recorded transitions ARE the detection baseline
+    // (`PrWatches.fs`), which is what keeps a restart from re-announcing old news.
+    | PrWatchStarted of PrWatchStarted
+    | PrWatchStopped of PrWatchStopped
+    | PrTransitioned of PrTransitioned
 
 and [<RequireQualifiedAccess>] SessionCreated =
     { SessionId : SessionId }

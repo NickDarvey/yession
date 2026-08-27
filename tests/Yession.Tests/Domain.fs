@@ -8,6 +8,7 @@ open Yession.Domain.Sandboxes
 open Yession.Domain.Agent
 open Yession.Domain.Link
 open Yession.Domain.Repos
+open Yession.Domain.Prs
 open Yession.Domain.Chat
 
 let private expect =
@@ -273,7 +274,30 @@ let private frameSerializationTests =
                   ToolUseFinished { ToolUseId = toolUseId; Outcome = ToolCallFailed "no such tool"; Block = None }
                   // Plan 17: the two the operator's declarations produce.
                   McpServerAvailable { MessageId = messageId; Name = McpServerName.create "serial" |> expect }
-                  McpServerUnavailable { MessageId = messageId; Name = McpServerName.create "printer" |> expect } ]
+                  McpServerUnavailable { MessageId = messageId; Name = McpServerName.create "printer" |> expect }
+                  // Watched pull requests: a start (with its baseline snapshot), a stop,
+                  // and a transition — including the optional-mergeable both ways.
+                  PrWatchStarted
+                    { MessageId = messageId
+                      Pr = { Repo = RepoRef.create "octo/hello" |> expect; Number = 12 }
+                      Initial = { State = PrOpen; Title = "Add feature"; HeadSha = "abc123"; Checks = ChecksPending; Mergeable = Some true }
+                      Actor = PeerRef peerId }
+                  PrWatchStarted
+                    { MessageId = messageId
+                      Pr = { Repo = RepoRef.create "octo/hello" |> expect; Number = 13 }
+                      Initial = { State = PrClosed; Title = "Old"; HeadSha = "def456"; Checks = ChecksNone; Mergeable = None }
+                      Actor = ActorRef.Agent }
+                  PrWatchStopped
+                    { MessageId = messageId
+                      Pr = { Repo = RepoRef.create "octo/hello" |> expect; Number = 12 }
+                      Actor = PeerRef peerId }
+                  PrTransitioned
+                    { MessageId = messageId
+                      Pr = { Repo = RepoRef.create "octo/hello" |> expect; Number = 12 }
+                      Transition = ChecksTurnedRed
+                      State = PrOpen
+                      Checks = ChecksRed
+                      Watcher = PeerRef peerId } ]
             for event in everyCase do
                 let env = { sampleEnvelope with Event = event }
                 let roundTripped =
@@ -478,6 +502,145 @@ let private repoTests =
                 [ "added repo octo/hello (branch main)"; "switched octo/hello to branch fix/y"; "removed repo octo/hello" ]
                 "the notes read as sentences"
             Expect.equal (proj.Items |> List.map (fun i -> i.Author)) [ PeerRef ada; ActorRef.Agent; PeerRef ada ] "attributed to the acting party"
+    ]
+
+let private prWatchTests =
+    let msg n = MessageId.create n |> expect
+    let repo = RepoRef.create "octo/hello" |> expect
+    let pr = PrRef.create repo 12 |> expect
+    let ada = PeerId.create "ada" |> expect
+    let snapshot state checks : PrSnapshot =
+        { State = state; Title = "Add feature"; HeadSha = "abc123"; Checks = checks; Mergeable = None }
+    let started state checks : SessionEvent =
+        PrWatchStarted { MessageId = msg "w1"; Pr = pr; Initial = snapshot state checks; Actor = PeerRef ada }
+    let transitioned transition state checks : SessionEvent =
+        PrTransitioned
+            { MessageId = msg "t1"; Pr = pr; Transition = transition; State = state; Checks = checks; Watcher = PeerRef ada }
+    let fold events = events |> List.fold PrWatchesProjection.applyEvent PrWatchesProjection.empty
+
+    testList "Watched pull requests" [
+        testCase "PrRef parses a number and renders canonically" <| fun () ->
+            Expect.equal (PrRef.render pr) "octo/hello#12" "canonical rendering"
+            Expect.isError (PrRef.create repo 0) "zero is not a PR number"
+            Expect.isError (PrRef.create repo -3) "nor is a negative"
+
+        testCase "a merge, a close and a reopen are each one transition" <| fun () ->
+            Expect.equal
+                (PrTransitions.detect { State = PrOpen; Checks = ChecksGreen } (snapshot PrMerged ChecksGreen))
+                [ PrWasMerged ] "open to merged"
+            Expect.equal
+                (PrTransitions.detect { State = PrOpen; Checks = ChecksNone } (snapshot PrClosed ChecksNone))
+                [ PrWasClosed ] "open to closed"
+            Expect.equal
+                (PrTransitions.detect { State = PrClosed; Checks = ChecksNone } (snapshot PrOpen ChecksNone))
+                [ PrWasReopened ] "closed to open"
+            Expect.equal
+                (PrTransitions.detect { State = PrClosed; Checks = ChecksNone } (snapshot PrMerged ChecksNone))
+                [ PrWasMerged ] "a closed baseline learning of a merge is a merge"
+
+        testCase "checks arriving at green or red are news; entering pending is not" <| fun () ->
+            Expect.equal
+                (PrTransitions.detect { State = PrOpen; Checks = ChecksPending } (snapshot PrOpen ChecksGreen))
+                [ ChecksTurnedGreen ] "pending to green"
+            Expect.equal
+                (PrTransitions.detect { State = PrOpen; Checks = ChecksGreen } (snapshot PrOpen ChecksRed))
+                [ ChecksTurnedRed ] "green to red"
+            Expect.equal
+                (PrTransitions.detect { State = PrOpen; Checks = ChecksGreen } (snapshot PrOpen ChecksPending))
+                [] "a new push resetting checks is the rhythm of work, not news"
+            Expect.equal
+                (PrTransitions.detect { State = PrOpen; Checks = ChecksGreen } (snapshot PrOpen ChecksGreen))
+                [] "no movement, no news"
+
+        testCase "a merge and a green arriving together announce both, state first" <| fun () ->
+            Expect.equal
+                (PrTransitions.detect { State = PrOpen; Checks = ChecksPending } (snapshot PrMerged ChecksGreen))
+                [ PrWasMerged ] "checks on a PR that just left open are not announced"
+            Expect.equal
+                (PrTransitions.detect { State = PrClosed; Checks = ChecksPending } (snapshot PrOpen ChecksGreen))
+                [ PrWasReopened; ChecksTurnedGreen ] "a reopen makes its checks news again, state first"
+
+        testCase "checks movement on a merged baseline is suppressed" <| fun () ->
+            Expect.equal
+                (PrTransitions.detect { State = PrMerged; Checks = ChecksGreen } (snapshot PrMerged ChecksRed))
+                [] "CI going red on a merged PR is not actionable from here"
+
+        testCase "the watches projection folds start, re-watch, transition and stop" <| fun () ->
+            let folded = fold [ started PrOpen ChecksPending ]
+            Expect.equal
+                folded.Watches
+                [ { Pr = pr; Watcher = PeerRef ada; Known = { State = PrOpen; Checks = ChecksPending } } ]
+                "a watch starts from its Initial baseline"
+            let advanced = PrWatchesProjection.applyEvent folded (transitioned ChecksTurnedGreen PrOpen ChecksGreen)
+            Expect.equal
+                (PrWatchesProjection.tryFind pr advanced |> Option.map (fun w -> w.Known))
+                (Some { State = PrOpen; Checks = ChecksGreen })
+                "a recorded transition advances the baseline"
+            let rewatched =
+                PrWatchesProjection.applyEvent
+                    advanced
+                    (PrWatchStarted { MessageId = msg "w2"; Pr = pr; Initial = snapshot PrOpen ChecksNone; Actor = ActorRef.Agent })
+            Expect.equal
+                rewatched.Watches
+                [ { Pr = pr; Watcher = ActorRef.Agent; Known = { State = PrOpen; Checks = ChecksNone } } ]
+                "re-watch replaces in place, newest baseline and watcher win"
+            let stopped =
+                PrWatchesProjection.applyEvent rewatched (PrWatchStopped { MessageId = msg "w3"; Pr = pr; Actor = PeerRef ada })
+            Expect.equal stopped.Watches [] "stopped"
+
+        testCase "a restart re-announces nothing: the folded baseline already knows what was said" <| fun () ->
+            // The dedupe property the durable baseline exists for. After a green was
+            // recorded, folding the same log and comparing against the same green
+            // snapshot detects nothing — however many times the process restarts.
+            let folded =
+                fold
+                    [ started PrOpen ChecksPending
+                      transitioned ChecksTurnedGreen PrOpen ChecksGreen ]
+            let known = (PrWatchesProjection.tryFind pr folded |> Option.get).Known
+            Expect.equal (PrTransitions.detect known (snapshot PrOpen ChecksGreen)) [] "already announced"
+            Expect.equal
+                (PrTransitions.detect known (snapshot PrMerged ChecksGreen))
+                [ PrWasMerged ]
+                "while a change that happened during the downtime is still detected"
+
+        testCase "watch events read in the timeline as attributed notes" <| fun () ->
+            let sessionId = SessionId.create "pr-session" |> expect
+            let envelopes =
+                [ PeerRef ada, started PrOpen ChecksPending
+                  ActorRef.System, transitioned PrWasMerged PrMerged ChecksGreen
+                  PeerRef ada, PrWatchStopped { MessageId = msg "w9"; Pr = pr; Actor = PeerRef ada } ]
+                |> List.mapi (fun i (actor, event) ->
+                    { EventId = EventId.fresh ()
+                      SessionId = sessionId
+                      Offset = EventOffset.create (int64 (i + 1)) |> expect
+                      Actor = actor
+                      Timestamp = DateTimeOffset (2026, 8, 27, 10, 0, 0, TimeSpan.Zero)
+                      Event = event })
+            let proj, _ = ConversationProjection.applyEvents None envelopes ConversationProjection.empty
+            Expect.equal
+                (proj.Items |> List.map (fun i -> i.Body))
+                [ "watching PR octo/hello#12 (open, checks pending)"
+                  "PR octo/hello#12 was merged"
+                  "stopped watching PR octo/hello#12" ]
+                "the notes read as sentences"
+            Expect.equal
+                (proj.Items |> List.map (fun i -> i.Author))
+                [ PeerRef ada; PeerRef ada; PeerRef ada ]
+                "a transition wears the watcher's name, not System's"
+            Expect.equal
+                (proj.Items |> List.map (fun i -> i.Kind))
+                [ ConversationItemKind.ActNote; ConversationItemKind.ActNote; ConversationItemKind.ActNote ]
+                "all notes"
+
+        testCase "a PrTransitioned on the wire is the shape it will always be" <| fun () ->
+            // Pinned as a literal, not round-tripped: what a durable log needs is that the
+            // codec has not changed under the lines already written.
+            let pinned =
+                """{"type":"prTransitioned","payload":{"messageId":"t1","pr":{"repo":"octo/hello","number":12},"transition":"merged","state":"merged","checks":"green","watcher":{"kind":"peer","peerId":"ada"}}}"""
+            Expect.equal
+                (Codec.fromString Codec.sessionEvent pinned |> expect)
+                (transitioned PrWasMerged PrMerged ChecksGreen)
+                "the durable form decodes to the event"
     ]
 
 // Who is behind an act (Plan 20). The type exists because these three were loose fields
@@ -1124,6 +1287,7 @@ let tests =
         envelopeSerializationTests
         conversationProjectionTests
         repoTests
+        prWatchTests
         shellProfileTests
         frameSerializationTests
     ]

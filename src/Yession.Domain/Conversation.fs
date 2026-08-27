@@ -2,6 +2,7 @@ namespace Yession.Domain.Chat
 
 open Yession.Domain
 open Yession.Domain.Agent
+open Yession.Domain.Prs
 
 /// The conversation is a *projection* of the event log — never read from Yjs/draft state.
 /// The projection type and its fold live in the shared Domain library because both the
@@ -310,6 +311,49 @@ module ConversationProjection =
                     @ [ { MessageId = m.MessageId
                           Author = ActorRef.System
                           Body = sprintf "the %s tools are no longer available" (McpServerName.value m.Name)
+                          Status = Complete
+                          Kind = ConversationItemKind.ActNote
+                          Offset = envelope.Offset
+                          Woke = None } ] }
+        // Watched pull requests fold in for the repo notes' reason: a watch is a
+        // session-shaping act, and a transition is exactly what a joining human or the
+        // agent's next turn needs to be told — the news arrived through no other door.
+        | SessionEvent.PrWatchStarted p ->
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = p.MessageId
+                          Author = p.Actor
+                          Body =
+                            sprintf
+                                "watching PR %s (%s, %s)"
+                                (PrRef.render p.Pr)
+                                (PrState.describe p.Initial.State)
+                                (ChecksRollup.describe p.Initial.Checks)
+                          Status = Complete
+                          Kind = ConversationItemKind.ActNote
+                          Offset = envelope.Offset
+                          Woke = None } ] }
+        | SessionEvent.PrWatchStopped p ->
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = p.MessageId
+                          Author = p.Actor
+                          Body = sprintf "stopped watching PR %s" (PrRef.render p.Pr)
+                          Status = Complete
+                          Kind = ConversationItemKind.ActNote
+                          Offset = envelope.Offset
+                          Woke = None } ] }
+        // Attributed to the WATCHER rather than the envelope's System: the person whose
+        // watch noticed is who the news is for, and whose name it should wear.
+        | SessionEvent.PrTransitioned p ->
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = p.MessageId
+                          Author = p.Watcher
+                          Body = sprintf "PR %s %s" (PrRef.render p.Pr) (PrTransition.describe p.Transition)
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
                           Offset = envelope.Offset
