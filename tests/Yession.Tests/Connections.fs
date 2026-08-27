@@ -12,6 +12,7 @@ open Yession.Domain
 open Yession.Domain.Sandboxes
 open Yession.Domain.Access
 open Yession.Domain.Chat
+open Yession.Domain.Prs
 open Yession.Manager
 
 #if FABLE_COMPILER
@@ -1798,6 +1799,287 @@ let private githubRouteTests =
             }
     ]
 
+// --- watched pull requests (the poller, and the two endpoints under it) -------------------
+
+let private prRepo = RepoRef.create "octo/hello" |> expect
+let private prOne = PrRef.create prRepo 12 |> expect
+
+let private snapshotOf state checks : PrSnapshot =
+    { State = state; Title = "Add feature"; HeadSha = "abc123"; Checks = checks; Mergeable = None }
+
+/// A scripted `FetchPr`: hand it the outcomes a test wants, in order, and it records what
+/// it was asked with. The seam is the whole reason the poll fold is testable without a
+/// socket — the endpoints themselves are exercised in the Ports suite below.
+type private ScriptedFetch =
+    { Fetch : GitHubPrs.FetchPr
+      Calls : ResizeArray<string option * GitHubPrs.PrEtags> }
+
+let private scriptedFetch (outcomes: GitHubPrs.PrFetchOutcome list) : ScriptedFetch =
+    let remaining = ResizeArray<GitHubPrs.PrFetchOutcome> outcomes
+    let calls = ResizeArray<string option * GitHubPrs.PrEtags> ()
+    { Calls = calls
+      Fetch =
+        fun token _ etags ->
+            async {
+                calls.Add (token, etags)
+                if remaining.Count = 0 then return GitHubPrs.PrUnchanged
+                else
+                    let next = remaining.[0]
+                    remaining.RemoveAt 0
+                    return next
+            } }
+
+/// What a poll recorded, in the order it recorded it.
+type private RecordedTransitions = ResizeArray<ActorRef * PrRef * PrTransition list>
+
+let private pollerOver
+    (now: unit -> DateTimeOffset)
+    (fetch: GitHubPrs.FetchPr)
+    (recorded: RecordedTransitions)
+    (rejected: ResizeArray<ActorRef>)
+    : GitHubPrs.PrWatchers =
+    GitHubPrs.create
+        now
+        fetch
+        (fun _ -> async { return Some "token-abc" })
+        (fun actor -> async { rejected.Add actor })
+        (fun actor pr _ transitions -> async { recorded.Add (actor, pr, transitions) })
+
+let private prPollTests =
+    let ada = PeerRef (PeerId.create "ada" |> expect)
+    let watching known : PrWatch = { Pr = prOne; Watcher = ada; Known = known }
+    let fixedNow () = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
+
+    testList "pull request polling" [
+        testCase "a merged pull request decodes as merged, however its state field reads" <| fun () ->
+            // GitHub reports a merged PR as closed+merged; reading `state` alone would
+            // file every merge as a close, which is the distinction the feature exists for.
+            let merged = """{"state":"closed","merged":true,"title":"Add feature","head":{"sha":"abc123"},"mergeable":null}"""
+            match Decode.fromString GitHubPrs.prDecoder merged |> expect with
+            | state, title, sha, mergeable ->
+                Expect.equal state PrMerged "merged wins over the state word"
+                Expect.equal title "Add feature" "title"
+                Expect.equal sha "abc123" "head sha"
+                Expect.equal mergeable None "a null mergeable is not a false one"
+
+        testCase "an open and a closed-unmerged pull request each decode as themselves" <| fun () ->
+            let openPr = """{"state":"open","merged":false,"title":"WIP","head":{"sha":"d00d"},"mergeable":true}"""
+            let closed = """{"state":"closed","merged":false,"title":"Abandoned","head":{"sha":"beef"}}"""
+            let state1, _, _, mergeable = Decode.fromString GitHubPrs.prDecoder openPr |> expect
+            let state2, _, _, _ = Decode.fromString GitHubPrs.prDecoder closed |> expect
+            Expect.equal state1 PrOpen "open"
+            Expect.equal mergeable (Some true) "a stated mergeable is carried"
+            Expect.equal state2 PrClosed "closed without a merge is closed"
+
+        testCase "the checks rollup is pending until every run has completed" <| fun () ->
+            Expect.equal (GitHubPrs.rollupOf []) ChecksNone "a commit with no checks has none, not pending forever"
+            Expect.equal
+                (GitHubPrs.rollupOf [ "completed", Some "success"; "in_progress", None ])
+                ChecksPending
+                "one still running means pending"
+            // Pending outranks red deliberately: a suite still running may turn the
+            // answer around, and announcing red early trains people to distrust it.
+            Expect.equal
+                (GitHubPrs.rollupOf [ "completed", Some "failure"; "queued", None ])
+                ChecksPending
+                "even beside a failure"
+
+        testCase "a completed rollup is red on a real failure and green on a skip" <| fun () ->
+            Expect.equal (GitHubPrs.rollupOf [ "completed", Some "failure" ]) ChecksRed "failure"
+            Expect.equal (GitHubPrs.rollupOf [ "completed", Some "timed_out" ]) ChecksRed "timed out"
+            Expect.equal (GitHubPrs.rollupOf [ "completed", Some "cancelled" ]) ChecksRed "cancelled"
+            Expect.equal
+                (GitHubPrs.rollupOf [ "completed", Some "success"; "completed", Some "skipped"; "completed", Some "neutral" ])
+                ChecksGreen
+                "a conditional job that skipped is not a problem"
+
+        testCaseAsync "a transition is recorded once and never again" <|
+            async {
+                let recorded = RecordedTransitions ()
+                let script =
+                    scriptedFetch
+                        [ GitHubPrs.PrChanged (snapshotOf PrMerged ChecksGreen, GitHubPrs.PrEtags.none)
+                          GitHubPrs.PrChanged (snapshotOf PrMerged ChecksGreen, GitHubPrs.PrEtags.none) ]
+                let poller = pollerOver fixedNow script.Fetch recorded (ResizeArray ())
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
+                let! first = poller.Poll ()
+                let! second = poller.Poll ()
+                Expect.isTrue first "the merge moved something"
+                Expect.isFalse second "the same answer twice is not news"
+                Expect.equal (List.ofSeq recorded |> List.map (fun (_, _, t) -> t)) [ [ PrWasMerged ] ] "one record"
+            }
+
+        testCaseAsync "an unchanged answer records nothing and moves nothing" <|
+            async {
+                let recorded = RecordedTransitions ()
+                let script = scriptedFetch [ GitHubPrs.PrUnchanged ]
+                let poller = pollerOver fixedNow script.Fetch recorded (ResizeArray ())
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
+                let! moved = poller.Poll ()
+                Expect.isFalse moved "a 304 is not a change"
+                Expect.isEmpty recorded "and nothing to say about it"
+            }
+
+        testCaseAsync "a refused credential is reported to whoever's watch it is" <|
+            async {
+                let rejected = ResizeArray<ActorRef> ()
+                let script = scriptedFetch [ GitHubPrs.PrFetchFailed GitHubPrs.PrUnauthorized ]
+                let poller = pollerOver fixedNow script.Fetch (RecordedTransitions ()) rejected
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
+                let! moved = poller.Poll ()
+                Expect.isTrue moved "the row's status changed"
+                Expect.equal (List.ofSeq rejected) [ ada ] "the watcher's credential is the one that was refused"
+                match poller.Rows () with
+                | [ row ] -> Expect.isSome row.Health "the row says what is wrong"
+                | rows -> failwithf "expected one row, got %d" rows.Length
+            }
+
+        testCaseAsync "a rate-limited watch waits for the window github named" <|
+            async {
+                // No sleeping: the clock is a cell the test moves, which is the only way
+                // a wait is testable at all.
+                let mutable clock = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
+                let resetAt = int (clock.AddMinutes(10.0).ToUnixTimeSeconds ())
+                let script =
+                    scriptedFetch
+                        [ GitHubPrs.PrFetchFailed (GitHubPrs.PrRateLimited (Some resetAt))
+                          GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, GitHubPrs.PrEtags.none) ]
+                let poller = pollerOver (fun () -> clock) script.Fetch (RecordedTransitions ()) (ResizeArray ())
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
+                let! _ = poller.Poll ()
+                let callsAfterLimit = script.Calls.Count
+                let! duringWindow = poller.Poll ()
+                Expect.equal script.Calls.Count callsAfterLimit "inside the window, github is not asked again"
+                Expect.isFalse duringWindow "and nothing moved"
+                clock <- clock.AddMinutes 11.0
+                let! afterWindow = poller.Poll ()
+                Expect.equal script.Calls.Count (callsAfterLimit + 1) "past the reset it asks again"
+                Expect.isTrue afterWindow "and the answer moved the row"
+            }
+
+        testCaseAsync "reconciling keeps an unchanged watch's etags and drops what was unwatched" <|
+            async {
+                let etags : GitHubPrs.PrEtags = { Pr = "\"pr-v1\""; Checks = "\"checks-v1\"" }
+                let script =
+                    scriptedFetch
+                        [ GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, etags)
+                          GitHubPrs.PrUnchanged ]
+                let poller = pollerOver fixedNow script.Fetch (RecordedTransitions ()) (ResizeArray ())
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
+                let! _ = poller.Poll ()
+                // The same watch, re-applied: a boot rebuild or any watch/unwatch does this.
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksGreen } ]
+                let! _ = poller.Poll ()
+                Expect.equal (snd script.Calls.[1]) etags "the second look quotes the etags the first was given"
+                poller.Apply []
+                Expect.isEmpty (poller.Rows ()) "an unwatched pull request is not polled and not shown"
+            }
+    ]
+
+/// A stub of GitHub's REST API: one pull request and one set of check runs, each with a
+/// version that moves when a test changes it, served with an ETag and honouring
+/// `if-none-match` — because the 304 path is the one the real endpoints are held to.
+type private StubGitHubApi =
+    { Url : string
+      SetPr : string -> unit
+      SetCheckRuns : string -> unit
+      SetStatus : int -> unit
+      Requests : ResizeArray<string * string> }
+
+let private startStubGitHubApi () : Async<StubGitHubApi> =
+    async {
+        let mutable prBody = """{"state":"open","merged":false,"title":"Add feature","head":{"sha":"abc123"},"mergeable":true}"""
+        let mutable checksBody = """{"check_runs":[{"status":"completed","conclusion":"success"}]}"""
+        let mutable prVersion = 1
+        let mutable checksVersion = 1
+        let mutable status = 200
+        let requests = ResizeArray<string * string> ()
+        let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
+            let path = req.url.Split('?').[0]
+            requests.Add (path, defaultArg (Interop.headerOf req "authorization") "")
+            let body, version = if path.Contains "/check-runs" then checksBody, checksVersion else prBody, prVersion
+            let etag = sprintf "\"v%d\"" version
+            if status <> 200 then
+                res.writeHead (status, Fable.Core.JsInterop.createObj [ "content-type", box "application/json" ]) |> ignore
+                res.``end`` """{"message":"nope"}"""
+            elif Interop.headerOf req "if-none-match" = Some etag then
+                res.writeHead (304, Fable.Core.JsInterop.createObj [ "etag", box etag ]) |> ignore
+                res.``end`` ""
+            else
+                res.writeHead (
+                    200,
+                    Fable.Core.JsInterop.createObj [ "content-type", box "application/json"; "etag", box etag ])
+                |> ignore
+                res.``end`` body
+        let server = Interop.createServer handler
+        let! listening =
+            Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
+        return
+            { Url = sprintf "http://127.0.0.1:%d" (Interop.serverPort listening)
+              SetPr = (fun body -> prBody <- body; prVersion <- prVersion + 1)
+              SetCheckRuns = (fun body -> checksBody <- body; checksVersion <- checksVersion + 1)
+              SetStatus = (fun s -> status <- s)
+              Requests = requests }
+    }
+
+let private prFetchTests =
+    testList "pull request endpoints" [
+        testCaseAsync "a first look reads the pull request and its checks" <|
+            async {
+                let! stub = startStubGitHubApi ()
+                let fetch = GitHubPrs.fetchOver stub.Url
+                match! fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none with
+                | GitHubPrs.PrChanged (snapshot, etags) ->
+                    Expect.equal snapshot.State PrOpen "open"
+                    Expect.equal snapshot.HeadSha "abc123" "head sha"
+                    Expect.equal snapshot.Checks ChecksGreen "one successful run"
+                    Expect.notEqual etags.Pr "" "the pull request's etag came back"
+                | other -> failwithf "expected a snapshot, got %A" other
+                Expect.equal
+                    (stub.Requests |> Seq.map snd |> Seq.distinct |> List.ofSeq)
+                    [ "Bearer token-abc" ]
+                    "every request carries the resolved credential"
+            }
+
+        testCaseAsync "a second look with the same etag costs a 304 and says nothing changed" <|
+            async {
+                let! stub = startStubGitHubApi ()
+                let fetch = GitHubPrs.fetchOver stub.Url
+                match! fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none with
+                | GitHubPrs.PrChanged (_, etags) ->
+                    match! fetch (Some "token-abc") prOne etags with
+                    | GitHubPrs.PrUnchanged -> ()
+                    | other -> failwithf "expected unchanged, got %A" other
+                | other -> failwithf "expected a snapshot, got %A" other
+            }
+
+        testCaseAsync "a merge at the provider reaches the next look" <|
+            async {
+                let! stub = startStubGitHubApi ()
+                let fetch = GitHubPrs.fetchOver stub.Url
+                let! first = fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none
+                let etags = match first with GitHubPrs.PrChanged (_, e) -> e | _ -> GitHubPrs.PrEtags.none
+                stub.SetPr """{"state":"closed","merged":true,"title":"Add feature","head":{"sha":"abc123"},"mergeable":null}"""
+                match! fetch (Some "token-abc") prOne etags with
+                | GitHubPrs.PrChanged (snapshot, _) -> Expect.equal snapshot.State PrMerged "the merge arrived"
+                | other -> failwithf "expected a snapshot, got %A" other
+            }
+
+        testCaseAsync "a 401 is the credential's failure, and a 404 is not" <|
+            async {
+                let! stub = startStubGitHubApi ()
+                let fetch = GitHubPrs.fetchOver stub.Url
+                stub.SetStatus 401
+                match! fetch (Some "stale") prOne GitHubPrs.PrEtags.none with
+                | GitHubPrs.PrFetchFailed GitHubPrs.PrUnauthorized -> ()
+                | other -> failwithf "expected unauthorized, got %A" other
+                stub.SetStatus 404
+                match! fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none with
+                | GitHubPrs.PrFetchFailed GitHubPrs.PrNotFound -> ()
+                | other -> failwithf "expected not found, got %A" other
+            }
+    ]
+
 let tests =
     testList "Connections" [
         codecTests
@@ -1806,8 +2088,10 @@ let tests =
         observationTests
         claudeTests
         githubTests
+        prPollTests
         Tag.needs "Broker service" [ Tag.Ports ] (fun () -> brokerTests)
         Tag.needs "Connection control routes" [ Tag.Ports ] (fun () -> routeTests)
         Tag.needs "GitHub sign-in routes" [ Tag.Ports ] (fun () -> githubRouteTests)
+        Tag.needs "Pull request endpoints" [ Tag.Ports ] (fun () -> prFetchTests)
         Tag.needs "Per-actor credentials E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)
     ]
