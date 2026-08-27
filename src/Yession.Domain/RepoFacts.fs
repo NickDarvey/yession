@@ -45,6 +45,29 @@ and RepoBranchSwitched =
 /// per outcome would rebuild exactly the accumulation `SessionEnvironment` had to stop —
 /// which is why the query was chosen over notes in the first place, and why this is a delta
 /// rather than a reversal of that choice.
+/// What a repo's file asks this session for, in the words a person would be shown, recorded
+/// the first time it says something new.
+///
+/// Recorded on CHANGE and never per fold — the fold re-runs after every repo verb. What
+/// makes a change worth saying is that a checkout's capability set is authored by whoever can
+/// push to it: a `uses:` line added in a pull request takes effect the next time anybody
+/// touches a repo, and until now it did so without anybody being told.
+///
+/// The GRANTS are carried rather than a digest of them, and that is deliberate. A hash would
+/// be smaller and would make the log unreadable — a person auditing this cannot tell what
+/// `a4f2…` meant — and a short one could be collided by whoever authors the file, which is
+/// exactly the party this exists to watch. Carrying the list costs a few lines and cannot be
+/// forged into looking unchanged.
+and RepoCapabilitiesChanged =
+    { MessageId : MessageId
+      Repo : RepoRef
+      /// Everything this repo's sandboxes would hold, flattened, deduplicated and sorted —
+      /// the same rendering the operator's `resources` surface uses, so what is said here and
+      /// what is read there cannot become two answers.
+      Granted : string list
+      /// The repo's file, as the party asking.
+      Actor : ActorRef }
+
 and RepoConfigRefused =
     { MessageId : MessageId
       Repo : RepoRef

@@ -78,12 +78,31 @@ let private lastRefusal (events: SessionEvent list) (repo: RepoRef) (sandbox: Sa
     |> List.tryLast
     |> Option.flatten
 
+/// What the log already says this repo asks for.
+///
+/// The LOG rather than a field, for the reason every delta in this file uses it: a field is
+/// empty in a process that has just started, so a delta against one would re-announce every
+/// repo's capabilities on every restart — which is the opposite of the point, since a
+/// re-announcement nobody caused trains people to stop reading them.
+let private lastCapabilities (events: SessionEvent list) (repo: RepoRef) : string list option =
+    events
+    |> List.choose (fun event ->
+        match event with
+        | SessionEvent.RepoCapabilitiesChanged c when RepoRef.value c.Repo = RepoRef.value repo ->
+            Some c.Granted
+        | _ -> None)
+    |> List.tryLast
+
 let create
     (reposDir: string)
     (repos: unit -> Repos.ReposService option)
     (sandboxes: unit -> WorkSandboxes.WorkSandboxes)
     (run: RunGatedCommand)
     (log: EventLog<SessionEvent>)
+    // What a selection of resource names comes to, in the words a person is shown. The fold
+    // needs it because a capability set is a fact about a REPO, not about one of its
+    // sandboxes, and only the fold sees all of a repo's declarations at once.
+    (capabilitiesOf: ResourceName list -> Result<string list, string>)
     : RepoSandboxes =
 
     let mintMessageId () : MessageId =
@@ -123,6 +142,41 @@ let create
                         unreadable
                         |> List.map (fun (repo, reason) ->
                             { Repo = repo; Sandbox = None; Problem = Some reason })
+                    // What each repo asks for, said when it changes — before anything is
+                    // started, so the timeline reads in the order things happened rather
+                    // than announcing a set after the sandboxes it describes came up.
+                    let! page = log.Read None System.Int32.MaxValue
+                    let told = page.Events |> List.map (fun e -> e.Event)
+                    let byRepo =
+                        declared
+                        |> Map.toList
+                        |> List.choose (fun (ref, decl) ->
+                            match SandboxRef.scope ref with
+                            | SessionOwned -> None
+                            | RepoOwned repo -> Some (repo, decl))
+                        |> List.groupBy (fun (repo, _) -> RepoRef.value repo)
+                    for _, entries in byRepo do
+                        let repo = entries |> List.head |> fst
+                        let asked =
+                            entries
+                            |> List.collect (fun (_, decl) -> decl.Uses)
+                            |> List.distinct
+                        match capabilitiesOf asked with
+                        // A selection that does not resolve is already a refusal further
+                        // down, said per declaration and with the reason. Saying it twice
+                        // here, in different words, would be two accounts of one fault.
+                        | Error _ -> ()
+                        | Ok granted ->
+                            if lastCapabilities told repo <> Some granted then
+                                let actor = ActorRef.Configured repo
+                                do!
+                                    append
+                                        actor
+                                        (SessionEvent.RepoCapabilitiesChanged
+                                            { RepoCapabilitiesChanged.MessageId = mintMessageId ()
+                                              RepoCapabilitiesChanged.Repo = repo
+                                              RepoCapabilitiesChanged.Granted = granted
+                                              RepoCapabilitiesChanged.Actor = actor })
                     let! declarations =
                         declared
                         |> Map.toList

@@ -98,6 +98,10 @@ type SessionEvent =
     // starts; until this, only the starts were announced — so a file with a typo in it read
     // on the timeline exactly like a file nobody had written.
     | RepoConfigRefused of RepoConfigRefused
+    // What a repo's file asks for, said when it CHANGES. A capability set is authored by
+    // whoever can push to the checkout, so a `uses:` line added in a pull request takes
+    // effect the next time anybody touches a repo — and did so silently.
+    | RepoCapabilitiesChanged of RepoCapabilitiesChanged
     // The shell profile (Plan 25): where a shell opened in one sandbox starts. One event
     // for set and for clear, because "what does a new terminal do" has one answer at a
     // time — a second verb would let the two disagree about which was last.
