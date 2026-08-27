@@ -201,6 +201,25 @@ Items are roughly ordered by how much they matter.
       is not a policy this can compute — the honest fix is srt allowing the symlink nodes on
       the way to a granted path, which is the same one-line widening `/usr/bin/git` ->
       `/var/select` wanted above.
+    - **A `Socket` grant is path-scoped on macOS and unenforceable on Linux.** #335 gave a
+      socket its own axis, and srt honours it as `network.allowUnixSockets` — a list of paths
+      the Seatbelt profile turns into `network-outbound` rules. On Linux srt filters unix
+      sockets with seccomp-bpf, which cannot read a socket path out of user-space memory, so
+      `wrapCommandWithSandboxLinux` takes `allowAllUnixSockets` and never reads the path list
+      at all: every `AF_UNIX` socket is blocked, or none is.
+
+      So an operator who declares the nix daemon socket gets a sandbox that can talk to it on
+      a Mac and cannot on Linux, and nothing says so — the resource resolves, the approval
+      prompt names the socket, the sandbox starts, and the first tool to use it fails. The
+      Srt-tier case that pins the macOS behaviour reports a visible skip on Linux rather than
+      asserting either way.
+
+      Two ways out, neither taken here. Setting `allowAllUnixSockets` when a policy grants any
+      socket makes the grant WORK on Linux and widens it from the named socket to every one —
+      which is a degradation, and the thing that reports a degradation
+      (`SandboxDegraded`, plan increment 5) does not exist yet, so doing it now would widen
+      confinement silently. The other is srt gaining a path-scoped mechanism on Linux, which
+      seccomp cannot give it. Recorded rather than guessed at.
     - **`dotnet` cannot run a build in an srt sandbox on macOS, and no resource fixes it.**
       .NET's named mutexes `stat("/tmp/")` — hardcoded, so redirecting `TMPDIR` does not
       reach it — and the SDK takes one on first use, from `NuGet.Common.Migrations`. `/tmp`

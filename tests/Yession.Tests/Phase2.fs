@@ -912,8 +912,95 @@ let private environmentProjectionTests =
 // What the environment RECORDS, as opposed to what it does. Pure: an in-memory log and a
 // `CreateSandbox` that answers without touching the machine, so this runs in the cheap tier
 // rather than beside the lifecycle suites that genuinely need a host.
+/// A policy with one thing to prove, so `verify` actually spawns instead of returning `Ok`
+/// on an empty check list. A HOME is the first check the plan makes.
+let private policyWithAHome : unit -> Async<Result<SandboxPolicy, string>> =
+    fun () -> async { return Ok { Support.emptyPolicy with Env = Map.ofList [ "HOME", "/data/home" ] } }
+
 let private environmentRecordingTests =
     testList "What a start attempt records" [
+
+        // --- a sandbox that fails its own checks -------------------------------------------
+
+        // The wiring #333 added, seen from the outside: a sandbox that cannot prove it holds
+        // what it was granted must reach a caller as a REFUSAL, in the same shape as a
+        // backend that could not create one at all. Tested here and not only at `verify`,
+        // because what a caller sees is decided by `ensure` — and `RepoSandboxes` turns
+        // exactly this into the sentence a person reads.
+        testCaseAsync "a sandbox that fails a start-up check is refused, in the words of the check" <|
+            async {
+                let sessionId = SessionId.create "unverified-1" |> expect
+                let log =
+                    Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+                let creating : CreateSandbox = fun _ -> async { return Ok (failingAt 0) }
+                let environment =
+                    Yession.SessionProcess.SessionEnvironment.create
+                        log creating policyWithAHome "scripted" "env-unverified-1"
+
+                match! environment.Ensure None "the fold asked" with
+                | EnvironmentAvailable -> failwith "a sandbox that failed its checks must not be available"
+                | EnvironmentUnavailable reason ->
+                    Expect.isTrue (reason.Contains "/data/home")
+                        (sprintf "and says which check, said: %s" reason)
+
+                let! events = environmentEventsOf log
+                Expect.equal events [ "need"; "start-requested"; "start-failed" ]
+                    "recorded as a start that failed, which is what it is"
+            }
+
+        // `running` is never set for it, so nothing can reach a sandbox that failed its own
+        // checks. The observable form of that: the next ask ATTEMPTS again rather than
+        // handing back the one that failed — a sandbox kept in `running` would be reused
+        // forever and never re-created when the fault cleared.
+        testCaseAsync "a sandbox that failed its checks is never handed to anybody" <|
+            async {
+                let sessionId = SessionId.create "unverified-2" |> expect
+                let log =
+                    Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+                let mutable created = 0
+                let creating : CreateSandbox =
+                    fun _ ->
+                        async {
+                            created <- created + 1
+                            return Ok (failingAt 0)
+                        }
+                let environment =
+                    Yession.SessionProcess.SessionEnvironment.create
+                        log creating policyWithAHome "scripted" "env-unverified-2"
+
+                let! _ = environment.Ensure None "the fold asked"
+                let! _ = environment.Ensure None "the fold asked again"
+                Expect.equal created 2 "it was built again rather than the failed one reused"
+
+                // And the refusal is not re-announced, because #307's rule applies to this
+                // refusal like any other — the fold re-runs after every repo verb.
+                let! events = environmentEventsOf log
+                Expect.equal events [ "need"; "start-requested"; "start-failed" ]
+                    "said once, however many times it is asked"
+            }
+
+        // Disposed, not leaked. A sandbox is a real process tree under srt and a container
+        // under docker; one abandoned per failed start, on a fold that re-runs after every
+        // repo verb, is an unbounded leak of the most expensive thing here.
+        testCaseAsync "a sandbox that failed its checks is disposed" <|
+            async {
+                let sessionId = SessionId.create "unverified-3" |> expect
+                let log =
+                    Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+                let mutable disposed = 0
+                let creating : CreateSandbox =
+                    fun _ ->
+                        async {
+                            return Ok { failingAt 0 with Dispose = fun () -> async { disposed <- disposed + 1 } }
+                        }
+                let environment =
+                    Yession.SessionProcess.SessionEnvironment.create
+                        log creating policyWithAHome "scripted" "env-unverified-3"
+
+                let! _ = environment.Ensure None "the fold asked"
+                Expect.equal disposed 1 "the sandbox it could not vouch for was torn down"
+            }
+
         // The fold that asks for a repo's sandboxes re-runs after every repo verb, so a
         // declaration the operator's ceiling refuses used to record three events every time
         // anyone touched a repo — identical reasons, unbounded, about a session in which
