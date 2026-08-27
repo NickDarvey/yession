@@ -215,16 +215,16 @@ let reposVisibleAt (backend: SandboxBackend) (hostReposDir: string) : string =
 /// What may be granted at all was settled by the algebra before anything reached here.
 let grantsFrom
     (leaves: ResourceLeaf list)
-    : Result<string list * string list * string list * Map<string, string>, string> =
-    let rec fold reads writes domains env remaining =
+    : Result<string list * string list * string list * string list * Map<string, string>, string> =
+    let rec fold reads writes domains sockets env remaining =
         match remaining with
-        | [] -> Ok (List.rev reads, List.rev writes, List.rev domains, env)
+        | [] -> Ok (List.rev reads, List.rev writes, List.rev domains, List.rev sockets, env)
         | leaf :: rest ->
             match leaf with
             | Mount mount ->
                 match mount.Mode with
-                | ResourceMountMode.Read -> fold (mount.From :: reads) writes domains env rest
-                | ResourceMountMode.Write -> fold reads (mount.From :: writes) domains env rest
+                | ResourceMountMode.Read -> fold (mount.From :: reads) writes domains sockets env rest
+                | ResourceMountMode.Write -> fold reads (mount.From :: writes) domains sockets env rest
                 // Refused rather than quietly treated as writable. Neither srt nor docker has
                 // a union mount here, so an overlay would be a resource that READS as "the
                 // host's copy stays untouched" and BEHAVES as "write straight into it" —
@@ -235,13 +235,19 @@ let grantsFrom
                         sprintf
                             "this host cannot overlay %s yet — no backend here has a union mount, so declare it read or write rather than let it silently become one"
                             mount.From)
-            // A socket is read AND written by anything that talks to it. Granting one half
-            // grants nothing.
-            | Socket path -> fold (path :: reads) (path :: writes) domains env rest
-            | Endpoint host -> fold reads writes (host :: domains) env rest
-            | Variable (name, value) -> fold reads writes domains (Map.add name value env) rest
-            | Exec path -> fold (path :: reads) writes domains env rest
-    fold [] [] [] Map.empty leaves
+            // Its own axis, not two file grants. Connecting to a unix socket is a
+            // permission of its own — macOS wants `network-outbound` on the path — and the
+            // file halves do not add up to it: measured, a sandbox holding this readable
+            // and writable, with `test -S` passing, was still refused by nix with "could
+            // not connect to any lix socket".
+            //
+            // Still read and written too, because talking to one does both, and the
+            // node has to be reachable before it can be connected to.
+            | Socket path -> fold (path :: reads) (path :: writes) domains (path :: sockets) env rest
+            | Endpoint host -> fold reads writes (host :: domains) sockets env rest
+            | Variable (name, value) -> fold reads writes domains sockets (Map.add name value env) rest
+            | Exec path -> fold (path :: reads) writes domains sockets env rest
+    fold [] [] [] [] Map.empty leaves
 
 /// The directories of granted executables, for PATH.
 let grantedPath (leaves: ResourceLeaf list) : string list =
@@ -285,7 +291,7 @@ let policyFor
     // First, because everything below reads it: what the operator already gave.
     match grantsFrom granted with
     | Error e -> Error e
-    | Ok (grantedReads, grantedWrites, grantedDomains, grantedEnv) ->
+    | Ok (grantedReads, grantedWrites, grantedDomains, grantedSockets, grantedEnv) ->
 
     let env =
         // The sandbox's own home replaces the inherited one IN THE BASELINE, so a spec that
@@ -341,6 +347,7 @@ let policyFor
             | HostBackend
             | DockerBackend -> None
             | SrtBackend -> Some (List.distinct grantedDomains)
+          Sockets = List.distinct grantedSockets
           Env = env
           // What the sandbox ASKED to start in, and the workspace only when it asked
           // for nothing. `toRequest` has already resolved this against the checkout
@@ -940,6 +947,9 @@ type SrtConfig =
       /// The egress allowlist. Empty means no egress: srt has no "unrestricted", so a
       /// policy that names no domains gets none.
       AllowedDomains : string list
+      /// Unix sockets a spawn may connect to (srt's `network.allowUnixSockets`). Empty
+      /// means none, which is srt's default — a socket nobody named is not reachable.
+      AllowUnixSockets : string list
       Bwrap : string option
       Socat : string option
       Ripgrep : string option
@@ -1140,6 +1150,7 @@ module SrtSandbox =
           AllowRead = distinct (policy.ReadPaths @ writable @ tools.Runtime)
           AllowWrite = writable
           AllowedDomains = policy.AllowedDomains |> Option.defaultValue []
+          AllowUnixSockets = policy.Sockets
           Bwrap = tools.Bwrap
           Socat = tools.Socat
           Ripgrep = tools.Ripgrep
@@ -1208,7 +1219,7 @@ module SrtSandbox =
                              @ ([ "YESSION_BIN_CLAUDE"; "YESSION_BIN_GIT" ] |> List.choose named))
                             ambient })
 
-    [<Emit("(function (allowedDomains, denyRead, allowRead, allowWrite, bwrap, socat, ripgrep, weakNesting, allowGitConfig, filesystemDisabled) { return ({ network: { allowedDomains: allowedDomains, deniedDomains: [], strictAllowlist: true }, filesystem: { denyRead: denyRead, allowRead: allowRead, allowWrite: allowWrite, denyWrite: [], allowGitConfig: allowGitConfig, disabled: filesystemDisabled }, ...(bwrap ? { bwrapPath: bwrap } : {}), ...(socat ? { socatPath: socat } : {}), ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}), ...(weakNesting ? { enableWeakerNestedSandbox: true } : {}) }) })($0, $1, $2, $3, $4, $5, $6, $7, $8, $9)")>]
+    [<Emit("(function (allowedDomains, denyRead, allowRead, allowWrite, bwrap, socat, ripgrep, weakNesting, allowGitConfig, filesystemDisabled, allowUnixSockets) { return ({ network: { allowedDomains: allowedDomains, deniedDomains: [], strictAllowlist: true, allowUnixSockets: allowUnixSockets }, filesystem: { denyRead: denyRead, allowRead: allowRead, allowWrite: allowWrite, denyWrite: [], allowGitConfig: allowGitConfig, disabled: filesystemDisabled }, ...(bwrap ? { bwrapPath: bwrap } : {}), ...(socat ? { socatPath: socat } : {}), ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}), ...(weakNesting ? { enableWeakerNestedSandbox: true } : {}) }) })($0, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)")>]
     let private configObject
         (allowedDomains: string array)
         (denyRead: string array)
@@ -1220,6 +1231,7 @@ module SrtSandbox =
         (weakNesting: bool)
         (allowGitConfig: bool)
         (filesystemDisabled: bool)
+        (allowUnixSockets: string array)
         : obj = jsNative
 
     let private toJs (config: SrtConfig) : obj =
@@ -1234,6 +1246,7 @@ module SrtSandbox =
             config.WeakNesting
             config.AllowGitConfig
             config.FilesystemDisabled
+            (List.toArray config.AllowUnixSockets)
 
     // The package is loaded on demand: it pulls a proxy stack and a TLS library, and a
     // session on the host backend must not pay for either. Dynamic `import` (not
@@ -1256,8 +1269,8 @@ module SrtSandbox =
     [<Emit("$0.argv")>]
     let private argvOf (wrapped: obj) : string array = jsNative
 
-    [<Emit("(function (srt, allowedDomains) { return srt.SandboxManager.updateConfig({ ...srt.SandboxManager.getConfig(), network: { ...srt.SandboxManager.getConfig().network, allowedDomains: allowedDomains } }) })($0, $1)")>]
-    let private widenAllowlist (srt: obj) (allowedDomains: string array) : unit = jsNative
+    [<Emit("(function (srt, allowedDomains, allowUnixSockets) { return srt.SandboxManager.updateConfig({ ...srt.SandboxManager.getConfig(), network: { ...srt.SandboxManager.getConfig().network, allowedDomains: allowedDomains, allowUnixSockets: allowUnixSockets } }) })($0, $1, $2)")>]
+    let private widenAllowlist (srt: obj) (allowedDomains: string array) (allowUnixSockets: string array) : unit = jsNative
 
     // srt's manager is a PROCESS-WIDE singleton: one filtering proxy pair, one egress
     // allowlist, initialized once. Filesystem policy is per-spawn (it rides `customConfig`
@@ -1265,6 +1278,9 @@ module SrtSandbox =
     // their egress allowlists, though, can only be the union — see docs/GAPS.md.
     let mutable private starting : JS.Promise<obj> option = None
     let mutable private allowed : Set<string> = Set.empty
+    /// The sockets every sandbox of this session may connect to. Session-scoped for the
+    /// same reason `allowed` is: srt reads it from the manager's config, not the spawn's.
+    let mutable private sockets : Set<string> = Set.empty
 
     /// The tools this config names srt must run. macOS names none — Seatbelt ships with
     /// the OS — so the list is empty there, and so is what a failed start there settles.
@@ -1307,6 +1323,7 @@ module SrtSandbox =
             | Some promise ->
                 starting <- None
                 allowed <- Set.empty
+                sockets <- Set.empty
                 try
                     let! srt = Interop.awaitPromise promise
                     do! Interop.awaitPromise (resetManager srt)
@@ -1321,14 +1338,28 @@ module SrtSandbox =
         | Some promise ->
             async {
                 let! srt = Interop.awaitPromise promise
-                let union = Set.union allowed (Set.ofList config.AllowedDomains)
-                if union <> allowed then
-                    allowed <- union
-                    widenAllowlist srt (Set.toArray union)
+                // Sockets widen with the domains, and for the same reason: srt reads BOTH
+                // from the session config the manager was initialized with and ignores the
+                // per-spawn one (`getAllowUnixSockets` reads the module-level config). A
+                // second sandbox that named a socket the first did not would otherwise hold
+                // a grant that exists only in its own config object — which is exactly what
+                // happened: a policy carrying the nix daemon socket, a `test -S` that
+                // passed, and "could not connect to any lix socket".
+                //
+                // The union is the same compromise docs/GAPS.md records for egress: every
+                // sandbox of a session can reach what any of them may. Undo when srt reads
+                // the network config per spawn.
+                let widerDomains = Set.union allowed (Set.ofList config.AllowedDomains)
+                let widerSockets = Set.union sockets (Set.ofList config.AllowUnixSockets)
+                if widerDomains <> allowed || widerSockets <> sockets then
+                    allowed <- widerDomains
+                    sockets <- widerSockets
+                    widenAllowlist srt (Set.toArray widerDomains) (Set.toArray widerSockets)
                 return srt
             }
         | None ->
             allowed <- Set.ofList config.AllowedDomains
+            sockets <- Set.ofList config.AllowUnixSockets
             // Started once, here, and memoized as its promise — including a start that
             // failed BECAUSE THIS HOST CANNOT CONFINE, so every later sandbox reports the
             // reason instead of rediscovering it. A start that settled nothing is not
@@ -1501,6 +1532,9 @@ module AgentSandbox =
         { ReadPaths = [ home ]
           WritePaths = [ home ]
           AllowedDomains = Some (domainsFrom ambient)
+          // The agent CLI talks to no local daemon. A socket nobody named is unreachable,
+          // which is what this says.
+          Sockets = []
           Env = env
           WorkingDirectory = None
           Filesystem = Confined }
