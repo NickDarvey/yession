@@ -594,7 +594,7 @@ let tests =
                 let! selection = genSelection declarations
                 let profile = ResourceProfile.load declarations |> expect
                 let closure = ResourceProfile.resolve profile selection |> expect
-                let realised = RealisedClosure.of' HostLimits.unlimited closure
+                let realised = RealisedClosure.of' HostLimits.unlimited (ResourceClosure.leaves closure)
                 Expect.equal (RealisedClosure.differences realised) [] "nothing differs"
                 Expect.equal (RealisedClosure.held realised) (ResourceClosure.leaves closure)
                     "and everything asked for is held"
@@ -610,7 +610,7 @@ let tests =
                 let! limits = genLimits
                 let profile = ResourceProfile.load declarations |> expect
                 let closure = ResourceProfile.resolve profile selection |> expect
-                let realised = RealisedClosure.of' limits closure
+                let realised = RealisedClosure.of' limits (ResourceClosure.leaves closure)
                 let differing = RealisedClosure.differences realised |> List.map fst
                 for leaf in differing do
                     match leaf with
@@ -634,7 +634,7 @@ let tests =
                 let! limits = genLimits
                 let profile = ResourceProfile.load declarations |> expect
                 let closure = ResourceProfile.resolve profile selection |> expect
-                let realised = RealisedClosure.of' limits closure
+                let realised = RealisedClosure.of' limits (ResourceClosure.leaves closure)
                 let held = RealisedClosure.held realised
                 for leaf, outcome in RealisedClosure.differences realised do
                     match outcome with
@@ -655,7 +655,7 @@ let tests =
                 let! limits = genLimits
                 let profile = ResourceProfile.load declarations |> expect
                 let closure = ResourceProfile.resolve profile selection |> expect
-                let realised = RealisedClosure.of' limits closure
+                let realised = RealisedClosure.of' limits (ResourceClosure.leaves closure)
                 Expect.isTrue
                     (Set.isSubset (RealisedClosure.held realised) (ResourceClosure.leaves closure))
                     "held is within asked"
@@ -671,8 +671,8 @@ let tests =
                 let! limits = genLimits
                 let profile = ResourceProfile.load declarations |> expect
                 let closure = ResourceProfile.resolve profile selection |> expect
-                let once = RealisedClosure.of' limits closure
-                let twice = RealisedClosure.of' limits (ResourceProfile.resolve profile selection |> expect)
+                let once = RealisedClosure.of' limits (ResourceClosure.leaves closure)
+                let twice = RealisedClosure.of' limits (ResourceClosure.leaves (ResourceProfile.resolve profile selection |> expect))
                 Expect.equal (RealisedClosure.differences twice) (RealisedClosure.differences once) "same differences"
                 Expect.equal (RealisedClosure.held twice) (RealisedClosure.held once) "same held"
             }
@@ -687,7 +687,7 @@ let tests =
                 let! limits = genLimits
                 let profile = ResourceProfile.load declarations |> expect
                 let closure = ResourceProfile.resolve profile selection |> expect
-                let realised = RealisedClosure.of' limits closure
+                let realised = RealisedClosure.of' limits (ResourceClosure.leaves closure)
                 Expect.equal
                     (List.length (RealisedClosure.describeDifferences realised))
                     (List.length (RealisedClosure.differences realised))

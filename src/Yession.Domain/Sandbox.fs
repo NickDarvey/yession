@@ -80,6 +80,18 @@ type SandboxPolicy =
       WritePaths : string list
       /// Domains the sandbox may reach. None = unrestricted; Some [] = no egress.
       AllowedDomains : string list option
+      /// Every place this host could not give exactly what the resource named.
+      ///
+      /// On the policy because it has two readers and they must not disagree: a BACKEND reads
+      /// it to do the coarser thing it said it would do (srt allows every unix socket when it
+      /// could not scope one), and the session reads it to tell whoever is working here what
+      /// they actually hold. A degradation the backend acts on and nobody is told about is
+      /// the fault this exists to remove; one reported and not acted on is a lie the other
+      /// way.
+      ///
+      /// Empty on a host that can express the whole selection, which is the common case and
+      /// says nothing rather than saying "no degradations".
+      Realisation : (ResourceLeaf * LeafRealisation) list
       /// Unix sockets the sandbox may CONNECT to.
       ///
       /// Its own axis, because connecting to a socket is its own permission and the file

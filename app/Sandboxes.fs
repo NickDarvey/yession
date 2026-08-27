@@ -213,6 +213,36 @@ let reposVisibleAt (backend: SandboxBackend) (hostReposDir: string) : string =
 ///
 /// Not a second policy engine: this only maps primitives onto fields a policy already has.
 /// What may be granted at all was settled by the algebra before anything reached here.
+[<Emit("process.platform")>]
+let private platform () : string = jsNative
+
+/// What each backend on this host can actually distinguish about a grant.
+///
+/// Here, beside the backends, because it is a statement a backend makes about ITSELF — the
+/// algebra takes it and cannot invent one, which is why `HostLimits` is private to its
+/// module. Wrong here is a lie the whole layer then tells accurately.
+///
+/// srt splits by platform, and that split IS the fault this exists for: it scopes a unix
+/// socket by path on macOS, through a `network-outbound` rule on the path, and cannot on
+/// Linux, where the filter is seccomp-bpf and cannot read a socket path out of user-space
+/// memory. Egress it scopes on both, through its own proxy.
+///
+/// docker binds a socket into the container by path, so it scopes that; it filters no egress
+/// at all, which until now was `AllowedDomains = None` and unsaid. Neither has a union mount,
+/// which is why no backend claims `OverlayMounts` — it is in the vocabulary because it is a
+/// real distinction and this host cannot make it, not because somebody might.
+///
+/// The host backend confines nothing, so nothing is scoped and nothing is coarsened: a policy
+/// it cannot enforce is not a degradation, it is the absence of a sandbox, said elsewhere.
+let limitsFor (backend: SandboxBackend) (platform: string) : HostLimits =
+    match backend with
+    | HostBackend -> HostLimits.unlimited
+    | SrtBackend ->
+        if platform = "darwin" then
+            HostLimits.of' [ HostDistinction.SocketsByPath; HostDistinction.EgressByHost ]
+        else HostLimits.of' [ HostDistinction.EgressByHost ]
+    | DockerBackend -> HostLimits.of' [ HostDistinction.SocketsByPath ]
+
 let grantsFrom
     (leaves: ResourceLeaf list)
     : Result<string list * string list * string list * string list * Map<string, string>, string> =
@@ -225,15 +255,15 @@ let grantsFrom
                 match mount.Mode with
                 | ResourceMountMode.Read -> fold (mount.From :: reads) writes domains sockets env rest
                 | ResourceMountMode.Write -> fold reads (mount.From :: writes) domains sockets env rest
-                // Refused rather than quietly treated as writable. Neither srt nor docker has
-                // a union mount here, so an overlay would be a resource that READS as "the
-                // host's copy stays untouched" and BEHAVES as "write straight into it" —
-                // which is the failure a schema exists to prevent, not a rough edge. It
-                // becomes available when a backend can actually do it.
+                // Unreachable, and deliberately not a second refusal. An overlay is WITHHELD
+                // by the realisation before it gets here — `HostDistinction.OverlayMounts` is
+                // a distinction no backend on this host claims — so a leaf arriving in this
+                // arm means something built a policy without realising it first, which is a
+                // bug in the caller and not a configuration this can explain.
                 | ResourceMountMode.Overlay ->
                     Error (
                         sprintf
-                            "this host cannot overlay %s yet — no backend here has a union mount, so declare it read or write rather than let it silently become one"
+                            "%s reached a policy without being realised against this host — an overlay is withheld, never granted"
                             mount.From)
             // Its own axis, not two file grants. Connecting to a unix socket is a
             // permission of its own — macOS wants `network-outbound` on the path — and the
@@ -263,6 +293,9 @@ let grantedPath (leaves: ResourceLeaf list) : string list =
 
 let policyFor
     (backend: SandboxBackend)
+    /// What this host can express — `limitsFor backend (platform ())` in production, and the
+    /// other platform's answer in a test.
+    (limits: HostLimits)
     (ambient: Map<string, string>)
     (resolved: Map<string, string>)
     (workspace: string option)
@@ -288,8 +321,30 @@ let policyFor
     // in hand — a caller that reconciled first would be a second copy of the ceiling rule.
     (spec: EnvironmentSpec)
     : Result<SandboxPolicy, string> =
-    // First, because everything below reads it: what the operator already gave.
-    match grantsFrom granted with
+    // What THIS host can actually make of it, before anything is built from it. The third
+    // narrowing, and the only one that can widen — so it happens here, once, rather than in
+    // each backend where three copies could disagree.
+    //
+    // The limits are PASSED, not discovered: a function that reached for `process.platform`
+    // could only ever be tested on the platform running it, and the one thing worth testing
+    // here is the host that cannot do what this one can.
+    let realised = RealisedClosure.of' limits (Set.ofList granted)
+    let differences = RealisedClosure.differences realised
+    // A leaf this host cannot give AT ALL refuses the sandbox, and a leaf it gives more
+    // coarsely does not. That is the whole difference between a degradation and a refusal —
+    // a sandbox that works differently against one that does not work — and it is decided
+    // here rather than by each caller's judgement about which is which.
+    match differences |> List.tryPick (fun (leaf, outcome) ->
+            match outcome with
+            | LeafRealisation.Withheld because -> Some (leaf, because)
+            | _ -> None) with
+    | Some (leaf, because) ->
+        Error (sprintf "this host cannot grant %s: %s" (ResourceLeaf.describe leaf) because)
+    | None ->
+
+    // First, because everything below reads it: what the operator already gave, as this host
+    // will actually give it.
+    match grantsFrom (RealisedClosure.held realised |> Set.toList) with
     | Error e -> Error e
     | Ok (grantedReads, grantedWrites, grantedDomains, grantedSockets, grantedEnv) ->
 
@@ -348,6 +403,7 @@ let policyFor
             | DockerBackend -> None
             | SrtBackend -> Some (List.distinct grantedDomains)
           Sockets = List.distinct grantedSockets
+          Realisation = differences
           Env = env
           // What the sandbox ASKED to start in, and the workspace only when it asked
           // for nothing. `toRequest` has already resolved this against the checkout
@@ -401,7 +457,7 @@ let preparePolicy
                 match grantsFor spec.Uses with
                 | Error e -> return Error e
                 | Ok granted ->
-                    return policyFor backend (ambientEnv ()) resolved workspace reposDir home granted spec
+                    return policyFor backend (limitsFor backend (platform ())) (ambientEnv ()) resolved workspace reposDir home granted spec
         }
 
 // --- A buffered one-shot: settle once, deliver to every (even late) awaiter --------------
@@ -950,6 +1006,11 @@ type SrtConfig =
       /// Unix sockets a spawn may connect to (srt's `network.allowUnixSockets`). Empty
       /// means none, which is srt's default — a socket nobody named is not reachable.
       AllowUnixSockets : string list
+      /// srt's `network.allowAllUnixSockets`: every unix socket, because this host cannot
+      /// scope one. The materialisation of a `Coarsened` socket — on Linux the path list
+      /// above is not read at all, so this is the only way a granted socket works there, and
+      /// it is set only when the policy already SAID it would be.
+      AllowAllUnixSockets : bool
       Bwrap : string option
       Socat : string option
       Ripgrep : string option
@@ -1151,15 +1212,23 @@ module SrtSandbox =
           AllowWrite = writable
           AllowedDomains = policy.AllowedDomains |> Option.defaultValue []
           AllowUnixSockets = policy.Sockets
+          // The other half of what the policy REPORTED. A host that said it could not scope
+          // a socket has to then give the wider thing it said it would give, or the report is
+          // a warning about something that did not happen and the sandbox holds less than the
+          // person approved. srt's own knob is all-or-nothing here, which is exactly the
+          // distinction it could not make.
+          AllowAllUnixSockets =
+            policy.Realisation
+            |> List.exists (fun (leaf, outcome) ->
+                match leaf, outcome with
+                | Socket _, LeafRealisation.Coarsened _ -> true
+                | _ -> false)
           Bwrap = tools.Bwrap
           Socat = tools.Socat
           Ripgrep = tools.Ripgrep
           WeakNesting = (tools.Nesting = WeakNesting)
           AllowGitConfig = true
           FilesystemDisabled = (policy.Filesystem = Unconfined) }
-
-    [<Emit("process.platform")>]
-    let private platform () : string = jsNative
 
     [<Emit("process.execPath")>]
     let private execPath () : string = jsNative
@@ -1219,7 +1288,7 @@ module SrtSandbox =
                              @ ([ "YESSION_BIN_CLAUDE"; "YESSION_BIN_GIT" ] |> List.choose named))
                             ambient })
 
-    [<Emit("(function (allowedDomains, denyRead, allowRead, allowWrite, bwrap, socat, ripgrep, weakNesting, allowGitConfig, filesystemDisabled, allowUnixSockets) { return ({ network: { allowedDomains: allowedDomains, deniedDomains: [], strictAllowlist: true, allowUnixSockets: allowUnixSockets }, filesystem: { denyRead: denyRead, allowRead: allowRead, allowWrite: allowWrite, denyWrite: [], allowGitConfig: allowGitConfig, disabled: filesystemDisabled }, ...(bwrap ? { bwrapPath: bwrap } : {}), ...(socat ? { socatPath: socat } : {}), ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}), ...(weakNesting ? { enableWeakerNestedSandbox: true } : {}) }) })($0, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)")>]
+    [<Emit("(function (allowedDomains, denyRead, allowRead, allowWrite, bwrap, socat, ripgrep, weakNesting, allowGitConfig, filesystemDisabled, allowUnixSockets, allowAllUnixSockets) { return ({ network: { allowedDomains: allowedDomains, deniedDomains: [], strictAllowlist: true, allowUnixSockets: allowUnixSockets, ...(allowAllUnixSockets ? { allowAllUnixSockets: true } : {}) }, filesystem: { denyRead: denyRead, allowRead: allowRead, allowWrite: allowWrite, denyWrite: [], allowGitConfig: allowGitConfig, disabled: filesystemDisabled }, ...(bwrap ? { bwrapPath: bwrap } : {}), ...(socat ? { socatPath: socat } : {}), ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}), ...(weakNesting ? { enableWeakerNestedSandbox: true } : {}) }) })($0, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)")>]
     let private configObject
         (allowedDomains: string array)
         (denyRead: string array)
@@ -1232,6 +1301,7 @@ module SrtSandbox =
         (allowGitConfig: bool)
         (filesystemDisabled: bool)
         (allowUnixSockets: string array)
+        (allowAllUnixSockets: bool)
         : obj = jsNative
 
     let private toJs (config: SrtConfig) : obj =
@@ -1247,6 +1317,7 @@ module SrtSandbox =
             config.AllowGitConfig
             config.FilesystemDisabled
             (List.toArray config.AllowUnixSockets)
+            config.AllowAllUnixSockets
 
     // The package is loaded on demand: it pulls a proxy stack and a TLS library, and a
     // session on the host backend must not pay for either. Dynamic `import` (not
@@ -1535,6 +1606,7 @@ module AgentSandbox =
           // The agent CLI talks to no local daemon. A socket nobody named is unreachable,
           // which is what this says.
           Sockets = []
+          Realisation = []
           Env = env
           WorkingDirectory = None
           Filesystem = Confined }

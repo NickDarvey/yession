@@ -263,12 +263,15 @@ type LeafRealisation =
     /// whether that is fatal.
     | Withheld of because: string
 
-/// What one host makes of one selection: what is actually held, and every place that differs
-/// from what was asked.
+/// What one host makes of a set of leaves: what is actually held, and every place that
+/// differs from what was asked.
+///
+/// LEAVES and not a closure, which applying this is what settled. Sensitivity is not
+/// something a host can change, whoever resolved the selection still holds it, and the copy
+/// that used to live here was a second answer to "what was asked for" that nothing kept equal
+/// to the first. A policy builder has only leaves in hand anyway.
 type RealisedClosure =
-    private
-        { Asked : ResourceClosure
-          Outcomes : Map<ResourceLeaf, LeafRealisation> }
+    private { Outcomes : Map<ResourceLeaf, LeafRealisation> }
 
 module RealisedClosure =
 
@@ -300,7 +303,7 @@ module RealisedClosure =
                 Some (
                     HostDistinction.OverlayMounts,
                     LeafRealisation.Withheld
-                        "this host has no union mount, so a writable layer over a read-only source is not something it can give")
+                        "no backend on this host has a union mount, so declare it read or write rather than let it silently become one")
             | ResourceMountMode.Read
             | ResourceMountMode.Write -> None
         | Variable _
@@ -309,10 +312,9 @@ module RealisedClosure =
     /// Put a selection through a host. The third narrowing, after the operator's vocabulary
     /// and the repo's selection — except that it is the one narrowing that can also WIDEN,
     /// which is exactly why it has to be said out loud rather than folded into the closure.
-    let of' (limits: HostLimits) (asked: ResourceClosure) : RealisedClosure =
-        { Asked = asked
-          Outcomes =
-            ResourceClosure.leaves asked
+    let of' (limits: HostLimits) (asked: Set<ResourceLeaf>) : RealisedClosure =
+        { Outcomes =
+            asked
             |> Set.toList
             |> List.map (fun leaf ->
                 match scoping leaf with
@@ -320,10 +322,6 @@ module RealisedClosure =
                 | Some (distinction, _) when HostLimits.can distinction limits -> leaf, LeafRealisation.AsAsked
                 | Some (_, otherwise) -> leaf, otherwise)
             |> Map.ofList }
-
-    /// What was asked for, unchanged. Kept because a person deciding needs both halves, and
-    /// because re-deriving it from the outcomes would lose the sensitivity marks.
-    let asked (realised: RealisedClosure) : ResourceClosure = realised.Asked
 
     /// The leaves this host will actually put in a policy: everything it did not withhold.
     ///

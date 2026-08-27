@@ -298,6 +298,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
               AllowedDomains = Some config.AllowedDomains
               // git reaches remotes over the proxy, never a local socket.
               Sockets = []
+              Realisation = []
               Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
               WorkingDirectory = Some reposDir
               Filesystem = Confined }
