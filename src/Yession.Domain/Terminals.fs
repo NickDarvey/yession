@@ -131,7 +131,7 @@ type Block =
 /// One terminal, as the UI knows it.
 type TerminalView =
     { TerminalId : TerminalId
-      Title : string
+      Title : TerminalTitle
       OpenedBy : ActorRef
       /// Which of the session's WorkSandboxes this terminal runs in (Plan 15, stage 2).
       /// Fixed at open, because a terminal IS a shell process inside one sandbox — moving
@@ -420,7 +420,7 @@ module Flip =
 type BlockDigest =
     { TerminalId : TerminalId
       /// The terminal's title, so the agent can name the place rather than an opaque id.
-      Title : string
+      Title : TerminalTitle
       BlockId : BlockId
       /// Who wrote the command — the agent's own, or someone else's it should know ran.
       Author : ActorRef

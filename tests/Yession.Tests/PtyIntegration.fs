@@ -161,7 +161,7 @@ let private withShellTerminal
                     []
                     ShellProfileProjection.empty
             do! prepare terminals
-            match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) (SandboxShell SandboxRef.defaultRef) name with
+            match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) (SandboxShell SandboxRef.defaultRef) (TerminalTitle.fromProse name) with
             | Error e -> failwith e
             | Ok id ->
                 do! body terminals id records log (fun () -> reDrains) advance

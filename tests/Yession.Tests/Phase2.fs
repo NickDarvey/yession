@@ -1479,7 +1479,7 @@ let private acceptanceTests =
                       EnvironmentNeedIdentified { Reason = "task"; AgentTurnId = None }
                       EnvironmentStarted { EnvironmentId = "env"; ContainerRef = "ctr" }
                       SessionEvent.TerminalOpened
-                        { TerminalId = TerminalId.create "t1" |> expect; OpenedBy = ActorRef.Agent; Title = "agent"; Sandbox = Some SandboxRef.defaultRef; Renewable = false }
+                        { TerminalId = TerminalId.create "t1" |> expect; OpenedBy = ActorRef.Agent; Title = (TerminalTitle.fromProse "agent"); Sandbox = Some SandboxRef.defaultRef; Renewable = false }
                       SessionEvent.TerminalBlockStarted
                         { TerminalId = TerminalId.create "t1" |> expect
                           BlockId = BlockId.create "b1" |> expect

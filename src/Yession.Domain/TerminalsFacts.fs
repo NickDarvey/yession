@@ -7,13 +7,78 @@ open Yession.Domain
 /// These sit BELOW `SessionEvent`, because the union names them, while the
 /// projections that fold that union sit above it — so Terminals spans the event
 /// spine rather than living on one side of it.
+/// The human label a terminal carries so a session with four of them is navigable. Never
+/// unique, never an identifier — `TerminalId` is what names a terminal.
+///
+/// It is a type rather than a `string` because a wrong pick between two `string` fields
+/// type-checks and says nothing: `.Title` is carried by records in four namespaces and
+/// `.Reason`, `.Command` and `.Label` by others, so wherever a receiver's type is not
+/// inferred, F# resolves the label from whatever is in scope and compiles either way. A
+/// label that has its own type makes the wrong pick fail to compile, which is the only
+/// reason the one wrong pick this codebase HAS found was ever found.
+///
+/// The rules live here rather than at the caller that used to hold them. Opening a terminal
+/// normalised its title inline — trim, and an empty one becomes `terminal` — which is a rule
+/// every other way of opening one had to remember separately.
+type TerminalTitle = private TerminalTitle of string
+
+module TerminalTitle =
+
+    /// Long enough for any label a person would write, short enough to bound what a peer can
+    /// put in a durable event. A title is appended to the log on `TerminalOpened` and
+    /// replayed for ever, and it is rendered in a tab strip; neither wants a novel.
+    [<Literal>]
+    let MaxLength = 120
+
+    /// What an unlabelled terminal is called. Offering no title is not an error — most
+    /// terminals are opened by a person who did not stop to name one.
+    let fallback : TerminalTitle = TerminalTitle "terminal"
+
+    /// Parse a title off a command or the wire. Trims; an empty or whitespace title becomes
+    /// `fallback` rather than an error, because a peer pressing New Terminal has not done
+    /// anything wrong.
+    ///
+    /// Too long IS an error, and is rejected rather than truncated: a title is what somebody
+    /// typed, and silently keeping a prefix of it in a durable event would be inventing a
+    /// fact. The one caller that can be handed an over-long title is a peer command, which
+    /// already has `CommandRejected` to say so with.
+    let create (raw: string) : Result<TerminalTitle, string> =
+        let trimmed = if isNull (box raw) then "" else raw.Trim ()
+        if trimmed = "" then Ok fallback
+        elif trimmed.Length > MaxLength then
+            Error (sprintf "a terminal title is at most %d characters" MaxLength)
+        else Ok (TerminalTitle trimmed)
+
+    let value (TerminalTitle t) = t
+
+    /// The longest title worth deriving from prose we wrote ourselves. Shorter than
+    /// `MaxLength` on purpose: an agent names a terminal after the reason it opened one, and
+    /// a sentence makes a bad tab.
+    [<Literal>]
+    let ProseLength = 60
+
+    /// A title derived from prose the agent wrote, rather than a label a person chose.
+    ///
+    /// Total, and truncating — the opposite of `create` on both counts, deliberately. The
+    /// agent's own sentence being long is not a mistake anyone can correct, so refusing the
+    /// terminal over it would fail a tool call for something the caller cannot fix; and
+    /// keeping a readable prefix loses nothing, because the reason is recorded in full on
+    /// the act that opened the terminal. A person's deliberate title gets the opposite
+    /// treatment for the same reason read the other way: it is theirs, so it is refused
+    /// rather than quietly shortened.
+    let fromProse (raw: string) : TerminalTitle =
+        let trimmed = if isNull (box raw) then "" else raw.Trim ()
+        if trimmed = "" then fallback
+        elif trimmed.Length > ProseLength then TerminalTitle (trimmed.Substring (0, ProseLength - 3) + "...")
+        else TerminalTitle trimmed
+
 type TerminalOpened =
     { TerminalId : TerminalId
       /// Who asked for it. A terminal is opened by a peer or by the agent, and which one
       /// decides nothing about how it behaves — it is attribution, for the audit.
       OpenedBy : ActorRef
       /// A human label, so a session with four terminals is navigable. Never unique.
-      Title : string
+      Title : TerminalTitle
       /// Which of the session's WorkSandboxes it runs in (Plan 15, stage 2). Named on the
       /// OPEN event because it is fixed for the terminal's life, and because a replayed
       /// log has to be able to bring the terminal back up in the same sandbox it was in.

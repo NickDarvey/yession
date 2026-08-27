@@ -468,7 +468,7 @@ let startFull
                 // button an hour later should reach whatever servers this session has, not
                 // the snapshot some turn was given.
                 (fun () -> mcpConnections.Registries ())
-                { Open = fun offer -> terminals.Open ActorRef.Agent (Attached offer) offer.Ticket.Label
+                { Open = fun offer -> terminals.Open ActorRef.Agent (Attached offer) (TerminalTitle.fromProse offer.Ticket.Label)
                   IsOpen = terminals.IsOpen }
 
         let capabilitiesFor (turnId: AgentTurnId) (turnActor: ActorRef) : AgentCapabilities =
@@ -504,7 +504,7 @@ let startFull
                                     (Projection.openTerminals terminalProjection
                                      |> List.map (fun view ->
                                          { Terminal = view.TerminalId
-                                           Name = view.Title
+                                           Name = TerminalTitle.value view.Title
                                            Sandbox = view.Sandbox
                                            Mine = terminals.OpenedByAgent view.TerminalId
                                            Busy = Set.contains (TerminalId.value view.TerminalId) busy }))
