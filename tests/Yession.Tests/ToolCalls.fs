@@ -144,6 +144,7 @@ let private servicesOver (service: Repos.ReposService) : Commands.CommandService
     { Repos = fun () -> Some service
       Sandboxes = fun () -> WorkSandboxes.unavailable
       Terminals = fun () -> SessionTerminals.unavailable
+      Prs = fun () -> None
       Invalidate = ignore
       Refold = fun _ -> async { return () } }
 

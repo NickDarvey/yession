@@ -399,6 +399,11 @@ type RemoveRepo = RepoRef -> bool -> Async<Result<CommandOutcome, string>>
 /// Switch a repo's checkout to a branch, optionally creating it. Local ref movement
 /// only — never touches the remote.
 type SwitchRepoBranch = RepoRef -> string -> bool -> Async<Result<CommandOutcome, string>>
+/// Start watching a pull request, and stop. Verbs ON a repo, which is why they sit with the
+/// repo capabilities rather than in a group of their own — a watch is named `owner/repo#n`
+/// and spends the same credential a clone does.
+type WatchPr = RepoRef -> int -> Async<Result<CommandOutcome, string>>
+type UnwatchPr = RepoRef -> int -> Async<Result<CommandOutcome, string>>
 
 /// Fetch a repo's remote refs (prune, no submodules). The one network verb besides the
 /// clone itself; runs on the same per-invocation credential.
@@ -504,7 +509,12 @@ type RepoCapabilities =
       Fetch : FetchRepo
       Status : InspectRepo
       Log : InspectRepo
-      Diff : InspectRepo }
+      Diff : InspectRepo
+      /// Watching a pull request on a repo. A COMMAND, not a read: it changes what the
+      /// session does from now on (it polls, and announces), and everyone sees the watch
+      /// begin in the timeline.
+      WatchPr : WatchPr
+      UnwatchPr : UnwatchPr }
 
 /// which named sandboxes exist, and where a shell opened in one starts.
 /// NOT what runs in them — `Terminals.Execute` is still the one door into a sandbox.
@@ -589,7 +599,9 @@ module AgentCapabilities =
               Fetch = fun _ -> async { return Error "no repos capability" }
               Status = fun _ -> async { return Error "no repos capability" }
               Log = fun _ -> async { return Error "no repos capability" }
-              Diff = fun _ -> async { return Error "no repos capability" } }
+              Diff = fun _ -> async { return Error "no repos capability" }
+              WatchPr = fun _ _ -> async { return Error "no repos capability" }
+              UnwatchPr = fun _ _ -> async { return Error "no repos capability" } }
           Sandboxes =
             { Start = fun _ _ -> async { return Error "no sandbox capability" }
               Stop = fun _ -> async { return Error "no sandbox capability" }

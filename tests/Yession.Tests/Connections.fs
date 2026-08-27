@@ -2110,6 +2110,103 @@ let private prFetchTests =
             }
     ]
 
+let private prWatchVerbTests =
+    let ada = PeerRef (PeerId.create "ada" |> expect)
+    let watchSessionId = SessionId.create "pr-watch-suite" |> expect
+
+    /// The verbs over a real log and the stub provider, wired the way SessionMain wires
+    /// them: the log is the one answer to what is watched, re-read on every call.
+    let serviceOver (stub: StubGitHubApi) =
+        let log = Yession.SessionProcess.InMemoryEventLog.create watchSessionId (fun () -> DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero))
+        let watchesNow () =
+            async {
+                let! page = log.Read None System.Int32.MaxValue
+                return
+                    page.Events
+                    |> List.map (fun e -> e.Event)
+                    |> List.fold PrWatchesProjection.applyEvent PrWatchesProjection.empty
+                    |> fun projection -> projection.Watches
+            }
+        let applied = ResizeArray<PrWatch list> ()
+        let service =
+            GitHubPrs.watchService
+                (fun actor event -> async { let! _ = log.Append actor event in () })
+                watchesNow
+                (GitHubPrs.fetchOver stub.Url)
+                (fun _ -> async { return Some "token-abc" })
+                applied.Add
+        service, log, applied
+
+    let eventsOf (log: Yession.SessionProcess.EventLog<SessionEvent>) =
+        async {
+            let! page = log.Read None System.Int32.MaxValue
+            return page.Events |> List.map (fun e -> e.Event)
+        }
+
+    testList "watching a pull request" [
+        testCaseAsync "a watch records what it saw, attributed to whoever asked" <|
+            async {
+                let! stub = startStubGitHubApi ()
+                let service, log, applied = serviceOver stub
+                let! outcome = service.Watch ada ada prOne
+                Expect.equal outcome (Ok "watching octo/hello#12 (open, checks green)") "it says what it found"
+                match! eventsOf log with
+                | [ SessionEvent.PrWatchStarted started ] ->
+                    Expect.equal started.Pr prOne "the pull request asked for"
+                    Expect.equal started.Actor ada "attributed to the asker"
+                    // The validating look IS the baseline — there is no second fetch, and
+                    // no window where a watch exists with nothing to compare against.
+                    Expect.equal started.Initial.State PrOpen "the state it was in"
+                    Expect.equal started.Initial.Checks ChecksGreen "and its checks"
+                | events -> failwithf "expected one watch event, got %A" events
+                Expect.equal (applied.Count) 1 "the poller was handed the new watch"
+            }
+
+        testCaseAsync "watching one already watched reports it and records nothing" <|
+            async {
+                let! stub = startStubGitHubApi ()
+                let service, log, _ = serviceOver stub
+                let! _ = service.Watch ada ada prOne
+                let! again = service.Watch ada ada prOne
+                Expect.equal again (Ok "already watching octo/hello#12 (open, checks green)") "a repeated ask is a question"
+                let! events = eventsOf log
+                Expect.equal (List.length events) 1 "and changes nothing"
+            }
+
+        testCaseAsync "a pull request github cannot see is refused, and nothing is recorded" <|
+            async {
+                let! stub = startStubGitHubApi ()
+                let service, log, _ = serviceOver stub
+                stub.SetStatus 404
+                let! outcome = service.Watch ada ada prOne
+                match outcome with
+                | Error message ->
+                    // The 404 that means "gone" and the one that means "your credential
+                    // cannot reach it" are the same answer from github, so the sentence
+                    // names both rather than guessing.
+                    Expect.isTrue (message.Contains "cannot see") "it says github cannot see it"
+                    Expect.isTrue (message.Contains "credential") "and that the credential may be why"
+                | Ok said -> failwithf "expected a refusal, got %s" said
+                let! events = eventsOf log
+                Expect.isEmpty events "a refused watch records nothing"
+            }
+
+        testCaseAsync "unwatching records the stop; unwatching what is not watched refuses" <|
+            async {
+                let! stub = startStubGitHubApi ()
+                let service, log, _ = serviceOver stub
+                let! missing = service.Unwatch ada prOne
+                Expect.equal missing (Error "not watching octo/hello#12") "nothing to stop"
+                let! _ = service.Watch ada ada prOne
+                let! stopped = service.Unwatch ada prOne
+                Expect.equal stopped (Ok "stopped watching octo/hello#12") "stopped"
+                match! eventsOf log with
+                | [ SessionEvent.PrWatchStarted _; SessionEvent.PrWatchStopped stop ] ->
+                    Expect.equal stop.Actor ada "attributed to whoever stopped it"
+                | events -> failwithf "expected a start then a stop, got %A" events
+            }
+    ]
+
 let tests =
     testList "Connections" [
         codecTests
@@ -2123,5 +2220,6 @@ let tests =
         Tag.needs "Connection control routes" [ Tag.Ports ] (fun () -> routeTests)
         Tag.needs "GitHub sign-in routes" [ Tag.Ports ] (fun () -> githubRouteTests)
         Tag.needs "Pull request endpoints" [ Tag.Ports ] (fun () -> prFetchTests)
+        Tag.needs "Watching a pull request" [ Tag.Ports ] (fun () -> prWatchVerbTests)
         Tag.needs "Per-actor credentials E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)
     ]
