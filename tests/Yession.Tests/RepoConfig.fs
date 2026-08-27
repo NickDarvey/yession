@@ -221,6 +221,10 @@ let private refusingGate (reason: string) : RunGatedCommand =
 
 let private cell (value: 'a) = fun () -> value
 
+/// A session whose host declares no resources: every selection comes to nothing. The
+/// capability notes have their own cases, where a real vocabulary is worth the setup.
+let private noCapabilities : ResourceName list -> Result<string list, string> = fun _ -> Ok []
+
 /// A log for the fold to read its own history from and append its notes to. Fresh per case:
 /// what a fold says is a delta against what the session was already told, so a shared log
 /// would make one case's notes another's silence.
@@ -249,6 +253,7 @@ let foldTests =
                         (cell WorkSandboxes.unavailable)
                         (recordingGate seen)
                         (foldLog ())
+                        noCapabilities
                 do! folded.Fold None
                 Expect.equal (seen |> Seq.map (fun c -> c.Tool) |> Set.ofSeq) (Set.ofList [ "start_work_sandbox" ]) "one verb, no other"
                 Expect.equal (seen.Count) 3 "every declaration in every file, and nothing else"
@@ -262,7 +267,7 @@ let foldTests =
                 let dir = checkout r (Some "version: 2\nsandboxes:\n  dev: {}\n")
                 let seen = ResizeArray<GatedCall> ()
                 let folded =
-                    RepoSandboxes.create dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable) (recordingGate seen) (foldLog ())
+                    RepoSandboxes.create dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable) (recordingGate seen) (foldLog ()) noCapabilities
                 do! folded.Fold None
                 Expect.equal (Authority.author seen.[0].Authority) (ActorRef.Configured r) "the repo's own file"
                 Expect.equal (Authority.onBehalfOf seen.[0].Authority) None "and a boot fold borrows nobody's authority"
@@ -274,7 +279,7 @@ let foldTests =
                 let dir = checkout r (Some "version: 2\nsandboxes:\n  dev:\n    forward: [ github ]\n")
                 let seen = ResizeArray<GatedCall> ()
                 let folded =
-                    RepoSandboxes.create dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable) (recordingGate seen) (foldLog ())
+                    RepoSandboxes.create dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable) (recordingGate seen) (foldLog ()) noCapabilities
                 let ada = UserRef (UserId.create "ada" |> expect)
                 do! folded.Fold (Some ada)
                 Expect.equal (Authority.effective seen.[0].Authority) ada "whose credential a forward: resolves against"
@@ -293,6 +298,7 @@ let foldTests =
                         (cell WorkSandboxes.unavailable)
                         (refusingGate "registry.npmjs.org is not in this session's egress")
                         (foldLog ())
+                        noCapabilities
                 do! folded.Fold None
                 match folded.Outcomes () with
                 | [ outcome ] ->
@@ -313,6 +319,7 @@ let foldTests =
                         (cell WorkSandboxes.unavailable)
                         (recordingGate (ResizeArray<GatedCall> ()))
                         (foldLog ())
+                        noCapabilities
                 do! folded.Fold None
                 Expect.equal (folded.Outcomes () |> List.map (fun o -> o.Problem)) [ None ] "nothing to report is nothing to report"
             }
@@ -331,6 +338,7 @@ let foldTests =
                         (cell WorkSandboxes.unavailable)
                         (recordingGate (ResizeArray<GatedCall> ()))
                         (foldLog ())
+                        noCapabilities
                 do! folded.Fold None
                 match folded.Outcomes () with
                 | [ outcome ] ->
@@ -347,7 +355,7 @@ let foldTests =
                 let dir = checkout r None
                 let seen = ResizeArray<GatedCall> ()
                 let folded =
-                    RepoSandboxes.create dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable) (recordingGate seen) (foldLog ())
+                    RepoSandboxes.create dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable) (recordingGate seen) (foldLog ()) noCapabilities
                 do! folded.Fold None
                 Expect.equal seen.Count 0 "nothing was asked for"
                 Expect.equal (folded.Outcomes ()) [] "and nothing is wrong"
@@ -368,6 +376,7 @@ let foldTests =
                         (cell WorkSandboxes.unavailable)
                         (refusingGate "registry.npmjs.org is not in this session's egress")
                         log
+                        noCapabilities
                 do! folded.Fold None
                 let! page = log.Read None System.Int32.MaxValue
                 match page.Events |> List.choose (fun e -> match e.Event with SessionEvent.RepoConfigRefused n -> Some n | _ -> None) with
@@ -393,6 +402,7 @@ let foldTests =
                         (cell WorkSandboxes.unavailable)
                         (refusingGate "the ceiling is closed")
                         log
+                        noCapabilities
                 do! folded.Fold None
                 do! folded.Fold None
                 do! folded.Fold None
@@ -417,7 +427,7 @@ let foldTests =
                                         Status = CommandRefusedBy (ActorRef.System, Some why) }
                         }
                 let folded =
-                    RepoSandboxes.create dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable) moving log
+                    RepoSandboxes.create dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable) moving log noCapabilities
                 do! folded.Fold None
                 why <- "no credential to forward"
                 do! folded.Fold None
@@ -441,6 +451,7 @@ let foldTests =
                         (cell WorkSandboxes.unavailable)
                         (recordingGate (ResizeArray<GatedCall> ()))
                         log
+                        noCapabilities
                 do! folded.Fold None
                 let! page = log.Read None System.Int32.MaxValue
                 Expect.equal
@@ -449,10 +460,87 @@ let foldTests =
                     "nothing went wrong, so nothing is said"
             }
 
+        // A capability set is authored by whoever can push to the checkout, so a `uses:` line
+        // added in a pull request takes effect the next time anybody touches a repo. Until
+        // this, it did so with nobody told.
+        testCaseAsync "what a repo asks for is said on the timeline" <|
+            async {
+                let r = repo "octo/hello"
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev:\n    uses: [ nix ]\n")
+                let log = foldLog ()
+                let folded =
+                    RepoSandboxes.create
+                        dir
+                        (cell (Some (reposOver dir [ r ])))
+                        (cell WorkSandboxes.unavailable)
+                        (recordingGate (ResizeArray<GatedCall> ()))
+                        log
+                        (fun _ -> Ok [ "/nix, read-only"; "reaches cache.nixos.org" ])
+                do! folded.Fold None
+                let! page = log.Read None System.Int32.MaxValue
+                match page.Events |> List.choose (fun e -> match e.Event with SessionEvent.RepoCapabilitiesChanged c -> Some c | _ -> None) with
+                | [ note ] ->
+                    Expect.equal note.Repo r "the repo whose file asked"
+                    Expect.equal note.Granted [ "/nix, read-only"; "reaches cache.nixos.org" ] "the whole set, in the words a person is shown"
+                    Expect.equal note.Actor (ActorRef.Configured r) "attributed to the file, like everything else it asks for"
+                | other -> failwithf "expected one note, got %A" other
+            }
+
+        // The fold runs after every repo verb. A note per fold would be the accumulation the
+        // whole delta rule exists to avoid.
+        testCaseAsync "an unchanged capability set is said once, however often the fold runs" <|
+            async {
+                let r = repo "octo/hello"
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev:\n    uses: [ nix ]\n")
+                let log = foldLog ()
+                let folded =
+                    RepoSandboxes.create
+                        dir
+                        (cell (Some (reposOver dir [ r ])))
+                        (cell WorkSandboxes.unavailable)
+                        (recordingGate (ResizeArray<GatedCall> ()))
+                        log
+                        (fun _ -> Ok [ "/nix, read-only" ])
+                do! folded.Fold None
+                do! folded.Fold None
+                do! folded.Fold None
+                let! page = log.Read None System.Int32.MaxValue
+                let notes =
+                    page.Events |> List.choose (fun e -> match e.Event with SessionEvent.RepoCapabilitiesChanged c -> Some c.Granted | _ -> None)
+                Expect.equal notes [ [ "/nix, read-only" ] ] "three folds, one thing to say"
+            }
+
+        // The case the whole note exists for: a checkout widening what it holds.
+        testCaseAsync "a repo that widens what it asks for says so again" <|
+            async {
+                let r = repo "octo/hello"
+                let dir = checkout r (Some "version: 2\nsandboxes:\n  dev:\n    uses: [ nix ]\n")
+                let log = foldLog ()
+                let mutable granted = [ "/nix, read-only" ]
+                let folded =
+                    RepoSandboxes.create
+                        dir
+                        (cell (Some (reposOver dir [ r ])))
+                        (cell WorkSandboxes.unavailable)
+                        (recordingGate (ResizeArray<GatedCall> ()))
+                        log
+                        (fun _ -> Ok granted)
+                do! folded.Fold None
+                granted <- [ "/nix, read-only"; "reaches anywhere (sensitive)" ]
+                do! folded.Fold None
+                let! page = log.Read None System.Int32.MaxValue
+                let notes =
+                    page.Events |> List.choose (fun e -> match e.Event with SessionEvent.RepoCapabilitiesChanged c -> Some c.Granted | _ -> None)
+                Expect.equal (List.length notes) 2 "the widening is news"
+                Expect.isTrue
+                    (notes |> List.last |> List.exists (fun line -> line.Contains "sensitive"))
+                    "and the second note carries the whole set, so a person reads what it is now rather than what moved"
+            }
+
         testCaseAsync "a session with no repos service folds nothing rather than failing" <|
             async {
                 let folded =
-                    RepoSandboxes.create "/nowhere" (cell None) (cell WorkSandboxes.unavailable) (recordingGate (ResizeArray<GatedCall> ())) (foldLog ())
+                    RepoSandboxes.create "/nowhere" (cell None) (cell WorkSandboxes.unavailable) (recordingGate (ResizeArray<GatedCall> ())) (foldLog ()) noCapabilities
                 do! folded.Fold None
                 Expect.equal (folded.Outcomes ()) [] "no repos is not a fault"
             }

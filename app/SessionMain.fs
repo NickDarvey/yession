@@ -809,7 +809,19 @@ Async.StartImmediate (
         workSandboxes <- host.Sandboxes
         terminals <- host.Terminals
         repoSandboxes <-
-            RepoSandboxes.create reposDir (fun () -> reposService) (fun () -> workSandboxes) host.RunGated log
+            RepoSandboxes.create
+                reposDir
+                (fun () -> reposService)
+                (fun () -> workSandboxes)
+                host.RunGated
+                log
+                // The same rendering the operator's `resources` surface uses, so what a repo
+                // is said to ask for and what an operator reads about a name cannot become
+                // two answers.
+                (fun selection ->
+                    grantsFor selection
+                    |> Result.map (fun leaves ->
+                        leaves |> List.map ResourceLeaf.describe |> List.distinct |> List.sort))
         // How each gated command is carried out, handed to the gate the Host owns. Here —
         // and not closed over a turn — because the table is built from the services, and the
         // services are composed here.

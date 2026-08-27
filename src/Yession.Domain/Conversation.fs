@@ -220,6 +220,24 @@ module ConversationProjection =
         // The other outcome of a declaration, beside the start above. Said in the refusal's
         // own words rather than summarised: the `repo_config` query is showing that same
         // sentence, and two renderings of one refusal are two things free to disagree.
+        // What a repo asks for, when it changed. A person reading the timeline sees the whole
+        // set rather than the diff: a diff answers "what moved", and the question somebody
+        // actually has to answer is "is THIS the access I am content for this checkout to
+        // have" — which needs the whole of it.
+        | SessionEvent.RepoCapabilitiesChanged c ->
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = c.MessageId
+                          Author = c.Actor
+                          Body =
+                            match c.Granted with
+                            | [] -> "asks for nothing"
+                            | granted -> sprintf "asks for %s" (String.concat "; " granted)
+                          Status = Complete
+                          Kind = ConversationItemKind.ActNote
+                          Offset = envelope.Offset
+                          Woke = None } ] }
         | SessionEvent.RepoConfigRefused r ->
             { proj with
                 Items =

@@ -980,6 +980,24 @@ module Codec =
                   WorkSandboxStarted.CredentialOwner = get.Required.Field "credentialOwner" (Decode.option actor.Decode)
                   WorkSandboxStarted.Actor = get.Required.Field "actor" actor.Decode }) }
 
+    let private repoCapabilitiesChanged : Codec<RepoCapabilitiesChanged> =
+        { Encode =
+            fun (p: RepoCapabilitiesChanged) ->
+                Encode.object
+                    [ "messageId", messageId.Encode p.MessageId
+                      "repo", repoRef.Encode p.Repo
+                      // The grants themselves, not a digest: a log a person cannot read is a
+                      // log nobody audits, and a short digest could be collided by whoever
+                      // authors the file this watches.
+                      "granted", Encode.list (p.Granted |> List.map Encode.string)
+                      "actor", actor.Encode p.Actor ]
+          Decode =
+            Decode.object (fun get ->
+                { RepoCapabilitiesChanged.MessageId = get.Required.Field "messageId" messageId.Decode
+                  RepoCapabilitiesChanged.Repo = get.Required.Field "repo" repoRef.Decode
+                  RepoCapabilitiesChanged.Granted = get.Required.Field "granted" (Decode.list Decode.string)
+                  RepoCapabilitiesChanged.Actor = get.Required.Field "actor" actor.Decode }) }
+
     let private repoConfigRefused : Codec<RepoConfigRefused> =
         { Encode =
             fun (p: RepoConfigRefused) ->
@@ -1184,6 +1202,10 @@ module Codec =
                     Encode.object [ "type", Encode.string "workSandboxStopped"; "payload", workSandboxStopped.Encode p ]
                 | RepoConfigRefused p ->
                     Encode.object [ "type", Encode.string "repoConfigRefused"; "payload", repoConfigRefused.Encode p ]
+                | RepoCapabilitiesChanged p ->
+                    Encode.object
+                        [ "type", Encode.string "repoCapabilitiesChanged"
+                          "payload", repoCapabilitiesChanged.Encode p ]
                 | ShellProfileSet p ->
                     Encode.object [ "type", Encode.string "shellProfileSet"; "payload", shellProfileSet.Encode p ]
                 | SessionEvent.CommandRefused p ->
@@ -1239,6 +1261,8 @@ module Codec =
                 | "repoBranchSwitched" -> Decode.field "payload" repoBranchSwitched.Decode |> Decode.map RepoBranchSwitched
                 | "workSandboxStarted" -> Decode.field "payload" workSandboxStarted.Decode |> Decode.map WorkSandboxStarted
                 | "repoConfigRefused" -> Decode.field "payload" repoConfigRefused.Decode |> Decode.map RepoConfigRefused
+                | "repoCapabilitiesChanged" ->
+                    Decode.field "payload" repoCapabilitiesChanged.Decode |> Decode.map RepoCapabilitiesChanged
                 | "workSandboxStopped" -> Decode.field "payload" workSandboxStopped.Decode |> Decode.map WorkSandboxStopped
                 | "shellProfileSet" -> Decode.field "payload" shellProfileSet.Decode |> Decode.map ShellProfileSet
                 | "commandRefused" -> Decode.field "payload" commandRefused.Decode |> Decode.map SessionEvent.CommandRefused
