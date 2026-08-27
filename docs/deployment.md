@@ -237,6 +237,43 @@ deployment applies its own template, so the prefix has exactly one home.
 
 ## Integrations
 
+### GitHub
+
+A session clones over HTTPS, and watches pull requests, with a credential a person signs in
+for from inside it. There is **no default client id**: you register your own GitHub App, and
+until you do, the only way in is pasting a token.
+
+Register an App (not an OAuth App), and:
+
+- **Enable device flow.** It is the flow the session runs — the authorization-code exchange
+  needs a client *secret*, which the Manager's standards-only public-client broker
+  deliberately cannot carry.
+- **Set no callback URL that matters and generate no client secret.** Neither is used.
+- **Install it on the repositories it should reach.** A device-flow token is a
+  user-to-server token, so what it can see is the intersection of the user's access and the
+  App's installations. That intersection IS the access rule — nothing in Yession re-checks
+  it.
+- **Leave user-token expiration on.** The grant is stored with its refresh token at the
+  Manager, which rotates the access token before each turn that needs one. Turning
+  expiration off yields a permanent token instead, and nothing tells you which of the two
+  you registered.
+
+Then name its client id:
+
+```
+YESSION_GITHUB_CLIENT_ID=Iv1.0123456789abcdef
+```
+
+Unset, the sign-in surface says so in words and offers the paste path instead. A pasted
+`github_pat_…`/`ghp_…` works and **bypasses the installation rule above** — it answers to
+whatever the token itself was scoped to (recorded in GAPS.md). A pasted `ghu_…`/`gho_…` is
+refused where the device flow is available, because it expires in hours and cannot rotate
+once pasted.
+
+Four endpoints are overridable, which is what the test suites drive rather than the live
+provider: `YESSION_GITHUB_DEVICE_URL`, `YESSION_GITHUB_TOKEN_URL`, `YESSION_GITHUB_USER_URL`,
+and `YESSION_GITHUB_API_URL` (the REST base a watched pull request is read from).
+
 ### Tailscale
 
 One listener carries everything: the Manager at `/`, each session at `/s/<id>`.
