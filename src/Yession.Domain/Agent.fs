@@ -709,6 +709,7 @@ module AgentWake =
         | IntegrationLost _ -> 0
         | StreamEnded _ -> 1
         | CommandFinished -> 2
+        | PrChanged _ -> 3
 
     /// Why a turn is owed and who it would run as, or `None` when nothing is.
     let pendingReason (events: SessionEvent list) : (WakeReason * ActorRef) option =
@@ -768,6 +769,17 @@ module AgentWake =
                         match Map.tryFind (TerminalId.value e.TerminalId) lastAgent with
                         | Some owner -> better (StreamEnded e.TerminalId, owner) owed
                         | None -> owed
+                    background, lastAgent, owed
+                // A watched pull request moved. The owner is the WATCHER on the payload,
+                // never the envelope's `System`: the wake runs as whoever asked to be told.
+                | SessionEvent.PrTransitioned p -> background, lastAgent, better (PrChanged p.Pr, p.Watcher) owed
+                // Unwatching clears what that pull request owed. A person who has just said
+                // they no longer care must not get a turn about it a moment later.
+                | SessionEvent.PrWatchStopped p ->
+                    let owed =
+                        match owed with
+                        | Some (PrChanged pr, _) when pr = p.Pr -> None
+                        | _ -> owed
                     background, lastAgent, owed
                 | _ -> background, lastAgent, owed)
             (Map.empty, Map.empty, None)

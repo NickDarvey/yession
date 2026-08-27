@@ -24,6 +24,7 @@ open Yession.SessionProcess
 open Yession.App
 open Yession.Host
 open Yession.Tests.Support
+open Yession.Domain.Prs
 
 [<ImportAll("node:fs")>]
 let private nodeFs : obj = Fable.Core.Util.jsNative
@@ -581,6 +582,80 @@ let private integrationLost (id: TerminalId) =
 let private closedNow (id: TerminalId) =
     SessionEvent.TerminalClosed { TerminalId = id; Reason = "the source went away" }
 
+let private prWatcher = PeerRef (PeerId.create "ada" |> expect)
+let private watchedPr = PrRef.create (RepoRef.create "octo/hello" |> expect) 12 |> expect
+
+let private prWatchStarted =
+    SessionEvent.PrWatchStarted
+        { MessageId = MessageId.create "w1" |> expect
+          Pr = watchedPr
+          Initial = { State = PrOpen; Title = "Add feature"; HeadSha = "abc"; Checks = ChecksPending; Mergeable = None }
+          Actor = prWatcher }
+
+let private prTransitioned transition =
+    SessionEvent.PrTransitioned
+        { MessageId = MessageId.create "t1" |> expect
+          Pr = watchedPr
+          Transition = transition
+          State = PrMerged
+          Checks = ChecksGreen
+          Watcher = prWatcher }
+
+let private prWatchStopped =
+    SessionEvent.PrWatchStopped
+        { MessageId = MessageId.create "w2" |> expect; Pr = watchedPr; Actor = prWatcher }
+
+let private prWakeTests =
+    testList "A watched pull request changing" [
+
+        testCase "a transition owes a turn, as the watcher" <| fun () ->
+            // The credential question the roster change fails and this one passes: the
+            // watch was an attributed act, and the poll that noticed spent that actor's
+            // own credential, so the turn runs as somebody who asked for exactly this.
+            Expect.equal
+                (AgentWake.pendingReason [ turnStarted "1"; prWatchStarted; prTransitioned PrWasMerged ])
+                (Some (PrChanged watchedPr, prWatcher))
+                "owed to whoever is watching"
+
+        testCase "a transition before the last turn started owes nothing" <| fun () ->
+            // The turn that ran after it already carried the note in its context.
+            Expect.equal
+                (AgentWake.pendingReason [ prWatchStarted; prTransitioned PrWasMerged; turnStarted "1" ])
+                None
+                "a new turn takes everything before it"
+
+        testCase "unwatching clears what that pull request owed" <| fun () ->
+            // Somebody who has just said they no longer care must not get a turn about it
+            // a moment later.
+            Expect.equal
+                (AgentWake.pendingReason
+                    [ turnStarted "1"; prWatchStarted; prTransitioned PrWasMerged; prWatchStopped ])
+                None
+                "stopped means stopped"
+
+        testCase "a command the agent queued outranks pull request news" <| fun () ->
+            // Both are owed; the one the agent itself set running wins, because the other
+            // is somebody else's world moving.
+            Expect.equal
+                (AgentWake.pendingReason
+                    [ turnStarted "1"
+                      prWatchStarted
+                      prTransitioned PrWasMerged
+                      blockStartedIn terminalB "b1" true (Some (PeerRef bob))
+                      blockCompleted "b1" ]
+                 |> Option.map fst)
+                (Some CommandFinished)
+                "the agent's own work first"
+
+        testCase "the same transition never owes a second turn after a restart" <| fun () ->
+            // The restart property, from the wake's side: the debt is what the log records
+            // AFTER the last turn start, so re-folding the same log once a turn has run
+            // owes nothing however many times the process comes back.
+            let log = [ prWatchStarted; prTransitioned PrWasMerged; turnStarted "1" ]
+            Expect.equal (AgentWake.pendingReason log) None "already turned on it"
+            Expect.equal (AgentWake.pendingReason log) None "and folding again changes nothing"
+    ]
+
 let private vocabularyTests =
     testList "The rest of the wake vocabulary (Plan 20, stage 5)" [
 
@@ -943,6 +1018,7 @@ let tests =
         wakeTests
         modelChoiceTests
         vocabularyTests
+        prWakeTests
         attributionTests
         armTests
         Tag.needs "Agent E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)

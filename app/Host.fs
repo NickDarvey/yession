@@ -61,6 +61,12 @@ type SessionHost =
       /// carried out (Plan 27). Set once, from SessionMain, for the same reason the dispatch
       /// table is: the fold that knows what a repo asks for is composed a layer above this.
       SetApproveCapabilities : (ActorRef -> RepoRef -> string list -> Async<Result<unit, string>>) -> unit
+      /// Ask the scheduler to look for owed work now (Plan 20). Exposed for the one
+      /// producer that appends outside every path that already wakes: the pull-request
+      /// poller, whose transitions land on a timer rather than behind a block or a turn.
+      /// The DEBT is in the log either way — this only decides whether the turn happens
+      /// now or at whatever next disturbs the session.
+      Wake : unit -> unit
       /// The gate itself, for the one caller that is not a turn: the fold over every
       /// checkout's `yession.yaml` (Plan 27). It goes through the SAME door the agent's
       /// calls do — which is the reason the gate was made a capability rather than a detail
@@ -882,6 +888,7 @@ let startFull
               Terminals = terminals
               SetCommandDispatch = fun table -> commandDispatch.Value <- table
               SetApproveCapabilities = fun approve -> approveCapabilitiesRef.Value <- approve
+              Wake = scheduler.Wake
               RunGated = commandGate.Run
               TerminalCommands = terminalCommands
               WaitForNextSessionEnd = waitForNextSessionEnd

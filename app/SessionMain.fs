@@ -981,7 +981,12 @@ Async.StartImmediate (
             Async.StartImmediate (
                 async {
                     let! moved = prWatchers.Poll ()
-                    if moved then queryRegistry.Invalidate GitHubPrs.queryName
+                    if moved then
+                        queryRegistry.Invalidate GitHubPrs.queryName
+                        // A transition the poll just recorded is owed work nothing else
+                        // will notice: it landed on a timer rather than behind a block or
+                        // a turn. The debt is in the log regardless — this is promptness.
+                        host.Wake ()
                 }))
         |> ignore
         // Register this launch's OAuth client with the Manager — HERE, after listen

@@ -191,6 +191,18 @@ module Codec =
                   MessageSent.Author = get.Required.Field "author" actor.Decode
                   MessageSent.Body = get.Required.Field "body" Decode.string }) }
 
+    let private prRef : Codec<PrRef> =
+        { Encode =
+            fun (pr: PrRef) ->
+                Encode.object [ "repo", repoRef.Encode pr.Repo; "number", Encode.int pr.Number ]
+          Decode =
+            Decode.object (fun get ->
+                (get.Required.Field "repo" repoRef.Decode, get.Required.Field "number" Decode.int))
+            |> Decode.andThen (fun (repo, number) ->
+                match PrRef.create repo number with
+                | Ok pr -> Decode.succeed pr
+                | Error e -> Decode.fail e) }
+
     /// Why a turn ran with nobody speaking (Plan 20, stage 2). A tagged object rather than a
     /// bare string, because the reasons are a vocabulary that grows — a roster change, a
     /// stream ending — and each may come to carry what it is about.
@@ -202,13 +214,15 @@ module Codec =
                 | StreamEnded id ->
                     Encode.object [ "kind", Encode.string "streamEnded"; "terminalId", terminalId.Encode id ]
                 | IntegrationLost id ->
-                    Encode.object [ "kind", Encode.string "integrationLost"; "terminalId", terminalId.Encode id ])
+                    Encode.object [ "kind", Encode.string "integrationLost"; "terminalId", terminalId.Encode id ]
+                | PrChanged pr -> Encode.object [ "kind", Encode.string "prChanged"; "pr", prRef.Encode pr ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
                 | "commandFinished" -> Decode.succeed CommandFinished
                 | "streamEnded" -> Decode.field "terminalId" terminalId.Decode |> Decode.map StreamEnded
                 | "integrationLost" -> Decode.field "terminalId" terminalId.Decode |> Decode.map IntegrationLost
+                | "prChanged" -> Decode.field "pr" prRef.Decode |> Decode.map PrChanged
                 | other -> Decode.fail (sprintf "Unknown wake reason: %s" other)) }
 
     let private agentTurnStarted : Codec<AgentTurnStarted> =
@@ -962,18 +976,6 @@ module Codec =
                   RepoBranchSwitched.Branch = get.Required.Field "branch" Decode.string
                   RepoBranchSwitched.Created = get.Required.Field "created" Decode.bool
                   RepoBranchSwitched.Actor = get.Required.Field "actor" actor.Decode }) }
-
-    let private prRef : Codec<PrRef> =
-        { Encode =
-            fun (pr: PrRef) ->
-                Encode.object [ "repo", repoRef.Encode pr.Repo; "number", Encode.int pr.Number ]
-          Decode =
-            Decode.object (fun get ->
-                (get.Required.Field "repo" repoRef.Decode, get.Required.Field "number" Decode.int))
-            |> Decode.andThen (fun (repo, number) ->
-                match PrRef.create repo number with
-                | Ok pr -> Decode.succeed pr
-                | Error e -> Decode.fail e) }
 
     let private prState : Codec<PrState> =
         { Encode = PrState.describe >> Encode.string
