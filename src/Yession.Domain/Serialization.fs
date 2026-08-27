@@ -3,6 +3,7 @@ namespace Yession.Domain
 open Yession.Domain.Chat
 open Yession.Domain.Sandboxes
 open Yession.Domain.Repos
+open Yession.Domain.Prs
 open System
 open Yession.Domain.Agent
 open Yession.Domain.Link
@@ -958,6 +959,128 @@ module Codec =
                   RepoBranchSwitched.Created = get.Required.Field "created" Decode.bool
                   RepoBranchSwitched.Actor = get.Required.Field "actor" actor.Decode }) }
 
+    let private prRef : Codec<PrRef> =
+        { Encode =
+            fun (pr: PrRef) ->
+                Encode.object [ "repo", repoRef.Encode pr.Repo; "number", Encode.int pr.Number ]
+          Decode =
+            Decode.object (fun get ->
+                (get.Required.Field "repo" repoRef.Decode, get.Required.Field "number" Decode.int))
+            |> Decode.andThen (fun (repo, number) ->
+                match PrRef.create repo number with
+                | Ok pr -> Decode.succeed pr
+                | Error e -> Decode.fail e) }
+
+    let private prState : Codec<PrState> =
+        { Encode = PrState.describe >> Encode.string
+          Decode =
+            Decode.string
+            |> Decode.andThen (function
+                | "open" -> Decode.succeed PrOpen
+                | "merged" -> Decode.succeed PrMerged
+                | "closed" -> Decode.succeed PrClosed
+                | other -> Decode.fail (sprintf "Unknown pull request state: %s" other)) }
+
+    let private checksRollup : Codec<ChecksRollup> =
+        { Encode =
+            (fun (rollup: ChecksRollup) ->
+                match rollup with
+                | ChecksNone -> Encode.string "none"
+                | ChecksPending -> Encode.string "pending"
+                | ChecksGreen -> Encode.string "green"
+                | ChecksRed -> Encode.string "red")
+          Decode =
+            Decode.string
+            |> Decode.andThen (function
+                | "none" -> Decode.succeed ChecksNone
+                | "pending" -> Decode.succeed ChecksPending
+                | "green" -> Decode.succeed ChecksGreen
+                | "red" -> Decode.succeed ChecksRed
+                | other -> Decode.fail (sprintf "Unknown checks rollup: %s" other)) }
+
+    let private prSnapshot : Codec<PrSnapshot> =
+        { Encode =
+            fun (s: PrSnapshot) ->
+                Encode.object
+                    [ "state", prState.Encode s.State
+                      "title", Encode.string s.Title
+                      "headSha", Encode.string s.HeadSha
+                      "checks", checksRollup.Encode s.Checks
+                      "mergeable", Encode.option Encode.bool s.Mergeable ]
+          Decode =
+            Decode.object (fun get ->
+                { PrSnapshot.State = get.Required.Field "state" prState.Decode
+                  PrSnapshot.Title = get.Required.Field "title" Decode.string
+                  PrSnapshot.HeadSha = get.Required.Field "headSha" Decode.string
+                  PrSnapshot.Checks = get.Required.Field "checks" checksRollup.Decode
+                  PrSnapshot.Mergeable = get.Required.Field "mergeable" (Decode.option Decode.bool) }) }
+
+    let private prTransition : Codec<PrTransition> =
+        { Encode =
+            (fun (t: PrTransition) ->
+                match t with
+                | PrWasMerged -> Encode.string "merged"
+                | PrWasClosed -> Encode.string "closed"
+                | PrWasReopened -> Encode.string "reopened"
+                | ChecksTurnedGreen -> Encode.string "checksGreen"
+                | ChecksTurnedRed -> Encode.string "checksRed")
+          Decode =
+            Decode.string
+            |> Decode.andThen (function
+                | "merged" -> Decode.succeed PrWasMerged
+                | "closed" -> Decode.succeed PrWasClosed
+                | "reopened" -> Decode.succeed PrWasReopened
+                | "checksGreen" -> Decode.succeed ChecksTurnedGreen
+                | "checksRed" -> Decode.succeed ChecksTurnedRed
+                | other -> Decode.fail (sprintf "Unknown pull request transition: %s" other)) }
+
+    let private prWatchStarted : Codec<PrWatchStarted> =
+        { Encode =
+            fun (p: PrWatchStarted) ->
+                Encode.object
+                    [ "messageId", messageId.Encode p.MessageId
+                      "pr", prRef.Encode p.Pr
+                      "initial", prSnapshot.Encode p.Initial
+                      "actor", actor.Encode p.Actor ]
+          Decode =
+            Decode.object (fun get ->
+                { PrWatchStarted.MessageId = get.Required.Field "messageId" messageId.Decode
+                  PrWatchStarted.Pr = get.Required.Field "pr" prRef.Decode
+                  PrWatchStarted.Initial = get.Required.Field "initial" prSnapshot.Decode
+                  PrWatchStarted.Actor = get.Required.Field "actor" actor.Decode }) }
+
+    let private prWatchStopped : Codec<PrWatchStopped> =
+        { Encode =
+            fun (p: PrWatchStopped) ->
+                Encode.object
+                    [ "messageId", messageId.Encode p.MessageId
+                      "pr", prRef.Encode p.Pr
+                      "actor", actor.Encode p.Actor ]
+          Decode =
+            Decode.object (fun get ->
+                { PrWatchStopped.MessageId = get.Required.Field "messageId" messageId.Decode
+                  PrWatchStopped.Pr = get.Required.Field "pr" prRef.Decode
+                  PrWatchStopped.Actor = get.Required.Field "actor" actor.Decode }) }
+
+    let private prTransitioned : Codec<PrTransitioned> =
+        { Encode =
+            fun (p: PrTransitioned) ->
+                Encode.object
+                    [ "messageId", messageId.Encode p.MessageId
+                      "pr", prRef.Encode p.Pr
+                      "transition", prTransition.Encode p.Transition
+                      "state", prState.Encode p.State
+                      "checks", checksRollup.Encode p.Checks
+                      "watcher", actor.Encode p.Watcher ]
+          Decode =
+            Decode.object (fun get ->
+                { PrTransitioned.MessageId = get.Required.Field "messageId" messageId.Decode
+                  PrTransitioned.Pr = get.Required.Field "pr" prRef.Decode
+                  PrTransitioned.Transition = get.Required.Field "transition" prTransition.Decode
+                  PrTransitioned.State = get.Required.Field "state" prState.Decode
+                  PrTransitioned.Checks = get.Required.Field "checks" checksRollup.Decode
+                  PrTransitioned.Watcher = get.Required.Field "watcher" actor.Decode }) }
+
     let private workSandboxStarted : Codec<WorkSandboxStarted> =
         { Encode =
             fun (p: WorkSandboxStarted) ->
@@ -1241,7 +1364,13 @@ module Codec =
                 | McpServerAvailable p ->
                     Encode.object [ "type", Encode.string "mcpServerAvailable"; "payload", mcpServerNoted.Encode p ]
                 | McpServerUnavailable p ->
-                    Encode.object [ "type", Encode.string "mcpServerUnavailable"; "payload", mcpServerNoted.Encode p ])
+                    Encode.object [ "type", Encode.string "mcpServerUnavailable"; "payload", mcpServerNoted.Encode p ]
+                | SessionEvent.PrWatchStarted p ->
+                    Encode.object [ "type", Encode.string "prWatchStarted"; "payload", prWatchStarted.Encode p ]
+                | SessionEvent.PrWatchStopped p ->
+                    Encode.object [ "type", Encode.string "prWatchStopped"; "payload", prWatchStopped.Encode p ]
+                | SessionEvent.PrTransitioned p ->
+                    Encode.object [ "type", Encode.string "prTransitioned"; "payload", prTransitioned.Encode p ])
           Decode =
             Decode.field "type" Decode.string
             |> Decode.andThen (fun t ->
@@ -1298,6 +1427,12 @@ module Codec =
                     Decode.field "payload" mcpServerNoted.Decode |> Decode.map McpServerAvailable
                 | "mcpServerUnavailable" ->
                     Decode.field "payload" mcpServerNoted.Decode |> Decode.map McpServerUnavailable
+                | "prWatchStarted" ->
+                    Decode.field "payload" prWatchStarted.Decode |> Decode.map SessionEvent.PrWatchStarted
+                | "prWatchStopped" ->
+                    Decode.field "payload" prWatchStopped.Decode |> Decode.map SessionEvent.PrWatchStopped
+                | "prTransitioned" ->
+                    Decode.field "payload" prTransitioned.Decode |> Decode.map SessionEvent.PrTransitioned
                 | other -> Decode.fail (sprintf "Unknown session event type: %s" other)) }
 
     /// Wrap any event codec into a codec for its envelope.
