@@ -205,6 +205,163 @@ module ResourceClosure =
             | Sensitivity.Ordinary -> ResourceLeaf.describe leaf)
         |> List.sort
 
+/// A distinction a host is able to MAKE about a grant.
+///
+/// Not a list of platform quirks, which is what a per-backend special case would become. A
+/// grant is scoped by some property — which socket, which host, which layering — and a
+/// backend either can express that property or cannot. When it cannot, it does not refuse the
+/// grant: it gives the coarsest thing it has, and the difference is what somebody has to be
+/// told.
+///
+/// Measured, and the reason this exists: srt scopes a unix socket by path on macOS
+/// (`network-outbound` on the path) and cannot on Linux, where the filter is seccomp-bpf and
+/// cannot read a socket path out of user-space memory. So one `Socket` leaf is a grant on one
+/// host and, on the other, either every socket or none. Nothing said so.
+[<RequireQualifiedAccess>]
+type HostDistinction =
+    /// Which unix socket, rather than merely whether any.
+    | SocketsByPath
+    /// Which host may be reached, rather than merely whether anything may.
+    | EgressByHost
+    /// A writable layer over a read-only source, rather than one or the other.
+    | OverlayMounts
+
+/// What this host can express. The THIRD author of a grant, after the operator who named it
+/// and the repo that selected it, and the only one that is not a person.
+///
+/// Private for the reason `ResourceProfile` is: a caller that could build one could claim a
+/// distinction the backend underneath does not have, and the whole point is that this is the
+/// backend's own statement about itself.
+type HostLimits = private HostLimits of Set<HostDistinction>
+
+module HostLimits =
+
+    /// A host that can express everything. What the algebra's properties compare against, and
+    /// what an unconfining backend is: nothing is scoped because nothing is confined.
+    let unlimited : HostLimits =
+        HostLimits (Set.ofList [ HostDistinction.SocketsByPath; HostDistinction.EgressByHost; HostDistinction.OverlayMounts ])
+
+    let of' (distinctions: HostDistinction list) : HostLimits = HostLimits (Set.ofList distinctions)
+
+    let can (distinction: HostDistinction) (HostLimits distinctions) : bool =
+        Set.contains distinction distinctions
+
+/// What a host actually does with a leaf it was asked for.
+///
+/// Three outcomes and no fourth, because there are only three things a host can do with a
+/// grant it cannot express exactly: give it, give something wider, or give nothing.
+[<RequireQualifiedAccess>]
+type LeafRealisation =
+    /// The host can express this exactly.
+    | AsAsked
+    /// The host cannot scope it this finely, so the sandbox holds something WIDER than the
+    /// resource named. A widening, and the direction that matters most: nobody is stopped,
+    /// and what they hold is more than what they were shown.
+    | Coarsened of got: string
+    /// The host cannot provide it at all. Narrower than asked, so nothing is over-granted —
+    /// but a tool that needed it will fail, and whoever reads this is the one who can say
+    /// whether that is fatal.
+    | Withheld of because: string
+
+/// What one host makes of one selection: what is actually held, and every place that differs
+/// from what was asked.
+type RealisedClosure =
+    private
+        { Asked : ResourceClosure
+          Outcomes : Map<ResourceLeaf, LeafRealisation> }
+
+module RealisedClosure =
+
+    /// What scopes a leaf, and what a host that cannot make that distinction gives instead.
+    ///
+    /// ONE table, returning both halves together, because they are two halves of one fact and
+    /// a version of this with two tables had a hole in exactly the shape this layer exists to
+    /// remove: a leaf could name a distinction in one and be missing from the other, and the
+    /// answer was silently `AsAsked` — an exact grant claimed on a host that cannot express
+    /// it. The regression that should have caught it stayed green, because there was nothing
+    /// to be red about. Paired, that state has no representation.
+    ///
+    /// `None` is a leaf that needs no distinction: a path to read, a variable, a binary on
+    /// PATH are the same grant on every backend, and this is the whole platform knowledge in
+    /// the module.
+    ///
+    /// The words are what the SANDBOX ends up holding, not the mechanism that could not hold
+    /// it — "any unix socket on this host" is what a person weighs, and "seccomp-bpf cannot
+    /// read a path out of user-space memory" is not.
+    let private scoping (leaf: ResourceLeaf) : (HostDistinction * LeafRealisation) option =
+        match leaf with
+        | Socket _ ->
+            Some (HostDistinction.SocketsByPath, LeafRealisation.Coarsened "any unix socket on this host")
+        | Endpoint _ ->
+            Some (HostDistinction.EgressByHost, LeafRealisation.Coarsened "anywhere on the network")
+        | Mount mount ->
+            match mount.Mode with
+            | ResourceMountMode.Overlay ->
+                Some (
+                    HostDistinction.OverlayMounts,
+                    LeafRealisation.Withheld
+                        "this host has no union mount, so a writable layer over a read-only source is not something it can give")
+            | ResourceMountMode.Read
+            | ResourceMountMode.Write -> None
+        | Variable _
+        | Exec _ -> None
+
+    /// Put a selection through a host. The third narrowing, after the operator's vocabulary
+    /// and the repo's selection — except that it is the one narrowing that can also WIDEN,
+    /// which is exactly why it has to be said out loud rather than folded into the closure.
+    let of' (limits: HostLimits) (asked: ResourceClosure) : RealisedClosure =
+        { Asked = asked
+          Outcomes =
+            ResourceClosure.leaves asked
+            |> Set.toList
+            |> List.map (fun leaf ->
+                match scoping leaf with
+                | None -> leaf, LeafRealisation.AsAsked
+                | Some (distinction, _) when HostLimits.can distinction limits -> leaf, LeafRealisation.AsAsked
+                | Some (_, otherwise) -> leaf, otherwise)
+            |> Map.ofList }
+
+    /// What was asked for, unchanged. Kept because a person deciding needs both halves, and
+    /// because re-deriving it from the outcomes would lose the sensitivity marks.
+    let asked (realised: RealisedClosure) : ResourceClosure = realised.Asked
+
+    /// The leaves this host will actually put in a policy: everything it did not withhold.
+    ///
+    /// A coarsened leaf is still HERE, because the sandbox does still get it — wider than
+    /// asked, and a materialiser that dropped it would give the sandbox less than the person
+    /// approved rather than more.
+    let held (realised: RealisedClosure) : Set<ResourceLeaf> =
+        realised.Outcomes
+        |> Map.toList
+        |> List.filter (fun (_, outcome) ->
+            match outcome with
+            | LeafRealisation.Withheld _ -> false
+            | LeafRealisation.AsAsked
+            | LeafRealisation.Coarsened _ -> true)
+        |> List.map fst
+        |> Set.ofList
+
+    /// Every leaf whose grant is not what was asked for, with what happened to it. Empty when
+    /// this host can express the whole selection, which is the case worth having: a session on
+    /// a host that can do everything says nothing, rather than saying "no degradations".
+    let differences (realised: RealisedClosure) : (ResourceLeaf * LeafRealisation) list =
+        realised.Outcomes
+        |> Map.toList
+        |> List.filter (fun (_, outcome) -> outcome <> LeafRealisation.AsAsked)
+        |> List.sortBy (fun (leaf, _) -> ResourceLeaf.describe leaf)
+
+    /// One line per difference, for a person. The same rendering wherever it is shown, for the
+    /// reason `ResourceClosure.describe` is here rather than in a view.
+    let describeDifferences (realised: RealisedClosure) : string list =
+        differences realised
+        |> List.map (fun (leaf, outcome) ->
+            match outcome with
+            | LeafRealisation.Coarsened got ->
+                sprintf "%s — this host cannot scope that, so the sandbox gets %s" (ResourceLeaf.describe leaf) got
+            | LeafRealisation.Withheld because ->
+                sprintf "%s — not granted: %s" (ResourceLeaf.describe leaf) because
+            | LeafRealisation.AsAsked -> ResourceLeaf.describe leaf)
+
 /// An operator's whole vocabulary, AFTER validation.
 ///
 /// Private, so `load` is the only way to hold one. A caller that could build the map itself
