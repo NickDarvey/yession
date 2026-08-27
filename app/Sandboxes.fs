@@ -119,6 +119,33 @@ module SessionLayout =
     /// Here with the other paths derived from a data dir, so the layout has one owner.
     let agentHome (dataDir: string) : string = sprintf "%s/agent-home" dataDir
 
+    /// The session's temporary directory, prepared and ANNOUNCED to srt.
+    ///
+    /// One verb, because the three things it does are one decision seen three ways and a
+    /// caller that did two of them would leave a sandbox pointed at a directory nothing
+    /// allows. srt reads `CLAUDE_CODE_TMPDIR` from THIS process at wrap time and bakes the
+    /// result into the child's `TMPDIR`, so the path srt will use and the path the policy
+    /// allows have to be settled together or not at all.
+    ///
+    /// Canonical, for the reason `OperatorResources` refuses a path that is not: srt's own
+    /// default is `/tmp/claude`, `/tmp` is a symlink on macOS, and a sandbox holding exactly
+    /// that write path is denied it — measured, `W DENY /tmp/claude` in a sandbox whose
+    /// policy named it. The same fault, arriving through a path this code writes rather than
+    /// one an operator did.
+    ///
+    /// Under the session's data directory rather than a shared `/tmp/claude`, which is the
+    /// second thing wrong with the default: every session on a host shared one temp
+    /// directory, so a name one of them chose was a name the others could read and collide
+    /// with. Per PROCESS, not per sandbox — srt reads this once from the process env, and
+    /// mutating it per wrap is a race — so both sandboxes of one session share it, and that
+    /// is said out loud rather than implied by a path that looks per-sandbox.
+    let prepareTmpDir (dataDir: string) : string =
+        let path = sprintf "%s/tmp" dataDir
+        Fs.ensureDir path
+        let settled = Fs.canonical path |> Option.defaultValue path
+        Interop.setEnv "CLAUDE_CODE_TMPDIR" settled
+        settled
+
     /// Where a session that predates the layout above left its checkouts: beside the
     /// workspace instead of inside it.
     let legacyReposDir (dataDir: string) : string = sprintf "%s/repos" dataDir
@@ -937,10 +964,14 @@ type StartFailure =
 /// the network namespace is unshared, so the only route out is srt's filtering proxy.
 module SrtSandbox =
 
-    /// srt redirects the sandbox's `TMPDIR` here, so it has to be writable and to exist.
-    /// (`CLAUDE_CODE_TMPDIR` overrides the location, but it is read from the host process
-    /// env once, not per sandbox — one path for the process is the honest shape.)
-    let tmpDir = "/tmp/claude"
+    /// Where srt will redirect the sandbox's `TMPDIR`, read from the same place srt reads
+    /// it. Not a copy of the decision — the decision is `SessionLayout.prepareTmpDir`, which
+    /// is what puts the value here; this asks what it settled on so the write list and the
+    /// child's `TMPDIR` cannot become two answers.
+    ///
+    /// The fallback is srt's own, for a process that never prepared one (a test building a
+    /// policy directly). It is what srt would use in that case, so the two still agree.
+    let tmpDir () = Interop.envOr "CLAUDE_CODE_TMPDIR" "/tmp/claude"
 
     // --- What stays readable once everything else is denied -----------------------------
     //
@@ -1093,7 +1124,7 @@ module SrtSandbox =
         //
         // Derived, so the containment is structural. Two lists that have to agree by
         // inspection are two lists that drift, and this pair already had.
-        let writable = distinct (policy.WritePaths @ [ tmpDir; "/dev/stdout"; "/dev/stderr"; "/dev/null" ])
+        let writable = distinct (policy.WritePaths @ [ tmpDir (); "/dev/stdout"; "/dev/stderr"; "/dev/null" ])
         { DenyRead = [ "/" ]
           AllowRead = distinct (policy.ReadPaths @ writable @ tools.Runtime)
           AllowWrite = writable
@@ -1332,7 +1363,7 @@ module SrtSandbox =
             async {
                 try
                     policy.WorkingDirectory |> Option.iter Fs.ensureDir
-                    Fs.ensureDir tmpDir
+                    Fs.ensureDir (tmpDir ())
                     let config = configFor tools policy
                     let! srt = managerFor config
                     let children = Children.Registry ()

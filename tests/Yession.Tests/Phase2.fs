@@ -18,6 +18,18 @@ open Yession.Domain.Agent
 open Yession.Domain.Link
 open Yession.Domain.Terminals
 open Yession.App
+
+[<ImportAll("node:fs")>]
+let private nodeFs : obj = jsNative
+
+[<ImportAll("node:os")>]
+let private nodeOs : obj = jsNative
+
+[<Emit("$0.mkdtempSync($1.tmpdir() + '/yession-tmp-')")>]
+let private mkdtemp (fs: obj) (os: obj) : string = jsNative
+
+/// A directory nothing else in this run writes to.
+let private tempDir () : string = mkdtemp nodeFs nodeOs
 open Yession.Host
 open Yession.Tests.Support
 
@@ -258,12 +270,36 @@ let private sandboxPolicyTests =
                 config.AllowRead
                 [ "/opt/tools"
                   "/data/workspace"
-                  Sandboxes.SrtSandbox.tmpDir
+                  (Sandboxes.SrtSandbox.tmpDir ())
                   "/dev/stdout"
                   "/dev/stderr"
                   "/dev/null"
                   "/usr" ]
                 "read paths, everything writable (a workspace that cannot be read is no workspace), and the host runtime"
+
+        // The invariant the verb exists for, and the only one: srt reads `CLAUDE_CODE_TMPDIR`
+        // off this process at wrap time and bakes it into the child's `TMPDIR`, while the
+        // policy decides what the child may write. Those are two readers of one decision, and
+        // a sandbox whose `TMPDIR` is not in its write list cannot write a temporary file —
+        // which is what was measured before this: `W DENY /tmp/claude` inside a sandbox whose
+        // own config named `/tmp/claude`.
+        testCase "the temp dir srt is told about is the one the sandbox may write" <| fun () ->
+            let dir = tempDir ()
+            let prepared = Sandboxes.SessionLayout.prepareTmpDir dir
+            let config = Sandboxes.SrtSandbox.configFor (toolsWithRuntime []) Support.emptyPolicy
+            Expect.isTrue (List.contains prepared config.AllowWrite)
+                (sprintf "the prepared path is writable, allowed: %A" config.AllowWrite)
+            Expect.isTrue (List.contains prepared config.AllowRead)
+                (sprintf "and readable, since a temp dir that cannot be statted is no temp dir, allowed: %A" config.AllowRead)
+
+        // Canonical, for the reason `OperatorResources` refuses a path that is not: srt
+        // canonicalises an allow-list entry and the OS denies the symlink nodes an access
+        // traverses, so a temp dir reached through one is granted under a name nothing uses.
+        // A macOS data directory under `/var/folders` is exactly that case, unprompted.
+        testCase "the temp dir it prepares is the path the kernel will check" <| fun () ->
+            let dir = tempDir ()
+            let prepared = Sandboxes.SessionLayout.prepareTmpDir dir
+            Expect.equal (Fs.canonical prepared) (Some prepared) "it settled on a path that is its own canonical form"
 
         testCase "the srt config carries the tools, the egress and the temp dir through" <| fun () ->
             let policy = { Support.emptyPolicy with WritePaths = [ "/data/workspace" ]; AllowedDomains = Some [ "api.example.com" ] }
@@ -275,7 +311,7 @@ let private sandboxPolicyTests =
                         Ripgrep = Some "/usr/bin/rg" }
                     policy
             Expect.isTrue (List.contains "/data/workspace" config.AllowWrite) "the policy's write paths"
-            Expect.isTrue (List.contains Sandboxes.SrtSandbox.tmpDir config.AllowWrite) "and the temp dir srt redirects TMPDIR to"
+            Expect.isTrue (List.contains (Sandboxes.SrtSandbox.tmpDir ()) config.AllowWrite) "and the temp dir srt redirects TMPDIR to"
             Expect.equal config.AllowedDomains [ "api.example.com" ] "the egress allowlist rides through"
             Expect.equal config.Bwrap (Some "/usr/bin/bwrap") "the named confinement tool rides through"
             Expect.equal config.Ripgrep (Some "/usr/bin/rg") "and so does the scanner srt will not start without"
