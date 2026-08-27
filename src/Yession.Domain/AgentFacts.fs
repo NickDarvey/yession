@@ -1,6 +1,7 @@
 namespace Yession.Domain.Agent
 
 open Yession.Domain
+open Yession.Domain.Prs
 
 /// The facts an agent turn records — why it woke, what context it was given, what it said, and how it ended.
 ///
@@ -48,6 +49,17 @@ and WakeReason =
     /// something finishing: from here the Process cannot tell when that block ended, so the
     /// queue behind it is held and nothing else will arrive to say why.
     | IntegrationLost of TerminalId
+    /// A pull request somebody here watches changed while the agent was not running.
+    ///
+    /// This is the one reason that is not "whose work finished", and it qualifies for the
+    /// reason a roster change does not: a WATCH was started by an attributed party, and the
+    /// poll that noticed spent that party's own credential. So the wake has an owner who
+    /// asked for exactly this, which is what the paragraph above requires — where a roster
+    /// change belongs to `System` and to nobody.
+    ///
+    /// Attribution, never payload, like the rest: what changed arrives as the timeline note
+    /// the transition already folded into, so the reason names only which pull request.
+    | PrChanged of PrRef
 
 and AgentContextBuilt =
     { AgentTurnId : AgentTurnId
