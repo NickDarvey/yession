@@ -1957,6 +1957,36 @@ let private prPollTests =
                 Expect.isTrue afterWindow "and the answer moved the row"
             }
 
+        testCase "the watches a boot rebuilds from the log are the ones it polls" <| fun () ->
+            // What the session does at boot: fold its own log, hand the watches to the
+            // poller, and show them. A watch survives a restart because the log has it —
+            // there is nowhere else it could come from.
+            let msg n = MessageId.create n |> expect
+            let folded =
+                [ SessionEvent.PrWatchStarted
+                    { MessageId = msg "w1"
+                      Pr = prOne
+                      Initial = snapshotOf PrOpen ChecksPending
+                      Actor = ada }
+                  SessionEvent.PrTransitioned
+                    { MessageId = msg "t1"
+                      Pr = prOne
+                      Transition = ChecksTurnedGreen
+                      State = PrOpen
+                      Checks = ChecksGreen
+                      Watcher = ada } ]
+                |> List.fold PrWatchesProjection.applyEvent PrWatchesProjection.empty
+            let poller =
+                pollerOver fixedNow (scriptedFetch []).Fetch (RecordedTransitions ()) (ResizeArray ())
+            poller.Apply folded.Watches
+            match poller.Rows () with
+            | [ row ] ->
+                Expect.equal row.Pr prOne "the watch the log recorded"
+                Expect.equal row.Watcher ada "attributed to whoever started it"
+                Expect.equal row.Snapshot None "nothing has been looked at yet — which is not a state"
+                Expect.equal row.Health None "and nothing is wrong"
+            | rows -> failwithf "expected one row, got %d" rows.Length
+
         testCaseAsync "reconciling keeps an unchanged watch's etags and drops what was unwatched" <|
             async {
                 let etags : GitHubPrs.PrEtags = { Pr = "\"pr-v1\""; Checks = "\"checks-v1\"" }

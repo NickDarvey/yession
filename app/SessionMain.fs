@@ -14,6 +14,7 @@ open Yession.Domain.Agent
 open Yession.Domain.Link
 open Yession.Domain.Tools
 open Yession.Domain.Access
+open Yession.Domain.Prs
 open Yession.SessionProcess
 open Yession.Host
 
@@ -418,6 +419,10 @@ let mutable private reposService : Repos.ReposService option = None
 // place.
 let mutable private queryRegistry : Queries.QueryRegistry = Queries.empty
 
+/// The pull requests this session watches (Plan 14 follow-on). A cell like the others:
+/// the query surface is composed before the log exists, and the poller needs the log.
+let mutable private prWatchers : GitHubPrs.PrWatchers = GitHubPrs.PrWatchers.none
+
 // The session's named WorkSandboxes (Plan 15, stage 2). Built by the Host (it owns the
 // log the registry appends to), so this cell is filled once `startFull` resolves — before
 // which no turn can run, because nothing is listening.
@@ -717,6 +722,44 @@ Async.StartImmediate (
                       Log = log } with
             | Ok service -> reposService <- Some service
             | Error e -> failwithf "repos: %s" e
+        // Watching pull requests, over the same log and the same per-operation credential
+        // rule every other GitHub verb follows. The poller appends its own transitions:
+        // the baseline it compares against is only durable because what advanced it was
+        // recorded, so a driver that could forget the append must not exist.
+        do
+            let recordPrTransitions
+                (watcher: ActorRef)
+                (pr: PrRef)
+                (snapshot: PrSnapshot)
+                (transitions: PrTransition list)
+                : Async<unit> =
+                async {
+                    for transition in transitions do
+                        match MessageId.create (string (System.Guid.NewGuid ())) with
+                        | Error _ -> ()
+                        | Ok messageId ->
+                            // `ActorRef.System` on the envelope, because nobody in the
+                            // session did this; the payload names whose watch noticed —
+                            // the `McpServerAvailable` precedent, with a watcher.
+                            let! _ =
+                                log.Append
+                                    ActorRef.System
+                                    (SessionEvent.PrTransitioned
+                                        { MessageId = messageId
+                                          Pr = pr
+                                          Transition = transition
+                                          State = snapshot.State
+                                          Checks = snapshot.Checks
+                                          Watcher = watcher })
+                            ()
+                }
+            prWatchers <-
+                GitHubPrs.create
+                    (fun () -> System.DateTimeOffset.UtcNow)
+                    (GitHubPrs.fetchOver (Interop.envOr "YESSION_GITHUB_API_URL" "https://api.github.com"))
+                    resolveGitHubToken
+                    (fun actor -> reportGitHubNetworkFailure actor "pull request poll")
+                    recordPrTransitions
         // The query registry (Plan 15): every read-only view this session declares, in
         // one place. A capability that could not start declares nothing rather than
         // declaring a query that always errors — an empty settings surface says "this
@@ -733,7 +776,8 @@ Async.StartImmediate (
                   OperatorResources.query (fun () -> resourceProfile)
                   ShellProfile.query (fun () -> terminals)
                   RepoSandboxes.query (fun () -> repoSandboxes)
-                  McpClient.query (fun () -> mcpServers) ]
+                  McpClient.query (fun () -> mcpServers)
+                  GitHubPrs.query (fun () -> prWatchers) ]
             match Queries.create registrations with
             | Ok registry -> queryRegistry <- registry
             | Error e -> failwithf "queries: %s" e
@@ -890,6 +934,28 @@ Async.StartImmediate (
                     }))
             |> ignore
         | None -> ()
+        // The watches this session already had, rebuilt from its own log — the baseline
+        // included, so the first poll after a restart re-announces nothing and a change
+        // that happened while the process was down still lands.
+        Async.StartImmediate (
+            async {
+                let! page = log.Read None System.Int32.MaxValue
+                let projection =
+                    page.Events
+                    |> List.map (fun e -> e.Event)
+                    |> List.fold PrWatchesProjection.applyEvent PrWatchesProjection.empty
+                prWatchers.Apply projection.Watches
+                queryRegistry.Invalidate GitHubPrs.queryName
+            })
+        // ...and keep asking. Nothing pushes a pull request's state at a session that no
+        // provider can reach, so asking is the whole mechanism (see `GitHubPrs`).
+        Interop.setInterval GitHubPrs.PollIntervalMs (fun () ->
+            Async.StartImmediate (
+                async {
+                    let! moved = prWatchers.Poll ()
+                    if moved then queryRegistry.Invalidate GitHubPrs.queryName
+                }))
+        |> ignore
         // Register this launch's OAuth client with the Manager — HERE, after listen
         // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
         // (readiness implies the login surface works). A session that cannot register
