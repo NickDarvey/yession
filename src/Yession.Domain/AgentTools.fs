@@ -124,6 +124,14 @@ module private ToolArgs =
                 get.Optional.Field "force" Decode.bool |> Option.defaultValue false))
             json
 
+    /// `watch_pr`'s pair: which repo, and which pull request on it.
+    let repoNumber (json: string) : Result<string * int, string> =
+        read
+            (Decode.object (fun get ->
+                get.Required.Field "repo" Decode.string,
+                get.Required.Field "number" Decode.int))
+            json
+
     let repoBranchCreate (json: string) : Result<string * string * bool, string> =
         read
             (Decode.object (fun get ->
@@ -384,6 +392,22 @@ module AgentTools =
                 match! capabilities.Repos.Remove repo force with
                 | Ok outcome -> return renderCommandOutcome outcome
                 | Error e -> return sprintf "could not remove the repo: %s" e
+            })
+
+    let private watchPr (capabilities: AgentCapabilities) (raw: string) (number: int) : Async<string> =
+        withRepo raw (fun repo ->
+            async {
+                match! capabilities.Repos.WatchPr repo number with
+                | Ok outcome -> return renderCommandOutcome outcome
+                | Error e -> return sprintf "could not watch that pull request: %s" e
+            })
+
+    let private unwatchPr (capabilities: AgentCapabilities) (raw: string) (number: int) : Async<string> =
+        withRepo raw (fun repo ->
+            async {
+                match! capabilities.Repos.UnwatchPr repo number with
+                | Ok outcome -> return renderCommandOutcome outcome
+                | Error e -> return sprintf "could not stop watching that pull request: %s" e
             })
 
     let private switchBranch (capabilities: AgentCapabilities) (raw: string) (branch: string) (create: bool) : Async<string> =
@@ -670,6 +694,28 @@ module AgentTools =
                       match ToolArgs.repoBranchCreate args with
                       | Error e -> return Error e
                       | Ok (repo, branch, create) -> return! ok (switchBranch capabilities repo branch create)
+                  })
+          tool
+              "watch_pr"
+              "Watch a pull request on GitHub. The session polls it and announces on the timeline when it merges, closes, reopens, or its checks turn green or red; the current state of every watched pull request is the github_prs query. Reads it with the credential of whoever's turn this is, so a \"cannot see it\" on a pull request that exists means their GitHub credential cannot reach that repo. Watching one already watched reports its state and changes nothing."
+              [ ToolField.required "repo" "string" "owner/name"
+                ToolField.required "number" "integer" "the pull request number" ]
+              (fun args ->
+                  async {
+                      match ToolArgs.repoNumber args with
+                      | Error e -> return Error e
+                      | Ok (repo, number) -> return! ok (watchPr capabilities repo number)
+                  })
+          tool
+              "unwatch_pr"
+              "Stop watching a pull request. The session stops polling it and says nothing further about it; everyone sees the stop in the timeline."
+              [ ToolField.required "repo" "string" "owner/name"
+                ToolField.required "number" "integer" "the pull request number" ]
+              (fun args ->
+                  async {
+                      match ToolArgs.repoNumber args with
+                      | Error e -> return Error e
+                      | Ok (repo, number) -> return! ok (unwatchPr capabilities repo number)
                   })
 
           tool

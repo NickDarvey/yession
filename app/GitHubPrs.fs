@@ -332,6 +332,105 @@ let create
             |> List.map (fun e ->
                 { Pr = e.Pr; Watcher = e.Watcher; Snapshot = e.Snapshot; Health = e.Health }) }
 
+// --- the watch verbs ----------------------------------------------------------------------
+
+/// Starting and stopping a watch. Both are ACTS: they change what the session does from
+/// now on, they are attributed, and they read back in the timeline — so they go through
+/// the same gate every other repo verb does, and the session's own log is where a watch
+/// lives rather than any config file.
+type PrWatchService =
+    { /// Begin watching. Validates by LOOKING once with the caller's credential, which is
+      /// also where the baseline comes from: a watch whose provider cannot be read is a
+      /// watch that would never say anything, and refusing now beats a silent row.
+      Watch : ActorRef -> ActorRef -> PrRef -> Async<Result<string, string>>
+      Unwatch : ActorRef -> PrRef -> Async<Result<string, string>> }
+
+/// Build the watch verbs over the session's log and the poller they reconcile into.
+///
+/// `refold` re-reads the log and hands the watches over, so the projection is the single
+/// source of what is watched — the verbs never mutate the poller's list directly, and a
+/// restart rebuilding from the same log lands in the same place.
+let watchService
+    (append: ActorRef -> SessionEvent -> Async<unit>)
+    (watchesNow: unit -> Async<PrWatch list>)
+    (fetch: FetchPr)
+    (resolveToken: ActorRef -> Async<string option>)
+    (refold: PrWatch list -> unit)
+    : PrWatchService =
+
+    let mintId () =
+        MessageId.create (string (System.Guid.NewGuid ()))
+
+    let describe (pr: PrRef) (snapshot: PrSnapshot) =
+        sprintf
+            "watching %s (%s, %s)"
+            (PrRef.render pr)
+            (PrState.describe snapshot.State)
+            (ChecksRollup.describe snapshot.Checks)
+
+    { Watch =
+        fun actor credential pr ->
+            async {
+                let! watches = watchesNow ()
+                match watches |> List.tryFind (fun w -> w.Pr = pr) with
+                // Already watched: a repeated ask is a question, not an act (the
+                // `add_repo` rule). Answer what is known and record nothing.
+                | Some existing ->
+                    return
+                        Ok (
+                            sprintf
+                                "already watching %s (%s, %s)"
+                                (PrRef.render pr)
+                                (PrState.describe existing.Known.State)
+                                (ChecksRollup.describe existing.Known.Checks))
+                | None ->
+                    let! token = resolveToken credential
+                    let! outcome = fetch token pr PrEtags.none
+                    match outcome with
+                    | PrFetchFailed PrNotFound ->
+                        return
+                            Error (
+                                sprintf
+                                    "github cannot see %s — check the number, or whether the connected GitHub credential can reach that repo"
+                                    (PrRef.render pr))
+                    | PrFetchFailed PrUnauthorized ->
+                        return Error "github rejected the credential — sign in again from the Connections panel"
+                    | PrFetchFailed (PrRateLimited _) ->
+                        return Error "rate limited by github — try again shortly"
+                    | PrFetchFailed (PrUnreachable reason) -> return Error reason
+                    // Unreachable in practice (nothing has an ETag yet), but total: a
+                    // provider that answers 304 to a first look has told us nothing to
+                    // start a baseline from.
+                    | PrUnchanged -> return Error "github answered nothing about that pull request"
+                    | PrChanged (snapshot, _) ->
+                        match mintId () with
+                        | Error e -> return Error e
+                        | Ok messageId ->
+                            do!
+                                append
+                                    actor
+                                    (SessionEvent.PrWatchStarted
+                                        { MessageId = messageId; Pr = pr; Initial = snapshot; Actor = actor })
+                            let! watches = watchesNow ()
+                            refold watches
+                            return Ok (describe pr snapshot)
+            }
+      Unwatch =
+        fun actor pr ->
+            async {
+                let! watches = watchesNow ()
+                if watches |> List.exists (fun w -> w.Pr = pr) |> not then
+                    return Error (sprintf "not watching %s" (PrRef.render pr))
+                else
+                    match mintId () with
+                    | Error e -> return Error e
+                    | Ok messageId ->
+                        do! append actor (SessionEvent.PrWatchStopped { MessageId = messageId; Pr = pr; Actor = actor })
+                        let! watches = watchesNow ()
+                        refold watches
+                        return Ok (sprintf "stopped watching %s" (PrRef.render pr))
+            } }
+
 // --- the query -----------------------------------------------------------------------------
 // A QUERY, so registering it IS the UI change (the `mcp_servers` argument): the settings
 // surface maps over whatever the session declared, and the registry generates the agent's

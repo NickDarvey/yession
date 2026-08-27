@@ -423,6 +423,9 @@ let mutable private queryRegistry : Queries.QueryRegistry = Queries.empty
 /// the query surface is composed before the log exists, and the poller needs the log.
 let mutable private prWatchers : GitHubPrs.PrWatchers = GitHubPrs.PrWatchers.none
 
+/// The watch verbs over that poller, built once the log exists.
+let mutable private prWatchService : GitHubPrs.PrWatchService option = None
+
 // The session's named WorkSandboxes (Plan 15, stage 2). Built by the Host (it owns the
 // log the registry appends to), so this cell is filled once `startFull` resolves — before
 // which no turn can run, because nothing is listening.
@@ -525,6 +528,7 @@ let private commandServices : Commands.CommandServices =
     { Repos = fun () -> reposService
       Sandboxes = fun () -> workSandboxes
       Terminals = fun () -> terminals
+      Prs = fun () -> prWatchService
       Invalidate = fun name -> queryRegistry.Invalidate name
       // What a repo verb does to the configuration. Handed as a function rather than the
       // fold itself because the cell is filled after this record is built — and because a
@@ -760,6 +764,30 @@ Async.StartImmediate (
                     resolveGitHubToken
                     (fun actor -> reportGitHubNetworkFailure actor "pull request poll")
                     recordPrTransitions
+            // The verbs over it. `watchesNow` re-reads the log rather than the poller,
+            // so the projection stays the one answer to what is watched — and a watch
+            // recorded by this verb comes back the same way a restart's would.
+            let watchesNow () =
+                async {
+                    let! page = log.Read None System.Int32.MaxValue
+                    return
+                        page.Events
+                        |> List.map (fun e -> e.Event)
+                        |> List.fold PrWatchesProjection.applyEvent PrWatchesProjection.empty
+                        |> fun projection -> projection.Watches
+                }
+            prWatchService <-
+                Some (
+                    GitHubPrs.watchService
+                        (fun actor event ->
+                            async {
+                                let! _ = log.Append actor event
+                                ()
+                            })
+                        watchesNow
+                        (GitHubPrs.fetchOver (Interop.envOr "YESSION_GITHUB_API_URL" "https://api.github.com"))
+                        resolveGitHubToken
+                        prWatchers.Apply)
         // The query registry (Plan 15): every read-only view this session declares, in
         // one place. A capability that could not start declares nothing rather than
         // declaring a query that always errors — an empty settings surface says "this

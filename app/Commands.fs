@@ -31,6 +31,7 @@ open Yession.Domain.Agent
 open Yession.Domain.Tools
 open Yession.Domain.Repos
 open Yession.SessionProcess
+open Yession.Domain.Prs
 
 /// What the commands need from the session around them, as getters — the services are
 /// composed during boot and the table is built once, so a value read here would be the one
@@ -42,6 +43,8 @@ type CommandServices =
       Sandboxes : unit -> WorkSandboxes.WorkSandboxes
       /// The terminal manager, which owns the shell profile (Plan 25).
       Terminals : unit -> SessionTerminals.SessionTerminals
+      /// Watching pull requests, absent when the session could not start the poller.
+      Prs : unit -> GitHubPrs.PrWatchService option
       /// Say a query's answer changed. A command is the only thing that can change one, so
       /// a command is the only thing that has to say so — nothing polls.
       Invalidate : QueryName -> unit
@@ -105,6 +108,8 @@ let private andPublish
 let private addRepoTool = "add_repo"
 let private removeRepoTool = "remove_repo"
 let private switchBranchTool = "switch_branch"
+let private watchPrTool = "watch_pr"
+let private unwatchPrTool = "unwatch_pr"
 let private startWorkSandboxTool = "start_work_sandbox"
 let private stopWorkSandboxTool = "stop_work_sandbox"
 let private setShellProfileTool = "set_shell_profile"
@@ -251,6 +256,49 @@ let dispatch (services: CommandServices) : CommandDispatch =
                     return Error (sprintf "switch_branch takes a repo, a branch and a flag, got %d arguments" (List.length other))
             }
 
+          watchPrTool,
+          fun (invocation: GatedInvocation) ->
+            async {
+                match services.Prs (), decodeArgs invocation.Args with
+                | None, _ -> return Error "this session cannot watch pull requests"
+                | Some service, [ repo; number ] ->
+                    match RepoRef.create repo, System.Int32.TryParse number with
+                    | Error e, _ -> return Error (sprintf "not a repo name: %s" e)
+                    | _, (false, _) -> return Error "not a pull request number"
+                    | Ok repo, (true, number) ->
+                        match PrRef.create repo number with
+                        | Error e -> return Error e
+                        | Ok pr ->
+                            return!
+                                andPublish services GitHubPrs.queryName (
+                                    service.Watch
+                                        (Authority.author invocation.Authority)
+                                        (Authority.effective invocation.Authority)
+                                        pr)
+                | Some _, other ->
+                    return Error (sprintf "watch_pr takes a repo and a number, got %d arguments" (List.length other))
+            }
+
+          unwatchPrTool,
+          fun (invocation: GatedInvocation) ->
+            async {
+                match services.Prs (), decodeArgs invocation.Args with
+                | None, _ -> return Error "this session cannot watch pull requests"
+                | Some service, [ repo; number ] ->
+                    match RepoRef.create repo, System.Int32.TryParse number with
+                    | Error e, _ -> return Error (sprintf "not a repo name: %s" e)
+                    | _, (false, _) -> return Error "not a pull request number"
+                    | Ok repo, (true, number) ->
+                        match PrRef.create repo number with
+                        | Error e -> return Error e
+                        | Ok pr ->
+                            return!
+                                andPublish services GitHubPrs.queryName (
+                                    service.Unwatch (Authority.author invocation.Authority) pr)
+                | Some _, other ->
+                    return Error (sprintf "unwatch_pr takes a repo and a number, got %d arguments" (List.length other))
+            }
+
           startWorkSandboxTool,
           fun (invocation: GatedInvocation) ->
             async {
@@ -383,6 +431,18 @@ let private repoCapabilitiesFor
                           if create then sprintf "switch_branch %s -> new branch %s" (RepoRef.value repo) branch
                           else sprintf "switch_branch %s -> %s" (RepoRef.value repo) branch
                       gated switchBranchTool [ RepoRef.value repo; branch; (if create then "true" else "false") ] summary
+                  WatchPr =
+                    fun repo number ->
+                      gated
+                          watchPrTool
+                          [ RepoRef.value repo; string number ]
+                          (sprintf "watch_pr %s#%d" (RepoRef.value repo) number)
+                  UnwatchPr =
+                    fun repo number ->
+                      gated
+                          unwatchPrTool
+                          [ RepoRef.value repo; string number ]
+                          (sprintf "unwatch_pr %s#%d" (RepoRef.value repo) number)
                   // The READS take no gate and no approver: they change nothing, so there is
                   // nothing to approve and nothing to resume.
                   Fetch = service.FetchRepo (Repos.agentCaller turnActor)
