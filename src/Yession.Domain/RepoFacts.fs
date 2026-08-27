@@ -58,7 +58,7 @@ and RepoBranchSwitched =
 /// `a4f2…` meant — and a short one could be collided by whoever authors the file, which is
 /// exactly the party this exists to watch. Carrying the list costs a few lines and cannot be
 /// forged into looking unchanged.
-and RepoCapabilitiesChanged =
+and [<RequireQualifiedAccess>] RepoCapabilitiesChanged =
     { MessageId : MessageId
       Repo : RepoRef
       /// Everything this repo's sandboxes would hold, flattened, deduplicated and sorted —
@@ -66,6 +66,20 @@ and RepoCapabilitiesChanged =
       /// what is read there cannot become two answers.
       Granted : string list
       /// The repo's file, as the party asking.
+      Actor : ActorRef }
+
+/// A person consented to what a repo asks for.
+///
+/// The APPROVER is on the record and must be an attributed human. The agent cannot consent
+/// on a repo's behalf, and that is the whole point of the repo being a separate principal:
+/// a checkout that could approve itself is a checkout nobody is deciding about.
+and [<RequireQualifiedAccess>] RepoCapabilitiesApproved =
+    { MessageId : MessageId
+      Repo : RepoRef
+      /// Exactly what was consented to, so a later ask that differs is a new decision rather
+      /// than something the old yes silently covers.
+      Granted : string list
+      /// Who said yes. Never `Configured` and never the agent.
       Actor : ActorRef }
 
 and RepoConfigRefused =

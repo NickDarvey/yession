@@ -238,6 +238,17 @@ module ConversationProjection =
                           Kind = ConversationItemKind.ActNote
                           Offset = envelope.Offset
                           Woke = None } ] }
+        | SessionEvent.RepoCapabilitiesApproved a ->
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = a.MessageId
+                          Author = a.Actor
+                          Body = sprintf "approved what %s asks for" (RepoRef.value a.Repo)
+                          Status = Complete
+                          Kind = ConversationItemKind.ActNote
+                          Offset = envelope.Offset
+                          Woke = None } ] }
         | SessionEvent.RepoConfigRefused r ->
             { proj with
                 Items =
