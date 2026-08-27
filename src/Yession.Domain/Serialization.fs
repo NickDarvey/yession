@@ -990,12 +990,17 @@ module Codec =
                       // log nobody audits, and a short digest could be collided by whoever
                       // authors the file this watches.
                       "granted", Encode.list (p.Granted |> List.map Encode.string)
+                      "sensitive", Encode.bool p.Sensitive
                       "actor", actor.Encode p.Actor ]
           Decode =
             Decode.object (fun get ->
                 { RepoCapabilitiesChanged.MessageId = get.Required.Field "messageId" messageId.Decode
                   RepoCapabilitiesChanged.Repo = get.Required.Field "repo" repoRef.Decode
                   RepoCapabilitiesChanged.Granted = get.Required.Field "granted" (Decode.list Decode.string)
+                  // Absent in a log written before a set could be sensitive, and false is what
+                  // that log meant: nothing then waited on anybody.
+                  RepoCapabilitiesChanged.Sensitive =
+                    get.Optional.Field "sensitive" Decode.bool |> Option.defaultValue false
                   RepoCapabilitiesChanged.Actor = get.Required.Field "actor" actor.Decode }) }
 
     let private repoCapabilitiesApproved : Codec<RepoCapabilitiesApproved> =

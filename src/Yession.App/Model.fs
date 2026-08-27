@@ -544,7 +544,12 @@ type ClientModel =
       /// that lives in `Synced.Model`.
       Models        : ModelCatalogueState
       /// The generated read surface (Plan 15), driven by the /queries stream.
-      Queries       : QueriesViewState }
+      Queries       : QueriesViewState
+      /// Repos whose sensitive capability set is waiting on somebody here (Plan 27).
+      ///
+      /// Folded from the same events the Process gates on, so what a person is asked and
+      /// what a sandbox is waiting for are two readings of one log rather than two answers.
+      Approvals     : RepoApprovals.Pending }
 
 /// Messages that drive the client model. Connection-lifecycle messages are produced by
 /// the connection driver (Connection.fs); the suffix avoids clashing with the
@@ -729,6 +734,7 @@ module ClientModel =
           HistoryRead = false
           Synced = SyncedSessionState.empty
           Conversation = ConversationProjection.empty
+          Approvals = RepoApprovals.empty
           Timeline = TimelineProjection.empty
           EventConsumer =
             { LastProcessedOffset = None
@@ -1427,6 +1433,7 @@ module ClientModel =
             let latestKnown = EventOffset.maxOption model.EventConsumer.LatestKnownOffset highWater
             { model with
                 Conversation = conversation
+                Approvals = RepoApprovals.apply model.Approvals (freshEvents |> List.map (fun e -> e.Event))
                 Timeline = timeline
                 Agent = agent
                 Environment = environment

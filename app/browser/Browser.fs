@@ -1540,6 +1540,8 @@ let private start () =
                             if not reply.ok then return Error reply.body else return Ok None
                         })
               OpenTerminal = fun title -> connectionRef |> Option.iter (fun c -> c.OpenTerminal title)
+              ApproveRepoCapabilities =
+                fun repo granted -> connectionRef |> Option.iter (fun c -> c.ApproveRepoCapabilities repo granted)
               CloseTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.CloseTerminal id)
               TakeTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.TakeTerminal id)
               ReleaseTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.ReleaseTerminal id)

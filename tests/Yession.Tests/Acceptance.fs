@@ -19,6 +19,8 @@ open Yession.Domain.Agent
 open Yession.Domain.Link
 open Yession.Domain.Terminals
 open Yession.Domain.Collab
+open Yession.Domain.Repos
+open Yession.Domain.Chat
 open Yession.Domain.Tools
 open Yession.Domain.Chat
 open Yession.App
@@ -51,6 +53,7 @@ let private representativeModel : ClientModel =
     { Peer = { PeerId = ada; DisplayName = "swift-heron" }
       Connection = Connected
       Session = Some sessionId
+      Approvals = RepoApprovals.empty
       // Connected, so the reconnect offer (Plan 11) is not showing — but the origin is
       // present, which is the interesting case: the offer must be gated on the CONNECTION,
       // not merely on whether a Manager is known.
@@ -342,6 +345,39 @@ let private uiChecklistTests =
                 []
                 (sprintf "every button needs a name, from its text or aria-label — these have neither: %s"
                     (String.concat " | " offenders))
+
+        // The promise, not the design: one prompt per repo somebody has to decide about, and
+        // none for a repo nobody does. What it SAYS is a design and will move; that a waiting
+        // repo is offered exactly once is what a person is owed.
+        testCase "a repo waiting on somebody is offered exactly once, and one that is not is not offered" <| fun () ->
+            let waiting = RepoRef.create "octo/hello" |> expect
+            let settled = RepoRef.create "octo/quiet" |> expect
+            let asked repo granted sensitive =
+                SessionEvent.RepoCapabilitiesChanged
+                    { RepoCapabilitiesChanged.MessageId = MessageId.create (RepoRef.value repo) |> expect
+                      RepoCapabilitiesChanged.Repo = repo
+                      RepoCapabilitiesChanged.Granted = granted
+                      RepoCapabilitiesChanged.Sensitive = sensitive
+                      RepoCapabilitiesChanged.Actor = ActorRef.Configured repo }
+            let model =
+                { representativeModel with
+                    Approvals =
+                        RepoApprovals.apply
+                            RepoApprovals.empty
+                            [ asked waiting [ "reaches anywhere (sensitive)" ] true
+                              asked settled [ "/nix, read-only" ] false ] }
+            let html = Support.render model
+            // Counted rather than matched, so the assertion is about how MANY there are —
+            // which is the promise — and not about any of the words around them.
+            let occurrences (needle: string) =
+                let rec count (from: int) (found: int) =
+                    match html.IndexOf (needle, from) with
+                    | -1 -> found
+                    | at -> count (at + needle.Length) (found + 1)
+                count 0 0
+            Expect.equal (occurrences (Dom.attr Dom.Hooks.approvalPrompt "octo/hello")) 1 "offered once"
+            Expect.equal (occurrences (Dom.attr Dom.Hooks.approvalPrompt "octo/quiet")) 0 "and an ordinary ask is not a decision"
+            Expect.equal (occurrences (Dom.attr Dom.Hooks.approvalAction "octo/hello")) 1 "with one way to say yes"
 
         testCase "every required Phase 1 UI element renders from the model" <| fun () ->
             let html = Support.render representativeModel
