@@ -74,6 +74,10 @@
          convention — it references nothing in it, which is the property worth keeping. -->
     <Compile Include="ModelRoutes.fs" />
     <Compile Include="GitHubConnection.fs" />
+    <!-- Watching a pull request: the two REST endpoints, their JSON, and the poll
+         that folds one into the other. After GitHubConnection.fs (its sibling in what
+         it knows) and after Queries.fs, whose registration type it answers with. -->
+    <Compile Include="GitHubPrs.fs" />
     <Compile Include="Spawn.fs" />
     <Compile Include="ProcessManager.fs" />
     <Compile Include="ManagerUi.fs" />
