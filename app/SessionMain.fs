@@ -894,18 +894,20 @@ Async.StartImmediate (
                 (fun () -> workSandboxes)
                 host.RunGated
                 log
-                // The same rendering the operator's `resources` surface uses, so what a repo
-                // is said to ask for and what an operator reads about a name cannot become
-                // two answers.
-                (fun selection ->
-                    match selection, resourceProfile with
-                    | [], _ -> Ok { RepoSandboxes.Granted = []; RepoSandboxes.Sensitive = false }
-                    | _, None -> grantsFor selection |> Result.map (fun _ -> { RepoSandboxes.Granted = []; RepoSandboxes.Sensitive = false })
-                    | selection, Some file ->
-                        ResourceProfile.resolve file.Resources selection
-                        |> Result.map (fun closure ->
-                            { RepoSandboxes.Granted = ResourceClosure.describe closure
-                              RepoSandboxes.Sensitive = ResourceClosure.isSensitive closure }))
+                // What a checkout asks for, as the backend its sandboxes run on will actually
+                // grant it. The work backend and not the agent's: a repo's declarations
+                // become work sandboxes, and the two backends do not scope the same things.
+                //
+                // The no-profile case goes through `grantsFor` so the sentence a repo gets
+                // for selecting a name on a host that declares nothing is written once. It
+                // cannot succeed — a non-empty selection with no profile is exactly what that
+                // refusal is for — and `capabilitiesOn` has already answered the empty one.
+                (RepoSandboxes.capabilitiesOn
+                    (Sandboxes.limitsHere workBackend)
+                    (fun selection ->
+                        match resourceProfile with
+                        | None -> grantsFor selection |> Result.map (fun _ -> ResourceClosure.empty)
+                        | Some file -> ResourceProfile.resolve file.Resources selection))
         // How each gated command is carried out, handed to the gate the Host owns. Here —
         // and not closed over a turn — because the table is built from the services, and the
         // services are composed here.
