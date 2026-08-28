@@ -6,12 +6,13 @@ open Yession.Domain
 ///
 /// Two facts have to hold together: the Manager's public origin — it is the OIDC issuer
 /// every session bounces its users through — and where each session's own port is
-/// reachable. They are ONE value here because of the four combinations three are legal
-/// deployments and the fourth is always broken: sessions fronted while the Manager that
-/// authorizes their users answers only on loopback sends a remote browser to
-/// `http://127.0.0.1` to log in, every time. `PublicAccess.create` is the only
-/// constructor, so that fourth state is rejected once, at boot, and nothing downstream
-/// can hold it.
+/// reachable. They are ONE value here because a deployment fronts everything or nothing:
+/// loopback (development) or fronted (deployment). Half a pair is always broken —
+/// sessions fronted without their issuer bounce every remote login to `http://127.0.0.1`,
+/// and a public issuer without fronted sessions registers loopback session addresses and
+/// OAuth callbacks nobody remote can reach. `PublicAccess.create` is the only
+/// constructor, so both half-set states are rejected once, at boot, and nothing
+/// downstream can hold them.
 ///
 /// Pure — no environment reads. The process boundary supplies the two raw strings
 /// (`YESSION_MANAGER_URL`, `YESSION_SESSION_URL`); this decides what they mean.
@@ -127,14 +128,12 @@ module SessionTemplate =
         { Url = raw.Replace("{id}", SessionId.value sessionId).Replace("{port}", string port)
           Mount = mount sessionId template }
 
-/// How this deployment is reached. Constructed only by `create`.
+/// How this deployment is reached: loopback (development) or fronted (deployment).
+/// Constructed only by `create`.
 type PublicAccess =
-    /// Nothing configured: single machine. The Manager answers at its own loopback
-    /// endpoint and sessions at their loopback ports.
+    /// Nothing configured: single machine, development. The Manager answers at its own
+    /// loopback endpoint and sessions at their loopback ports.
     | Loopback
-    /// The Manager is fronted; sessions are not. A real deployment — manage sessions
-    /// remotely, use them on the host — and what Plan 07 shipped before Plan 09.
-    | ManagerOnly of manager: ManagerOrigin
     /// Both are fronted: the Manager at an origin, sessions wherever the template says.
     | Fronted of manager: ManagerOrigin * sessions: SessionTemplate
 
@@ -164,8 +163,9 @@ module PublicAccess =
                             path)
                 | Ok (scheme, authority, _) -> Ok (ManagerOrigin (scheme + authority))
 
-    /// Read the pair as configured, `""` for unset. The illegal combination is an Error
-    /// here and nowhere else: after this returns, every remaining state is deployable.
+    /// Read the pair as configured, `""` for unset. A half-set pair is an Error here and
+    /// nowhere else — in either direction: after this returns, every remaining state is
+    /// deployable.
     let create (managerUrl: string) (sessionUrl: string) : Result<PublicAccess, string> =
         match managerUrl.Trim (), sessionUrl.Trim () with
         | "", "" -> Ok Loopback
@@ -174,7 +174,12 @@ module PublicAccess =
                 "YESSION_SESSION_URL is set but YESSION_MANAGER_URL is not: sessions would be \
                  reachable remotely while the Manager that authorizes their users answers only \
                  on loopback, so every remote login would bounce to 127.0.0.1. Set both, or neither."
-        | manager, "" -> managerOrigin manager |> Result.map ManagerOnly
+        | _, "" ->
+            Error
+                "YESSION_MANAGER_URL is set but YESSION_SESSION_URL is not: sessions would \
+                 answer on loopback ports while the Manager is public, so every session \
+                 address — and the OAuth callback each session registers against that public \
+                 issuer — would name 127.0.0.1. Set both, or neither."
         | manager, sessions ->
             managerOrigin manager
             |> Result.bind (fun origin ->
@@ -187,7 +192,6 @@ module PublicAccess =
     let managerUrl (access: PublicAccess) : string option =
         match access with
         | Loopback -> None
-        | ManagerOnly origin
         | Fronted (origin, _) -> Some (ManagerOrigin.value origin)
 
     /// The Manager's public URL, falling back to whatever endpoint the caller can offer
@@ -203,12 +207,11 @@ module PublicAccess =
         | Some url -> Some url
         | None -> fallback
 
-    /// Where sessions live. Total — an unfronted deployment serves the loopback
-    /// template — so no consumer branches on deployment shape.
+    /// Where sessions live. Total — the loopback shape serves the loopback template — so
+    /// no consumer branches on deployment shape.
     let sessions (access: PublicAccess) : SessionTemplate =
         match access with
-        | Loopback
-        | ManagerOnly _ -> SessionTemplate.loopback
+        | Loopback -> SessionTemplate.loopback
         | Fronted (_, template) -> template
 
     /// A session's public address under this deployment.
