@@ -149,11 +149,15 @@ Items are roughly ordered by how much they matter.
       conventionally allows back, checked against srt's implementation and nothing else.
       It has already cost one release: with the read scope on, every git verb on macOS ran
       PATH's `/usr/bin/git`, which is not git but a shim that resolves a developer
-      directory through a `/var/select` symlink — and srt's macOS escape hatch allows
+      directory through a `/var/select` symlink — and srt's macOS escape hatch allowed
       metadata on DIRECTORIES, so the symlink stayed denied. Sessions reported
       `xcode-select: error: unable to read data link … (Operation not permitted)`, which
       reads as a broken Xcode install and is not one. The fix was to stop asking the host
       which git to run (below), not to widen the scope for a shim.
+
+      The runtime this build pins now admits metadata on SYMLINK vnodes as well, so that
+      class of denial is gone — but naming the binary is still the rule, for the reason it
+      was the rule before: a shim is not the thing you meant to run.
   - **Every binary a confined spawn execs is NAMED; git was the last exception.**
     `YESSION_BIN_GIT` (the installable sets it on both platforms, unlike the Linux-only
     srt tools) joins `YESSION_BIN_BWRAP`, `YESSION_BIN_SOCAT`, `YESSION_BIN_RIPGREP`
@@ -191,16 +195,20 @@ Items are roughly ordered by how much they matter.
       path that its read-deny tmpfs wiped — so both are readable AND writable from inside a
       sandbox whose policy names neither. The home they resolve against is the Session
       Process's `os.homedir()`, so the fix is that process's own `HOME`, not the policy.
-    - **A symlink INSIDE a granted directory is still denied, and that is the limit of
-      declaring canonical paths.** Since #330 a resource must name the path the kernel will
-      check, which fixes a grant written as `/etc/ssl/cert.pem`. It does nothing for a
-      symlink one level further in: on a nix-darwin host `/private/etc/nix/nix.conf` is a
-      link to `/etc/static/nix/nix.conf`, whose own path starts at the denied `/etc` node, so
-      granting `/private/etc/nix` yields a directory the sandbox can list and a file it
-      cannot read (`Operation not permitted`). Resolving every link under every granted tree
-      is not a policy this can compute — the honest fix is srt allowing the symlink nodes on
-      the way to a granted path, which is the same one-line widening `/usr/bin/git` ->
-      `/var/select` wanted above.
+    - ~~**A symlink INSIDE a granted directory is still denied.**~~ **Fixed** by the
+      sandbox runtime this build pins (a fork of srt 0.0.67; see `package.json`). The
+      denial was one filter: srt normalizes an allow to its realpath before emitting it
+      while Seatbelt matches the path AS WRITTEN, and its read escape hatch admitted
+      metadata on DIRECTORY vnodes only — so a spelling that crossed a link node was
+      stopped at a node appearing nowhere in the profile. The fork admits SYMLINK vnodes
+      too.
+
+      What that did NOT open, measured: a link whose target nothing grants stays denied.
+      Metadata is admitted; the read of the target is still matched against the allows.
+      The cost is that `lstat` and `readlink` answer for any symlink, which is the same
+      class of exposure the DIRECTORY rule already accepted for every directory.
+      `tests/Yession.Tests/SrtIntegration.fs` pins both halves, so a dependency that went
+      back to a build without the fix goes red here rather than in somebody's session.
     - **A `Socket` grant is path-scoped on macOS and unenforceable on Linux.** #335 gave a
       socket its own axis, and srt honours it as `network.allowUnixSockets` — a list of paths
       the Seatbelt profile turns into `network-outbound` rules. On Linux srt filters unix
@@ -220,7 +228,8 @@ Items are roughly ordered by how much they matter.
       (`SandboxDegraded`, plan increment 5) does not exist yet, so doing it now would widen
       confinement silently. The other is srt gaining a path-scoped mechanism on Linux, which
       seccomp cannot give it. Recorded rather than guessed at.
-    - **`dotnet` cannot run a build in an srt sandbox on macOS, and no resource fixes it.**
+    - ~~**`dotnet` cannot run a build in an srt sandbox on macOS, and no resource fixes it.**~~
+      **Fixed** — kept in full because what was tried and why it failed is the expensive part.
       .NET's named mutexes `stat("/tmp/")` — hardcoded, so redirecting `TMPDIR` does not
       reach it — and the SDK takes one on first use, from `NuGet.Common.Migrations`. `/tmp`
       is a symlink, so it is denied for the reason above, and `check` inside a sandbox dies
@@ -250,10 +259,30 @@ Items are roughly ordered by how much they matter.
         glob deny stops applying, for a reason not visible from outside Seatbelt.
 
       Reverted rather than shipped on the third reading, because two of the three states are
-      a leak and the difference between them is not understood. The fix is srt's: allow
-      `file-read-metadata` on the symlink NODES on the way to a granted path, the same
-      one-line widening `/usr/bin/git` -> `/var/select` has wanted since before this. Until
-      then a work sandbox on macOS can run nix, node and git, and cannot run the .NET SDK.
+      a leak and the difference between them is not understood.
+
+      **Now fixed, and it took three things rather than one.** The runtime is a fork of srt
+      0.0.67 admitting `file-read-metadata` on SYMLINK vnodes (see the entry above), which
+      is what gets past the `stat`. That alone moved the failure rather than removing it,
+      and the two after it are both grants an operator writes:
+
+      - `open("/tmp/.dotnet/shm") == -1; errno == EPERM` — the runtime's shared memory for
+        named mutexes. The path is hardcoded in the PAL exactly like the `stat`, so it is
+        grantable or nothing: `/private/tmp/.dotnet`, writable, canonical per #330 and
+        reachable as `/tmp/.dotnet` only because link nodes now traverse.
+      - NuGet's lock under `TMPDIR`, which srt sets to `/tmp/claude`. yession already grants
+        this (`configFor` adds `SessionLayout.tmpDir ()` to the writable set); it is listed
+        because a config assembled by hand without it fails here and the message names a
+        lock file rather than a permission.
+
+      With all three, `dotnet restore` exits 0 in a real srt sandbox on this host —
+      measured, having never worked before. `DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1` was never
+      the answer and still is not.
+
+      One thing that is NOT needed, though it works and was measured on the way: NuGet's
+      first-run migration takes the mutex only when `$HOME/.local/share/NuGet/Migrations/1`
+      is absent, so seeding that file also avoids the whole path. It is a marker claiming
+      work that did not happen, and with the runtime fixed there is no reason to write one.
     - **A granted executable that cannot RUN is invisible to the start-up checks.** Measured:
       the `nix` an operator would name on nix-darwin (`/run/current-system/sw/bin/nix`,
       canonically `…-nix-2.34.6+1/bin/nix`) aborts under Seatbelt — `Abort trap: 6`, exit 134

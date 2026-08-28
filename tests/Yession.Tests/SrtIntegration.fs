@@ -34,6 +34,9 @@ let private writeFile (fs: obj) (path: string) (content: string) : unit = jsNati
 [<Emit("$0.existsSync($1)")>]
 let private exists (fs: obj) (path: string) : bool = jsNative
 
+[<Emit("$0.symlinkSync($1, $2)")>]
+let private symlink (fs: obj) (target: string) (path: string) : unit = jsNative
+
 [<Emit("process.env.HOME || ''")>]
 let private hostHome () : string = jsNative
 
@@ -336,4 +339,53 @@ let tests =
                 Expect.equal (exitCode run) 0 "the sandbox after the refusal runs commands"
                 do! sandbox.Dispose ()
             })
+
+            // --- the spelling a process actually uses -------------------------------------
+            //
+            // A grant is written down canonically (#330 refuses anything else), but a
+            // process opens the path it has, and on macOS /tmp, /etc, /var and /run are
+            // symlinks. srt normalizes an allow to its realpath while Seatbelt matches the
+            // path AS WRITTEN, so the two disagree at the link node — and the sandbox holds
+            // a directory it cannot reach by the name everything says.
+            //
+            // Fixed in the sandbox runtime this build pins (a fork of srt 0.0.67 admitting
+            // `file-read-metadata` on SYMLINK vnodes, not only DIRECTORY). These two are
+            // what say the fix is present and what it did not buy — without them the
+            // dependency could go back to a build with the hole and nothing would notice.
+            (if platform () <> "darwin" then
+                ptestCase "a granted path is readable by the spelling a process uses (macOS only: Seatbelt matches paths as written)" (fun () -> ())
+             else
+             testCaseAsync "a granted path is readable by the spelling a process uses" (async {
+                let workspace = mkdtemp nodeFs nodeOs |> Fs.canonical |> Option.get
+                writeFile nodeFs (workspace + "/visible.txt") "reachable"
+                // The link lives under /tmp — itself a link to /private/tmp — so reaching
+                // the file crosses two link nodes, which is the shape a real path has.
+                let link = "/tmp/yession-srt-link-" + string (int (nowMs ()))
+                symlink nodeFs workspace link
+
+                let! sandbox = startSandbox (policyIn workspace [])
+                let! run, out, _ = shell sandbox ("cat " + link + "/visible.txt")
+                Expect.equal (exitCode run) 0 "the sandbox read it through the link"
+                Expect.isTrue (out.Contains "reachable") (sprintf "and got the contents, said: %s" out)
+                do! sandbox.Dispose ()
+             }))
+
+            (if platform () <> "darwin" then
+                ptestCase "a symlink is still not a way into what nothing granted (macOS only)" (fun () -> ())
+             else
+             testCaseAsync "a symlink is still not a way into what nothing granted" (async {
+                let workspace = mkdtemp nodeFs nodeOs |> Fs.canonical |> Option.get
+                let elsewhere = mkdtemp nodeFs nodeOs |> Fs.canonical |> Option.get
+                writeFile nodeFs (elsewhere + "/not-yours") "secret"
+                // A link INSIDE the workspace, so the link itself is granted and only its
+                // target is not. Admitting metadata on link nodes must not turn that into a
+                // way through: what is matched against the allows is the target.
+                symlink nodeFs elsewhere (workspace + "/out")
+
+                let! sandbox = startSandbox (policyIn workspace [])
+                let! run, out, _ = shell sandbox ("cat " + workspace + "/out/not-yours")
+                Expect.notEqual (exitCode run) 0 "reading through the link was refused"
+                Expect.isFalse (out.Contains "secret") "and nothing of it came back"
+                do! sandbox.Dispose ()
+             }))
         ])
