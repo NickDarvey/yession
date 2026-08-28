@@ -155,7 +155,7 @@ let
   npmDeps = pkgs.fetchNpmDeps {
     src = npmManifests;
     name = "yession-npm-deps";
-    hash = "sha256-OAaJfXve4YHULpUNnN9pWKUZXY93IIvzQq7ALWnEDn8=";
+    hash = "sha256-vgAyu7ldjj0hXW7T0cCMmsJd3+SMo19HmWpW/CmidGI=";
   };
 
   # node_modules as a Nix artifact: the offline npm tree (npmConfigHook installs it from npmDeps
@@ -170,6 +170,11 @@ let
     inherit npmDeps;
     nativeBuildInputs = [ pkgs.nodejs_24 pkgs.npmHooks.npmConfigHook ];
     npmFlags = [ "--ignore-scripts" ];
+    # A git dependency (srt, see package.json) is not a plain cached tarball: npm
+    # unpacks it through the cache rather than straight out of it, so the offline
+    # cache the hook mounts read-only has to be a writable copy. Nothing else about
+    # the install changes — the cache is still exactly `npmDeps`, still offline.
+    makeCacheWritable = true;
     dontBuild = true;
     installPhase = ''
       runHook preInstall
