@@ -622,7 +622,7 @@ module View =
     let private credentialStatus (label: string) (credential: ConnectionView) : TemplateResult =
         match credential.SignInRequired with
         | None ->
-            html $"""<span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({credential.Kind})</span>"""
+            html $"""<span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({(credential.Kind : string)})</span>"""
         | Some _ ->
             html $"""<span class="{Style.statusErr}"><span class="{Style.statusDot}"></span>{label} — {Dom.Text.signInAgainStatus}</span>"""
 
@@ -721,7 +721,7 @@ module View =
             (orphan @ offered)
             |> List.map (fun offer ->
                 let id = ModelId.value offer.Id
-                html $"""<option value="{id}" ?selected={chosen = Some offer.Id}>{offer.Name}</option>""")
+                html $"""<option value="{id}" ?selected={chosen = Some offer.Id}>{(offer.Name : string)}</option>""")
         // What the picker cannot yet offer, said rather than left as a short list nobody can
         // explain. A lookup that failed is almost always "no account connected here yet",
         // and the panel above this one is the way out of that.
@@ -740,7 +740,7 @@ module View =
                 <select id="agent-model" class="{Style.fieldSelect}"
                         data-model-select="{chosen |> Option.map ModelId.value |> Option.defaultValue Dom.Text.modelDefault}"
                         @change={EvVal(fun v -> dispatch (SetModelMsg (match ModelId.create v with Ok id -> Some id | Error _ -> None)))}>
-                  <option value="" ?selected={chosen.IsNone}>{Dom.Text.modelDefaultLabel}</option>
+                  <option value="" ?selected={(chosen.IsNone : bool)}>{Dom.Text.modelDefaultLabel}</option>
                   {options}
                 </select>
                 <span class="{Style.fieldSelectMark}">{Icon.down}</span>
@@ -821,8 +821,8 @@ module View =
                 columns
                 |> List.map (fun column ->
                     html $"""
-                        <div class="{Style.sideRow}" data-query-field="{column.Key}">
-                          <span class="{Style.statusFaint}">{column.Label}</span>
+                        <div class="{Style.sideRow}" data-query-field="{(column.Key : string)}">
+                          <span class="{Style.statusFaint}">{(column.Label : string)}</span>
                           <span class="{Style.small}">{cellText fields column}</span>
                         </div>""")
             html $"""<div class="flex flex-col gap-1">{rows}</div>"""
@@ -835,14 +835,14 @@ module View =
             let head =
                 columns
                 |> List.map (fun column ->
-                    html $"""<th scope="col" class="{Style.queryHeadCell}">{column.Label}</th>""")
+                    html $"""<th scope="col" class="{Style.queryHeadCell}">{(column.Label : string)}</th>""")
             let body =
                 rows
                 |> List.map (fun row ->
                     let cells =
                         columns
                         |> List.map (fun column ->
-                            html $"""<td class="{Style.queryCell}" data-query-cell="{column.Key}">{cellText row column}</td>""")
+                            html $"""<td class="{Style.queryCell}" data-query-cell="{(column.Key : string)}">{cellText row column}</td>""")
                     html $"""<tr>{cells}</tr>""")
             html $"""
                 <div class="{Style.queryTable}">
@@ -861,7 +861,7 @@ module View =
             let name = QueryName.value def.Name
             html $"""
                 <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-query-panel="{name}">
-                  <span class="{Style.label}">{def.Title}</span>
+                  <span class="{Style.label}">{(def.Title : string)}</span>
                   {queryValueView def.Shape (Map.tryFind name queries.Values)}
                 </section>""")
 
@@ -1111,7 +1111,7 @@ module View =
         html $"""
             <span class="{Style.remoteCursor}" data-cursor-peer="{(PeerId.value peerId : string)}" style="background:{PeerColour.translucent peerId}">
               <span class="{Style.remoteCursorCaret}" style="background:{colour}">
-                <span class="{Style.remoteCursorLabel}" style="background:{colour}">{presence.DisplayName}</span>
+                <span class="{Style.remoteCursorLabel}" style="background:{colour}">{(presence.DisplayName : string)}</span>
               </span>
             </span>"""
 
@@ -1315,8 +1315,8 @@ module View =
                     // common case, and one span per plain line is a span too many.
                     let classes = Style.ansiClasses span.Style
                     let inline' = Style.ansiInline span.Style
-                    if classes = "" && inline' = "" then html $"{span.Text}"
-                    else html $"""<span class="{classes}" style="{inline'}">{span.Text}</span>""")
+                    if classes = "" && inline' = "" then html $"{(span.Text : string)}"
+                    else html $"""<span class="{classes}" style="{inline'}">{(span.Text : string)}</span>""")
             // The newline BEFORE every line but the first, so a trailing line adds no
             // trailing blank one.
             if i = 0 then html $"{spans}" else html $"""{"\n"}{spans}""")
@@ -1376,7 +1376,7 @@ module View =
         let actNoteItem (item: ConversationItem) =
             html $"""
                 <article class="{Style.actNote}" data-message-id="{(MessageId.value item.MessageId : string)}" data-act-note data-message-author="{authorLabel item.Author}">
-                  <span class="{Style.actNoteText}">{authorName model item.Author} {item.Body}</span>
+                  <span class="{Style.actNoteText}">{authorName model item.Author} {(item.Body : string)}</span>
                 </article>"""
         let messageItem (item: ConversationItem) =
             let isAgent = (item.Author = ActorRef.Agent)
@@ -1439,7 +1439,7 @@ module View =
                         data-terminal-id="{(TerminalId.value terminalId : string)}"
                         @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (BlockTab (terminalId, blockId)))); actions.FocusPane ())}>
                   <span class="{Style.terminalPrompt}">$</span>
-                  <code class="{Style.chatChipCommand}">{block.Command}</code>
+                  <code class="{Style.chatChipCommand}">{(block.Command : string)}</code>
                   <span class="shrink-0">{terminalBlockStatus model block.Status}</span>
                 </button>"""
         let stretchItem (stretch: TerminalStretch) =
@@ -1450,7 +1450,7 @@ module View =
                         data-chat-stretch-end="{stretchEndLabel stretch.End}"
                         data-terminal-id="{(TerminalId.value stretch.TerminalId : string)}"
                         @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (StretchTab stretch))); actions.FocusPane ())}>
-                  <span class="{Style.chatChipText}">typed in {stretch.Title} for {length}</span>
+                  <span class="{Style.chatChipText}">typed in {(stretch.Title : string)} for {length}</span>
                   <span class="shrink-0">{stretchEnding model stretch.End}</span>
                 </button>"""
         // One call the agent made. No pane tab: unlike a block there is nothing recorded to
@@ -1506,11 +1506,11 @@ module View =
             // thing this line must never do.
             let count n inner = if n = 0 then Lit.nothing else inner
             let failed =
-                count tally.Failed (html $"""<span class="{Style.statusErr}">{Icon.crossSm} {tally.Failed}</span>""")
+                count tally.Failed (html $"""<span class="{Style.statusErr}">{Icon.crossSm} {(tally.Failed : int)}</span>""")
             let running =
-                count tally.Running (html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>{tally.Running}</span>""")
+                count tally.Running (html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>{(tally.Running : int)}</span>""")
             let done' =
-                count tally.Done (html $"""<span class="{Style.statusOk}">{Icon.checkSm} {tally.Done}</span>""")
+                count tally.Done (html $"""<span class="{Style.statusOk}">{Icon.checkSm} {(tally.Done : int)}</span>""")
             let counts =
                 html $"""<span class="{Style.chatTaskCounts}">{failed}{running}{done'}</span>"""
             let commands =
@@ -1736,7 +1736,7 @@ module View =
                 <summary class="{Style.terminalBlockSummary}">
                   {author}
                   <span class="{Style.terminalPrompt}">$</span>
-                  <code class="{Style.terminalCommandText}">{block.Command}</code>
+                  <code class="{Style.terminalCommandText}">{(block.Command : string)}</code>
                   {notable}
                   <span class="{Style.terminalBlockMark}" aria-hidden="true">…</span>
                 </summary>
@@ -2220,7 +2220,7 @@ module View =
                   <div class="{Style.paneFacts}">
                     <div class="{Style.terminalBlockCommand}">
                       <span class="{Style.terminalPrompt}">$</span>
-                      <code class="{Style.terminalCommandText}">{block.Command}</code>
+                      <code class="{Style.terminalCommandText}">{(block.Command : string)}</code>
                       <span class="ml-auto shrink-0">{terminalBlockStatus model block.Status}</span>
                     </div>
                   </div>
@@ -2255,7 +2255,7 @@ module View =
               <div class="{Style.paneFacts}" data-pane-stretch="{TerminalStretch.key stretch}">
                 <div class="{Style.terminalQueuedRow}">
                   <span class="{Style.chatChipWho}">{authorName model stretch.Holder}</span>
-                  <span class="{Style.small}">typed in {stretch.Title} for {length}</span>
+                  <span class="{Style.small}">typed in {(stretch.Title : string)} for {length}</span>
                   <span class="ml-auto shrink-0">{stretchEnding model stretch.End}</span>
                 </div>
                 {recording}
@@ -2473,7 +2473,7 @@ module View =
             let affords = ClientModel.affordances view model
             let truncated =
                 if view.DroppedBytes > 0 then
-                    html $"""<div class="{Style.terminalTruncated}" data-terminal-truncated="{string view.DroppedBytes}">{view.DroppedBytes} bytes dropped</div>"""
+                    html $"""<div class="{Style.terminalTruncated}" data-terminal-truncated="{string view.DroppedBytes}">{(view.DroppedBytes : int)} bytes dropped</div>"""
                 else Lit.nothing
             let blocks =
                 // An idle prompt IS the empty state a terminal-shaped surface already has a
