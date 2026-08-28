@@ -1320,7 +1320,112 @@ let benchPublish (label: string) =
     File.WriteAllText (benchSvg, renderChart history)
     printfn "bench-publish: recorded %s on `%s` (%d points) -> %s" label benchBranch (List.length history) benchSvg
 
-// --- lint: the GitHub Actions workflows -------------------------------------------------------
+// --- lint: static checks the ordinary build cannot make ---------------------------------------
+
+// Run a command capturing stdout AND its exit code. Everywhere else in this file a non-zero
+// exit is a build failure; here one of the two runs is SUPPOSED to fail, and what it printed
+// while failing is the thing being checked.
+let private runCapturing (command: string) (arguments: string list) : int * string =
+    let psi = ProcessStartInfo (command)
+    arguments |> List.iter psi.ArgumentList.Add
+    psi.WorkingDirectory <- repoRoot
+    psi.RedirectStandardOutput <- true
+    psi.RedirectStandardError <- true
+    use p = Process.Start psi
+    let output = p.StandardOutput.ReadToEnd () + p.StandardError.ReadToEnd ()
+    p.WaitForExit ()
+    p.ExitCode, output
+
+/// Every project the solution knows about. Read from Yession.slnx rather than listed here so
+/// that a project added tomorrow is analyzed tomorrow — a hand-kept list would let a new
+/// template-bearing project opt out of the rule by being forgotten.
+let private solutionProjects () =
+    let slnx = File.ReadAllText (Path.Combine (repoRoot, "Yession.slnx"))
+    [ for m in Text.RegularExpressions.Regex.Matches (slnx, "Path=\"([^\"]+)\"") -> m.Groups.[1].Value ]
+
+let private analyzerOutput =
+    Path.Combine (repoRoot, "analyzers", "Yession.Analyzers", "bin", "Release", "net10.0")
+
+let private fixtureProject =
+    Path.Combine ("analyzers", "fixtures", "TemplateHoleFixture", "TemplateHoleFixture.fsproj")
+
+let private fixtureSource =
+    Path.Combine (repoRoot, "analyzers", "fixtures", "TemplateHoleFixture", "Holes.fs")
+
+/// The CLI answers by EXITING non-zero, and it does that for two different reasons: it
+/// reported something, or it fell over. Those must not read the same. It reads a project by
+/// COMPILING it, and asking the typed tree about an expression the compiler only got through
+/// by error recovery throws out of FCS — so an unrestored project takes the whole run down.
+/// A run that died judged nothing, and reporting it as "a hole renders the wrong thing" sends
+/// the next reader to a template that is fine.
+let private analyze (projects: string list) =
+    let code, output =
+        runCapturing
+            "dotnet"
+            [ "fsharp-analyzers"
+              for p in projects do
+                  "--project"
+                  p
+              "--analyzers-path"
+              analyzerOutput ]
+
+    if output.Contains "critical: Unhandled exception" then
+        printfn "%s" output
+        failwith "lint: the analyzer died reading these projects, so it has judged no template hole either way"
+
+    code, output
+
+/// The lines a diagnostic was reported on, whatever else it said. Enough to compare against
+/// the fixture's markers and nothing more: pinning the message text would make every reword
+/// of it a failure of the rule.
+let private reportedLines (output: string) =
+    [ for m in Text.RegularExpressions.Regex.Matches (output, @"Holes\.fs\((\d+),") -> int m.Groups.[1].Value ]
+    |> List.distinct
+    |> List.sort
+
+// `analyzers/Yession.Analyzers` reads the typed tree for the one thing the compiler will not
+// say: what a Lit template hole renders (see TemplateHoles.fs for why it cannot). It is run
+// here rather than in `check` because it is the same shape of check as actionlint — source
+// judged without running it — and because the PR gate runs `lint` first, where a rule this
+// cheap belongs.
+//
+// Two runs, and the second is the one that keeps the first honest. The product must be clean;
+// the FIXTURE must report exactly the holes it marks `// YES001`. Without that second run a
+// rule that had stopped seeing anything — a loader that no longer matches the assembly name, a
+// typed-tree shape moved by a compiler upgrade, a project that failed to restore — would
+// report a clean product and pass.
+let private analyzers () =
+    restore ()
+    exec "dotnet" [ "build"; "analyzers/Yession.Analyzers/Yession.Analyzers.fsproj"; "-c"; "Release" ]
+    // Both restores are load-bearing, and the solution one is easy to think redundant on a
+    // machine that has built before. It is not: `lint` runs FIRST in the PR gate, on a fresh
+    // checkout where nothing has restored anything, and a project whose references have not
+    // resolved compiles only through error recovery — which is the one thing the typed-tree
+    // API cannot be asked about. The fixture is not in the solution, so it needs its own.
+    exec "dotnet" [ "restore"; "Yession.slnx" ]
+    exec "dotnet" [ "restore"; fixtureProject ]
+
+    let code, output = analyze (solutionProjects ())
+    if code <> 0 then
+        printfn "%s" output
+        failwith "lint: a template hole renders something Lit cannot be trusted to render"
+
+    let expected =
+        File.ReadAllLines fixtureSource
+        |> Array.indexed
+        |> Array.filter (fun (_, line) -> line.EndsWith "// YES001")
+        |> Array.map (fun (i, _) -> i + 1)
+        |> List.ofArray
+
+    let _, fixtureOutput = analyze [ fixtureProject ]
+    let actual = reportedLines fixtureOutput
+
+    if actual <> expected then
+        printfn "%s" fixtureOutput
+        failwithf
+            "lint: the template-hole rule is not seeing what it should. Holes.fs marks lines %A; the analyzer reported %A"
+            expected
+            actual
 
 // A workflow file is only validated by GitHub when it RUNS. release.yml runs on master — after a
 // PR has merged — so a syntax error in it is invisible to PR CI and lands already broken: a
@@ -1328,7 +1433,9 @@ let benchPublish (label: string) =
 // release failed at startup (zero jobs) until it was fixed. actionlint parses every workflow and
 // type-checks its expressions, so the PR gate can catch that class of break before it merges.
 // Run from repoRoot with no arguments, it finds .github/workflows itself.
-let lint () = exec "actionlint" []
+let lint () =
+    exec "actionlint" []
+    analyzers ()
 
 // --- clean -----------------------------------------------------------------------------------
 

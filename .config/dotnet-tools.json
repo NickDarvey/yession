@@ -2,6 +2,13 @@
   "version": 1,
   "isRoot": true,
   "tools": {
+    "fsharp-analyzers": {
+      "version": "0.37.2",
+      "commands": [
+        "fsharp-analyzers"
+      ],
+      "rollForward": false
+    },
     "fable": {
       "version": "5.13.0",
       "commands": [

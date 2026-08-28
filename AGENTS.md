@@ -293,16 +293,29 @@ check Jumpstarter            # + our MCP client driven against the Python exampl
 verify                       # == check Browser Ports Native Docker LiveAgent Keyring Nix Srt
                              #    Pty Serial Jumpstarter. Release gate; what CI runs on master.
                              #    Takes check's trailing args, so `verify --only "<text>"` works.
-lint                         # actionlint over .github/workflows. Runs first in the PR gate.
+lint                         # actionlint over .github/workflows, then the F# analyzers over
+                             #   every project in Yession.slnx. Runs first in the PR gate.
 check --only "<text>"        # narrow BOTH runtimes to cases whose full name contains <text>.
                              #   Buys back the RUNNING, not the compiling: 66s -> 44s on the
                              #   cheap tier, and far more on a tier that spawns browsers.
 ```
 
-`lint` is separate from `check` because it guards a different thing: GitHub only validates a
-workflow file when it RUNS, and `release.yml` runs on master — after a merge — so a syntax
-error there is invisible to PR CI and lands already broken. The PR gate runs `lint` first to
-catch that class of break in seconds.
+`lint` is separate from `check` because it guards a different thing: source judged without
+running it, where running it would never reach the fault. GitHub only validates a workflow file
+when it RUNS, and `release.yml` runs on master — after a merge — so a syntax error there is
+invisible to PR CI and lands already broken. And a Lit template hole (`html $"""{x}"""`) is
+boxed before Lit sees it, so a record or a union in one renders whatever it happens to
+stringify — no test of the model can see it and no compiler warning covers it (FS3579 fires on
+every hole and its only remedy, `%s`, is FS3376-illegal in a `FormattableString`). The typed
+tree still knows, so `analyzers/Yession.Analyzers` asks it: the reasoning is in
+`TemplateHoles.fs`, and the rule's own eyesight is checked every run against
+`analyzers/fixtures/TemplateHoleFixture`, whose holes say in the source which of them must be
+reported.
+
+**Adding a renderable type is deliberate.** The allow-list is closed — string, `TemplateResult`,
+a sequence of them, a listener, `int`, `bool` — so a hole holding anything else is an error
+until somebody widens the list and says in the fixture what widening it means. That is the
+point: the failure mode of this rule is silence, and a closed list fails loudly.
 
 ### Running a tier this box cannot host (`verify.yml`, on demand)
 

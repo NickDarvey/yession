@@ -38,6 +38,10 @@
     <PackageVersion Include="Thoth.Json.Net" Version="12.0.0" />
     <!-- Real-browser E2E driver (CLR-only; the test project's .NET run uses it). -->
     <PackageVersion Include="Microsoft.Playwright" Version="1.61.0" />
+    <!-- The F# analyzer SDK: the typed-tree API `analyzers/Yession.Analyzers` reads, and
+         the `fsharp-analyzers` CLI that loads it (same version, see .config/dotnet-tools.json
+         — the loader refuses an analyzer built against a different SDK). -->
+    <PackageVersion Include="FSharp.Analyzers.SDK" Version="0.37.2" />
     <!-- Test stack (versions taken from the dotnet xunit template for net10.0). -->
     <PackageVersion Include="coverlet.collector" Version="6.0.4" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />

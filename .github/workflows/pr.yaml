@@ -83,10 +83,13 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
-      # First, and cheap: actionlint over .github/workflows. release.yml only runs on master, so
-      # nothing else here would notice it was broken until after a merge — which is exactly how a
-      # colon-space in an unquoted step name once took every master release down at startup.
-      - name: Lint the workflows (release.yml is only exercised on master)
+      # First, and cheap: source judged without running it. actionlint over .github/workflows —
+      # release.yml only runs on master, so nothing else here would notice it was broken until
+      # after a merge, which is exactly how a colon-space in an unquoted step name once took
+      # every master release down at startup — and then the F# analyzers, which read the typed
+      # tree for what a Lit template hole renders (nothing the compiler will say; see
+      # analyzers/Yession.Analyzers/TemplateHoles.fs).
+      - name: Lint the workflows and analyze the templates
         run: devenv shell -- lint
       # srt's strict profile drops capabilities and mounts a fresh /proc through a NESTED user
       # namespace, and Ubuntu 24.04 ships `kernel.apparmor_restrict_unprivileged_userns=1`,
