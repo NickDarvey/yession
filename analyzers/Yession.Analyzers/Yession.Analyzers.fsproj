@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    A dev-time analyzer, not a product assembly: `lint` builds it, points the
+    `fsharp-analyzers` CLI at this output directory and throws it away. It is in
+    Yession.slnx so that the Nix NuGet fixed-output derivation, which restores the
+    solution, has its packages — off that list it would restore from the network
+    inside a build that has none.
+
+    The assembly name is load-bearing: the SDK's loader scans `*Analyzer*.dll`, so a
+    rename that drops that substring turns the whole rule off silently — the CLI says
+    so only in a line nobody reads ("Registered 0 analyzers"). That is what the
+    fixture in ../fixtures is for.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- The CLI loads this assembly out of its output folder, so its dependencies
+         (the SDK, FCS) have to be sitting next to it rather than resolved from a
+         NuGet cache the tool knows nothing about. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="TemplateHoles.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.Analyzers.SDK" />
+  </ItemGroup>
+
+</Project>

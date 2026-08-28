@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Not a product project and deliberately not in Yession.slnx: every hole below is
+    there to be judged, and half of them are meant to fail. `lint` analyzes it on its
+    own and checks the verdicts against the `// YES001` markers in the source.
+
+    It exists because the failure mode of a rule like this is silence. "Registered 0
+    analyzers", a loader that stopped matching the assembly name, a typed-tree shape
+    that moved under a compiler upgrade — each of those reports a clean run over the
+    whole product, and nothing else in the build would notice.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Holes.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fable.Core" />
+    <PackageReference Include="Fable.Lit" />
+  </ItemGroup>
+
+</Project>
