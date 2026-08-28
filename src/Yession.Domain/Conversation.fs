@@ -208,12 +208,26 @@ module ConversationProjection =
                 | names, Some owner ->
                     sprintf ", forwarding %s from %s" (String.concat ", " names) (ActorRef.token owner)
                 | names, None -> sprintf ", forwarding %s" (String.concat ", " names)
+            // And where this host could not give what the sandbox's resources named. On the
+            // start line rather than a note of its own, because it is a property of THIS
+            // sandbox coming up — a separate item would be a second thing to correlate, and
+            // the correlation is the whole content of it.
+            let realisation =
+                match s.Realisation with
+                | [] -> ""
+                | lines -> sprintf ". Where this host could not give exactly what was asked: %s" (String.concat "; " lines)
             { proj with
                 Items =
                     proj.Items
                     @ [ { MessageId = s.MessageId
                           Author = s.Actor
-                          Body = sprintf "started sandbox %s (%s)%s" (SandboxRef.render s.Sandbox) s.Backend forwarded
+                          Body =
+                            sprintf
+                                "started sandbox %s (%s)%s%s"
+                                (SandboxRef.render s.Sandbox)
+                                s.Backend
+                                forwarded
+                                realisation
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
                           Offset = envelope.Offset

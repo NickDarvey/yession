@@ -35,7 +35,16 @@ module SessionEnvironment =
           /// Stop the environment if it is running (recorded as events).
           Stop : unit -> Async<unit>
           /// The running sandbox's backend reference, if any.
-          CurrentRef : unit -> string option }
+          CurrentRef : unit -> string option
+          /// Where the RUNNING sandbox holds something other than what its resources named,
+          /// one line each, empty when this host gave the whole of it.
+          ///
+          /// Read off the policy the sandbox was built from, and kept beside the sandbox for
+          /// the same reason `verify` takes that policy: a backend that quietly widened
+          /// something would otherwise be asked to report on itself. Empty while nothing is
+          /// running, because a sandbox that does not exist holds nothing — never the last
+          /// one's answer.
+          Realisation : unit -> string list }
 
     /// A session with no environment: needs are recorded as unavailable without any
     /// sandbox existing in the Process.
@@ -44,7 +53,8 @@ module SessionEnvironment =
           Spawn = fun _ _ -> async { return Error "this session has no environment" }
           SpawnPty = fun _ _ _ _ -> async { return Error "this session has no environment" }
           Stop = fun () -> async { return () }
-          CurrentRef = fun () -> None }
+          CurrentRef = fun () -> None
+          Realisation = fun () -> [] }
 
     /// Run this sandbox's own checks in it, once, before anybody else can reach it.
     ///
@@ -90,7 +100,10 @@ module SessionEnvironment =
         (environmentId: string)
         : SessionEnvironment =
 
-        let mutable running : Sandbox option = None
+        // The sandbox and what this host made of its grant, together in ONE cell. Two
+        // mutables would be two things a stop has to remember to clear, and the one that got
+        // forgotten would be a closed sandbox still answering for what it used to hold.
+        let mutable running : (Sandbox * string list) option = None
 
         let append event =
             async {
@@ -171,7 +184,8 @@ module SessionEnvironment =
                             | Error reason -> return Error reason
                             | Ok (policy, sandbox) ->
                                 match! verify policy sandbox with
-                                | Ok () -> return Ok sandbox
+                                | Ok () ->
+                                    return Ok (sandbox, policy.Realisation |> List.map RealisedClosure.describeDifference)
                                 | Error reason ->
                                     // Disposed rather than left running. A sandbox that
                                     // failed its own checks is not a sandbox anybody should
@@ -180,8 +194,8 @@ module SessionEnvironment =
                                     return Error reason
                         }
                     match prepared with
-                    | Ok sandbox ->
-                        running <- Some sandbox
+                    | Ok (sandbox, realisation) ->
+                        running <- Some (sandbox, realisation)
                         do! need ()
                         do! requested ()
                         do! append (EnvironmentStarted
@@ -213,7 +227,7 @@ module SessionEnvironment =
             async {
                 match running with
                 | None -> return ()
-                | Some sandbox ->
+                | Some (sandbox, _) ->
                     do! append (EnvironmentStopRequested { EnvironmentId = environmentId })
                     do! sandbox.Dispose ()
                     running <- None
@@ -224,14 +238,14 @@ module SessionEnvironment =
             async {
                 match running with
                 | None -> return Error "no running environment"
-                | Some sandbox -> return! sandbox.Spawn exec onChunk
+                | Some (sandbox, _) -> return! sandbox.Spawn exec onChunk
             }
 
         let spawnPty (exec: SandboxExec) (cols: int) (rows: int) (onOutput: string -> unit) =
             async {
                 match running with
                 | None -> return Error "no running environment"
-                | Some sandbox ->
+                | Some (sandbox, _) ->
                     match sandbox.SpawnPty with
                     | None -> return Error "this backend cannot open a pseudo-terminal"
                     | Some spawn -> return! spawn exec cols rows onOutput
@@ -241,4 +255,5 @@ module SessionEnvironment =
           Spawn = spawn
           SpawnPty = spawnPty
           Stop = stop
-          CurrentRef = fun () -> running |> Option.map (fun s -> s.Ref) }
+          CurrentRef = fun () -> running |> Option.map (fun (sandbox, _) -> sandbox.Ref)
+          Realisation = fun () -> running |> Option.map snd |> Option.defaultValue [] }

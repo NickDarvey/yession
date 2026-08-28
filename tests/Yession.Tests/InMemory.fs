@@ -212,7 +212,8 @@ let tests =
                             }
                       SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
                       Stop = fun () -> async { return () }
-                      CurrentRef = fun () -> Some name }
+                      CurrentRef = fun () -> Some name
+                      Realisation = fun () -> [] }
                 let makeSandboxes log =
                     WorkSandboxes.create
                         { Backend = "scripted"
@@ -266,7 +267,8 @@ let tests =
                             }
                       SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
                       Stop = fun () -> async { return () }
-                      CurrentRef = fun () -> Some "scripted" }
+                      CurrentRef = fun () -> Some "scripted"
+                      Realisation = fun () -> [] }
                 let! host = Host.startWithEnvironment None (Some (fun _ -> WorkSandboxes.singleton "scripted" environment)) None (sid ()) 0
                 let! a = connectInMemoryClient host "ada" "Ada"
                 let! b = connectInMemoryClient host "bob" "Bob"
@@ -348,7 +350,8 @@ let tests =
                             }
                       SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
                       Stop = fun () -> async { return () }
-                      CurrentRef = fun () -> Some "scripted" }
+                      CurrentRef = fun () -> Some "scripted"
+                      Realisation = fun () -> [] }
                 let! host = Host.startWithEnvironment None (Some (fun _ -> WorkSandboxes.singleton "scripted" environment)) None (sid ()) 0
                 // No terminal is open, so the FIRST call opens the agent's own — titled with
                 // what it is for, and in `AutoRun`, which is what keeps the agent's autonomy
@@ -410,7 +413,8 @@ let tests =
                             }
                       SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
                       Stop = fun () -> async { return () }
-                      CurrentRef = fun () -> Some "scripted" }
+                      CurrentRef = fun () -> Some "scripted"
+                      Realisation = fun () -> [] }
                 let! host = Host.startWithEnvironment None (Some (fun _ -> WorkSandboxes.singleton "scripted" environment)) None (sid ()) 0
                 let! held = host.Terminals.OpenAgentTerminal SandboxRef.defaultRef "holds"
                 let! frees = host.Terminals.OpenAgentTerminal SandboxRef.defaultRef "frees"
@@ -467,7 +471,8 @@ let tests =
                             }
                       SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
                       Stop = fun () -> async { return () }
-                      CurrentRef = fun () -> Some "scripted" }
+                      CurrentRef = fun () -> Some "scripted"
+                      Realisation = fun () -> [] }
                 let! host = Host.startWithEnvironment None (Some (fun _ -> WorkSandboxes.singleton "scripted" environment)) None (sid ()) 0
                 let! a = connectInMemoryClient host "ada" "Ada"
                 a.Connection.OpenTerminal "build"

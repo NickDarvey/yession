@@ -243,6 +243,7 @@ let private frameSerializationTests =
                       Backend = "srt"
                       Forwarded = [ "github" ]
                       CredentialOwner = Some (UserRef (UserId.create "alice" |> expect))
+                      Realisation = [ "the socket at /run/docker.sock — this host cannot scope that" ]
                       Actor = ActorRef.Agent }
                   WorkSandboxStarted
                     { MessageId = messageId
@@ -250,6 +251,7 @@ let private frameSerializationTests =
                       Backend = "host"
                       Forwarded = []
                       CredentialOwner = None
+                      Realisation = []
                       Actor = PeerRef peerId }
                   WorkSandboxStopped { MessageId = messageId; Sandbox = SandboxRef.parse "test" |> expect; Actor = ActorRef.Agent }
                   // The shell profile (Plan 25): both cases, because a set and a clear are
@@ -336,6 +338,10 @@ let private frameSerializationTests =
                       Backend = "srt"
                       Forwarded = []
                       CredentialOwner = None
+                      // A start recorded before the host became an author of a grant. Absent
+                      // reads as "nothing was measured", which is the only honest answer for
+                      // a sandbox nobody asked the question about.
+                      Realisation = []
                       Actor = ActorRef.Agent })
                 "a bare name is the sandbox the session itself owns"
     ]

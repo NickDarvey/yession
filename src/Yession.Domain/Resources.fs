@@ -378,10 +378,16 @@ module RealisedClosure =
         | LeafRealisation.Withheld because ->
             sprintf "%s — not granted: %s" described because
 
+    /// One difference, said. Public because a policy carries its differences as pairs — the
+    /// backend has to act on them, not read them — and whoever reports one is holding the
+    /// pair rather than the closure it came out of.
+    let describeDifference (leaf: ResourceLeaf, outcome: LeafRealisation) : string =
+        line (ResourceLeaf.describe leaf) outcome
+
     /// One line per difference, for a person. The same rendering wherever it is shown, for the
     /// reason `ResourceClosure.describe` is here rather than in a view.
     let describeDifferences (realised: RealisedClosure) : string list =
-        differences realised |> List.map (fun (leaf, outcome) -> line (ResourceLeaf.describe leaf) outcome)
+        differences realised |> List.map describeDifference
 
     /// What a human approves, one line per leaf, as THIS host will actually grant it.
     ///

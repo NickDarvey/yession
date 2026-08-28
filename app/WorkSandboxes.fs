@@ -121,7 +121,8 @@ let private missing (name: SandboxRef) : SessionEnvironment.SessionEnvironment =
       Spawn = fun _ _ -> async { return Error reason }
       SpawnPty = fun _ _ _ _ -> async { return Error reason }
       Stop = fun () -> async { return () }
-      CurrentRef = fun () -> None }
+      CurrentRef = fun () -> None
+      Realisation = fun () -> [] }
 
 let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
     // `default` exists from boot, because it is the sandbox every session has always had:
@@ -237,6 +238,11 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                                           Forwarded = wanted.Forward
                                           CredentialOwner =
                                             (if List.isEmpty wanted.Forward then None else Some caller.Credential)
+                                          // Asked of the environment that just came up, not
+                                          // computed here: what a sandbox holds is settled by
+                                          // the policy it was built from, and this manager
+                                          // never sees one.
+                                          Realisation = environment.Realisation ()
                                           Actor = caller.Actor })
                             return Ok entry
         }
@@ -367,6 +373,10 @@ let private queryDef : QueryDef =
               QueryColumn.create "runs" "runs"
               QueryColumn.create "state" "state"
               QueryColumn.create "forwarding" "forwarding"
+              // What this host could not give exactly. Absent is the ordinary case and says
+              // nothing — a column reading "none" on every row is a column people stop
+              // seeing, and this one is worth seeing on the day it is not empty.
+              QueryColumn.create "degraded" "degraded"
               QueryColumn.create "started_by" "started by"
               QueryColumn.create "started_at" "started" ] }
 
@@ -402,6 +412,14 @@ let query (current: unit -> WorkSandboxes) : Queries.QueryRegistration =
                               (match entry.Request.Forward with
                                | [] -> CellText "nothing"
                                | names -> CellText (String.concat ", " names))
+                              // From the RUNNING sandbox, like `state` above and for the same
+                              // reason: what a sandbox holds is a fact about the one that
+                              // exists, and a stopped entry that still claimed a widening
+                              // would be the panel disagreeing with the machine.
+                              "degraded",
+                              (match entry.Environment.Realisation () with
+                               | [] -> CellAbsent
+                               | lines -> CellText (String.concat "; " lines))
                               "started_by",
                               (match entry.StartedBy with
                                | Some actor -> CellText (ActorRef.token actor)
