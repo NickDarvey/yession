@@ -159,14 +159,17 @@ running set and hands you that quiet moment.
 
 ### Addressing
 
+A deployment is **loopback** (development: nothing set, everything on `127.0.0.1`) or
+**fronted** (deployment: both set, everything public). There is no half shape — a half-set
+pair is refused at boot, because either half alone points somebody at a loopback address:
+sessions without their issuer bounce every remote login to `127.0.0.1`, and a public issuer
+without fronted sessions registers session addresses and OAuth callbacks nobody remote can
+reach.
+
 ```sh
 YESSION_MANAGER_URL=https://example.com          # the Manager: scheme + host, no path
 YESSION_SESSION_URL=https://example.com/s/{id}   # sessions: a template
 ```
-
-Set **both or neither**. Sessions reachable remotely while the Manager that authorizes their
-users answers only on loopback would bounce every remote login to `127.0.0.1`, so that
-combination is refused at boot rather than shipped as a surprise.
 
 #### The Manager
 
@@ -190,7 +193,6 @@ port), exactly the two facts the registry stream publishes. Any proxy driven by 
 can implement any template written with them.
 
 ```sh
-# unset                                       -> http://127.0.0.1:{port}   loopback default
 YESSION_SESSION_URL=https://example.com:{port}         # a port mirrored per session
 YESSION_SESSION_URL=https://{id}.sessions.example.com  # a subdomain per session
 YESSION_SESSION_URL=https://example.com/s/{id}         # a path per session

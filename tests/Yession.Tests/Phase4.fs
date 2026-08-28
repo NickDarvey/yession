@@ -1908,7 +1908,7 @@ let private publicAccessTests =
         // a client's offer to reopen a stopped session cannot point somewhere the login
         // bounce does not.
         testCase "managerUrlOr: a configured public origin always beats the caller's endpoint" <| fun () ->
-            let fronted = PublicAccess.create "https://yession.example.com" "" |> expect
+            let fronted = PublicAccess.create "https://yession.example.com" "https://{id}.example.com" |> expect
             Expect.equal
                 (PublicAccess.managerUrlOr (Some "http://127.0.0.1:8321") fronted)
                 (Some "https://yession.example.com")
@@ -1925,18 +1925,17 @@ let private publicAccessTests =
             let loopback = PublicAccess.create "" "" |> expect
             Expect.equal (PublicAccess.managerUrlOr None loopback) None "a session with no Manager has nowhere to send anyone"
 
-        testCase "a fronted Manager with loopback sessions is a legal deployment" <| fun () ->
-            let access = PublicAccess.create "https://yession.example.com/" "" |> expect
-            Expect.equal (PublicAccess.managerUrl access) (Some "https://yession.example.com") "trailing slash normalised"
-            Expect.equal
-                (PublicAccess.sessionAddress sessionId 54321 access)
-                { Url = "http://127.0.0.1:54321"; Mount = "" }
-                "manage remotely, use sessions on the host — sessions stay loopback"
+        testCase "a fronted Manager without fronted sessions is refused, not half-deployed" <| fun () ->
+            // The mirror of the case below: a public issuer would register loopback
+            // session addresses and OAuth callbacks nobody remote can reach.
+            let message = errorOf "https://yession.example.com/" ""
+            Expect.isTrue (message.Contains "YESSION_SESSION_URL") "the message names the missing variable"
+            Expect.isTrue (message.Contains "127.0.0.1") "and why it cannot work"
 
         testCase "sessions fronted without the Manager is refused, not warned about" <| fun () ->
             // Always broken: the session bounces its users to the Manager to log in, so a
-            // remote browser would be sent to 127.0.0.1. The one combination with no
-            // constructor.
+            // remote browser would be sent to 127.0.0.1. A half-set pair has no
+            // constructor in either direction.
             let message = errorOf "" "https://home.example.ts.net:{port}"
             Expect.isTrue (message.Contains "YESSION_MANAGER_URL") "the message names the missing variable"
             Expect.isTrue (message.Contains "127.0.0.1") "and why it cannot work"
@@ -1990,9 +1989,6 @@ let private publicAccessTests =
             // The zero-config default is the one that most needs to say so, because it is
             // what someone gets without having thought about addressing at all.
             Expect.isFalse (PublicAccess.sessionAddressIsStable Loopback) "loopback is 127.0.0.1:{port}"
-            Expect.isFalse
-                (PublicAccess.sessionAddressIsStable (PublicAccess.create "https://example.com" "" |> expect))
-                "a fronted Manager with unfronted sessions still serves them on loopback ports"
 
         testCase "the auth cookie is scoped to the path the session is served under" <| fun () ->
             // A real narrowing where sessions share a host: a path-mounted session's
@@ -2015,14 +2011,17 @@ let private publicAccessTests =
             // Its routes are origin-anchored and its issuer is a concatenation base, so a
             // path would work only if the proxy stripped it again — refused rather than
             // shipped as an unverified maybe.
+            // A session URL rides along so the ORIGIN error is the one under test, not
+            // the half-set refusal.
+            let sessions = "https://{id}.example.com"
             Expect.isTrue
-                ((errorOf "https://example.com/yession" "").Contains "origin root")
+                ((errorOf "https://example.com/yession" sessions).Contains "origin root")
                 "a path prefix on the Manager is refused"
             Expect.isTrue
-                ((errorOf "https://{id}.example.com" "").Contains "placeholder")
+                ((errorOf "https://{id}.example.com" sessions).Contains "placeholder")
                 "the Manager is one address, so a placeholder means nothing"
             Expect.isTrue
-                ((errorOf "example.com" "").Contains "http://")
+                ((errorOf "example.com" sessions).Contains "http://")
                 "a scheme is required"
     ]
 

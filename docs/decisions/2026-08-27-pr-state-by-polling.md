@@ -93,9 +93,12 @@ rule being bent for it.
 - **The dispatching service existing.** Then `FetchPr` gains a second implementation, and
   polling becomes the fallback for deployments that do not use it — not deleted, because
   a self-hosted operator with no relay still needs it.
-- **Manager ingress becoming ordinary.** If the Manager ever grows a public inbound surface
-  for its own reasons, the calculus above changes — though the admin-permission problem
-  does not, so App-level delivery would still be the mechanism.
+- **Session-direct ingress under the fronted shape.** A fronted session is publicly
+  addressable already, so a hook could POST straight at a `/hooks/<token>` route the
+  session serves and verifies itself — no Manager involvement at all. The
+  admin-permission problem does not move, so App-level delivery would still be the
+  mechanism; the shape that would have needed the Manager to relay
+  ([ADR](2026-08-28-deployment-fronts-everything-or-nothing.md)) no longer exists.
 - **GitHub streaming PR state.** If the provider offered a subscription a client could hold
   open, this becomes the reconnect path rather than the mechanism.
 - **A watcher that needs seconds, not a minute.** The interval is a constant with an

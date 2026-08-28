@@ -745,7 +745,13 @@ Items are roughly ordered by how much they matter.
 - **Multi-node operation and work-intake integrations (Slack/Linear)** remain out of
   scope, as planned. (Terminals landed as Plan 13 and remote access as Plans 09/10/12 —
   what is still out of scope there is a session that runs on a machine other than its
-  Manager's.)
+  Manager's.) With the deployment shapes reduced to loopback and fronted
+  ([ADR](decisions/2026-08-28-deployment-fronts-everything-or-nothing.md)), the remaining
+  centralisation is the connection broker's single refresher: a provider that rotates
+  refresh tokens on use makes two nodes sharing one stored grant a race the second node
+  loses (`app/Broker.fs`, the in-flight map's reason for existing). The sketched exit is
+  per-node grants — each node its own sign-in, nothing replicated — and it is deliberately
+  a follow-up, not built.
 
 ## Testing debt
 
