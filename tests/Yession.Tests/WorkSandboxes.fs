@@ -48,14 +48,20 @@ let private workingIn (dir: string) : SandboxRequest =
 /// A stand-in environment that records nothing but whether it is up. The registry's
 /// contract is about WHICH environments exist and what they were built with, so a real
 /// sandbox would only add a process to the test.
-let private fakeEnvironment () =
+let private fakeEnvironmentHolding (realisation: string list) =
     let mutable running = false
     ({ Ensure = fun _ _ -> async { running <- true; return EnvironmentAvailable }
        Spawn = fun _ _ -> async { return Error "not under test" }
        SpawnPty = fun _ _ _ _ -> async { return Error "not under test" }
        Stop = fun () -> async { running <- false }
-       CurrentRef = fun () -> if running then Some "fake" else None }
+       CurrentRef = fun () -> if running then Some "fake" else None
+       // Gated on `running` like `CurrentRef` beside it, because the real one is: what a
+       // sandbox holds is a fact about a sandbox that exists. A fake that answered either way
+       // would let the listing test pass while the panel spoke for a sandbox that had gone.
+       Realisation = fun () -> if running then realisation else [] }
      : SessionEnvironment.SessionEnvironment)
+
+let private fakeEnvironment () = fakeEnvironmentHolding []
 
 /// A registry over fake environments, plus the record of what each was BUILT with — which
 /// is where a forwarded credential would have to appear, and the only place it may.
@@ -75,6 +81,17 @@ let private registryWithSpecs (log: EventLog<SessionEvent>) (credentials: WorkSa
               Clock = fixedClock }
         |> expect
     sandboxes, built, specs
+
+/// A registry whose sandboxes all come up holding something wider than they asked for —
+/// what a host that could not scope a grant hands back.
+let private registryHolding (log: EventLog<SessionEvent>) (realisation: string list) =
+    WorkSandboxes.create
+        { Backend = "fake"
+          Credentials = []
+          Create = fun _ _ _ -> Ok (fakeEnvironmentHolding realisation)
+          Log = log
+          Clock = fixedClock }
+    |> expect
 
 /// The same, for the cases that only care about the environment a sandbox was built with.
 let private registry (log: EventLog<SessionEvent>) (credentials: WorkSandboxes.CredentialSource list) =
@@ -262,6 +279,25 @@ let private ensureTests =
                     Expect.isTrue (reason.Contains "ghost") "it names the sandbox"
                     Expect.isTrue (reason.Contains "start_work_sandbox") "and how to get one"
             }
+
+        // What the sandbox HOLDS is asked of the sandbox. This manager never sees a policy —
+        // it hands a spec to a backend and is told an environment came up — so the one thing
+        // it could have done wrong here is compute an answer of its own, and the one thing
+        // that makes the log worth reading is that it did not.
+        testCaseAsync "a start records where this host could not give what the sandbox asked for" <|
+            async {
+                let log = newLog ()
+                let sandboxes = registryHolding log [ "the socket at /run/docker.sock — this host cannot scope that, so the sandbox gets any unix socket on this host" ]
+                let! _ = sandboxes.Ensure caller (sandbox "test") SandboxRequest.defaults
+                let! events = eventsOf log
+                match startedEvents events with
+                | [ started ] ->
+                    Expect.equal
+                        started.Realisation
+                        [ "the socket at /run/docker.sock — this host cannot scope that, so the sandbox gets any unix socket on this host" ]
+                        "the environment's own answer, unedited"
+                | other -> failwithf "expected one start, got %A" other
+            }
     ]
 
 // --- credentials ----------------------------------------------------------------------------
@@ -394,6 +430,44 @@ let private queryTests =
                 | Ok other -> failwithf "expected rows, got %A" other
             }
 
+        // The panel's half of the degraded story. A sandbox that came up holding something
+        // wider than its resources named says so where somebody looking at their session can
+        // see it, without reading the log back.
+        testCaseAsync "a running sandbox says in the listing where it holds more than was asked" <|
+            async {
+                let log = newLog ()
+                let sandboxes = registryHolding log [ "the socket at /run/docker.sock — this host cannot scope that, so the sandbox gets any unix socket on this host" ]
+                let registration = WorkSandboxes.query (fun () -> sandboxes)
+                let! _ = sandboxes.Ensure caller (sandbox "test") SandboxRequest.defaults
+                match! registration.Read () with
+                | Error e -> failwithf "the query failed: %s" e
+                | Ok (RowsOf rows) ->
+                    let test = rows |> List.find (fun row -> row |> List.contains ("name", CellText "test"))
+                    match test |> List.tryFind (fst >> (=) "degraded") |> Option.map snd with
+                    | Some (CellText said) ->
+                        Expect.isTrue (said.Contains "/run/docker.sock") (sprintf "the grant is named, said: %s" said)
+                        Expect.isTrue (said.Contains "any unix socket") (sprintf "and what it became, said: %s" said)
+                    | other -> failwithf "expected the widening, got %A" other
+                | Ok other -> failwithf "expected rows, got %A" other
+            }
+
+        // And the column is EMPTY the rest of the time, which is what makes the case above
+        // worth looking at. A sandbox nobody started holds nothing at all.
+        testCaseAsync "a sandbox that has not started claims no widening" <|
+            async {
+                let log = newLog ()
+                let sandboxes = registryHolding log [ "the socket at /run/docker.sock — this host cannot scope that, so the sandbox gets any unix socket on this host" ]
+                let registration = WorkSandboxes.query (fun () -> sandboxes)
+                match! registration.Read () with
+                | Error e -> failwithf "the query failed: %s" e
+                | Ok (RowsOf [ row ]) ->
+                    Expect.equal
+                        (row |> List.tryFind (fst >> (=) "degraded") |> Option.map snd)
+                        (Some CellAbsent)
+                        "nothing runs, so nothing is claimed"
+                | Ok other -> failwithf "expected one row, got %A" other
+            }
+
         testCaseAsync "the answer fits the shape the query declares" <|
             async {
                 let log = newLog ()
@@ -428,6 +502,7 @@ let private timelineTests =
                           Backend = "srt"
                           Forwarded = [ "github" ]
                           CredentialOwner = Some ada
+                          Realisation = []
                           Actor = ActorRef.Agent } }
             let proj, _ = ConversationProjection.applyEvents None [ envelope ] ConversationProjection.empty
             match proj.Items with
@@ -451,10 +526,40 @@ let private timelineTests =
                           Backend = "host"
                           Forwarded = []
                           CredentialOwner = None
+                          Realisation = []
                           Actor = ada } }
             let proj, _ = ConversationProjection.applyEvents None [ envelope ] ConversationProjection.empty
             match proj.Items with
             | [ item ] -> Expect.equal item.Body "started sandbox test (host)" "no forwarding clause"
+            | other -> failwithf "expected one note, got %A" other
+
+        // The warning a person reads without going looking. A sandbox that came up holding
+        // something wider than its resources named says so on the line that announces it —
+        // the timeline is where somebody finds out what was done on their behalf, and "the
+        // confinement you were shown is not the confinement you got" is the most consequential
+        // thing on it.
+        testCase "a start that could not be given exactly says so on the same line" <| fun () ->
+            let envelope : EventEnvelope<SessionEvent> =
+                { EventId = EventId.fresh ()
+                  SessionId = sessionId
+                  Offset = EventOffset.create 4L |> expect
+                  Actor = ada
+                  Timestamp = fixedClock ()
+                  Event =
+                    SessionEvent.WorkSandboxStarted
+                        { MessageId = MessageId.create "msg-4" |> expect
+                          Sandbox = sandbox "test"
+                          Backend = "srt"
+                          Forwarded = []
+                          CredentialOwner = None
+                          Realisation = [ "the socket at /run/docker.sock — this host cannot scope that, so the sandbox gets any unix socket on this host" ]
+                          Actor = ada } }
+            let proj, _ = ConversationProjection.applyEvents None [ envelope ] ConversationProjection.empty
+            match proj.Items with
+            | [ item ] ->
+                Expect.isTrue (item.Body.Contains "started sandbox test (srt)") "still says what started"
+                Expect.isTrue (item.Body.Contains "/run/docker.sock") (sprintf "the grant is named, said: %s" item.Body)
+                Expect.isTrue (item.Body.Contains "any unix socket") (sprintf "and what it became, said: %s" item.Body)
             | other -> failwithf "expected one note, got %A" other
 
         // The start above and this are the two outcomes of one declaration. Until this note

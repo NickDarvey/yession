@@ -1099,6 +1099,7 @@ module Codec =
                       // every peer, and a shape that could hold a token eventually does.
                       "forwarded", Encode.list (p.Forwarded |> List.map Encode.string)
                       "credentialOwner", Encode.option actor.Encode p.CredentialOwner
+                      "realisation", Encode.list (p.Realisation |> List.map Encode.string)
                       "actor", actor.Encode p.Actor ]
           Decode =
             Decode.object (fun get ->
@@ -1107,6 +1108,13 @@ module Codec =
                   WorkSandboxStarted.Backend = get.Required.Field "backend" Decode.string
                   WorkSandboxStarted.Forwarded = get.Required.Field "forwarded" (Decode.list Decode.string)
                   WorkSandboxStarted.CredentialOwner = get.Required.Field "credentialOwner" (Decode.option actor.Decode)
+                  // Optional on the way in, and this is the only backward-compatible reading
+                  // available: a start written before this field existed has no answer, and
+                  // absent is the right one — nothing was measured, so nothing is claimed.
+                  // Encoded always, so every start written from here on says either what
+                  // differed or that nothing did.
+                  WorkSandboxStarted.Realisation =
+                    get.Optional.Field "realisation" (Decode.list Decode.string) |> Option.defaultValue []
                   WorkSandboxStarted.Actor = get.Required.Field "actor" actor.Decode }) }
 
     let private repoCapabilitiesChanged : Codec<RepoCapabilitiesChanged> =

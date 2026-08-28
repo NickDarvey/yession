@@ -55,6 +55,17 @@ let private failingAt (index: int) : Sandbox =
 /// A sandbox that cannot start a process.
 let private cannotSpawn : Sandbox =
     sandboxAnswering (fun _ -> async { return Error "no shell here" })
+
+/// A sandbox whose verification program finds nothing wrong — the ordinary case, and the
+/// only one from which an environment ever ends up running.
+let private passesEveryCheck : Sandbox =
+    sandboxAnswering (fun _ ->
+        async {
+            return Ok { WriteStdin = ignore
+                        CloseStdin = ignore
+                        Kill = ignore
+                        Exited = async { return SandboxExited 0 } }
+        })
 open Yession.Host
 open Yession.Tests.Support
 
@@ -978,6 +989,21 @@ let private environmentProjectionTests =
 let private policyWithAHome : unit -> Async<Result<SandboxPolicy, string>> =
     fun () -> async { return Ok { Support.emptyPolicy with Env = Map.ofList [ "HOME", "/data/home" ] } }
 
+/// The same policy, built on a host that could not scope the socket it was asked for — one
+/// coarsening, which is the shape every degradation a STARTED sandbox can have takes (a
+/// withheld leaf refuses the policy before a sandbox is ever built).
+let private policyOnACoarserHost : unit -> Async<Result<SandboxPolicy, string>> =
+    fun () ->
+        async {
+            return
+                Ok
+                    { Support.emptyPolicy with
+                        Env = Map.ofList [ "HOME", "/data/home" ]
+                        Realisation =
+                            [ Socket "/run/docker.sock",
+                              LeafRealisation.Coarsened "any unix socket on this host" ] }
+        }
+
 let private environmentRecordingTests =
     testList "What a start attempt records" [
 
@@ -1007,6 +1033,63 @@ let private environmentRecordingTests =
                 let! events = environmentEventsOf log
                 Expect.equal events [ "need"; "start-requested"; "start-failed" ]
                     "recorded as a start that failed, which is what it is"
+            }
+
+        // --- what a sandbox says it holds --------------------------------------------------
+
+        // The report comes off the policy the sandbox was BUILT from, and comes out of the
+        // environment rather than being recomputed by whoever reports it. Same reason
+        // `verify` takes that policy: a backend asked to describe its own confinement is a
+        // backend grading its own work.
+        testCaseAsync "a running environment says where this host could not give what was asked" <|
+            async {
+                let sessionId = SessionId.create "realised-1" |> expect
+                let log =
+                    Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+                let creating : CreateSandbox = fun _ -> async { return Ok passesEveryCheck }
+                let environment =
+                    Yession.SessionProcess.SessionEnvironment.create
+                        log creating policyOnACoarserHost "scripted" "env-realised-1"
+
+                let! outcome = environment.Ensure None "the fold asked"
+                Expect.equal outcome EnvironmentAvailable "a coarsening is a sandbox that works differently, not one that fails"
+                match environment.Realisation () with
+                | [ said ] ->
+                    Expect.isTrue (said.Contains "/run/docker.sock") (sprintf "the grant is named, said: %s" said)
+                    Expect.isTrue (said.Contains "any unix socket") (sprintf "and what it became, said: %s" said)
+                | other -> failwithf "expected one line, got %A" other
+            }
+
+        // Before anything runs there is nothing to report, and this is the half that keeps
+        // the panel honest: a column read off an environment that had not started would
+        // otherwise describe a sandbox that does not exist.
+        testCaseAsync "an environment that has not started holds nothing" <|
+            async {
+                let sessionId = SessionId.create "realised-2" |> expect
+                let log =
+                    Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+                let creating : CreateSandbox = fun _ -> async { return Ok passesEveryCheck }
+                let environment =
+                    Yession.SessionProcess.SessionEnvironment.create
+                        log creating policyOnACoarserHost "scripted" "env-realised-2"
+                Expect.equal (environment.Realisation ()) [] "nothing runs, nothing is claimed"
+            }
+
+        // And it stops claiming it when the sandbox goes. The sandbox and what it holds live
+        // in one cell for exactly this: two would be two things a stop has to clear, and the
+        // one that got forgotten would be a closed sandbox still answering for a widening.
+        testCaseAsync "a stopped environment stops saying what it held" <|
+            async {
+                let sessionId = SessionId.create "realised-3" |> expect
+                let log =
+                    Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+                let creating : CreateSandbox = fun _ -> async { return Ok passesEveryCheck }
+                let environment =
+                    Yession.SessionProcess.SessionEnvironment.create
+                        log creating policyOnACoarserHost "scripted" "env-realised-3"
+                let! _ = environment.Ensure None "the fold asked"
+                do! environment.Stop ()
+                Expect.equal (environment.Realisation ()) [] "the sandbox is gone, and so is what it held"
             }
 
         // `running` is never set for it, so nothing can reach a sandbox that failed its own

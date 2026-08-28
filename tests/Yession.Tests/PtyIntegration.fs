@@ -119,7 +119,8 @@ let private withShellTerminal
                             | Some spawn -> return! spawn exec cols rows onOutput
                         }
                   Stop = fun () -> async { return () }
-                  CurrentRef = fun () -> Some "host" }
+                  CurrentRef = fun () -> Some "host"
+                  Realisation = fun () -> [] }
             let mutable now = System.DateTimeOffset (2026, 8, 7, 0, 0, 0, System.TimeSpan.Zero)
             let at () = now
             let advance (by: System.TimeSpan) = now <- now + by

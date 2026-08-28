@@ -1576,7 +1576,8 @@ let private scriptedEnvironment (script: string -> (OutputStream * string) list 
                 }
           SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
           Stop = fun () -> async { return () }
-          CurrentRef = fun () -> Some "scripted" }
+          CurrentRef = fun () -> Some "scripted"
+          Realisation = fun () -> [] }
     environment, spawned
 
 /// An in-memory transcript, a reader for what it holds, and a reader for the keyframes the
@@ -3147,7 +3148,8 @@ let private profileEnvironment (present: unit -> Set<string>) =
                                   Exited = async { return SandboxExited 0 } }
                 }
           Stop = fun () -> async { return () }
-          CurrentRef = fun () -> Some "scripted" }
+          CurrentRef = fun () -> Some "scripted"
+          Realisation = fun () -> [] }
     environment, ptySpawned
 
 /// A sandbox whose BLOCKS do not finish until the test says so — the only way to hold a
@@ -3176,7 +3178,8 @@ let private blockingEnvironment () =
                 }
           SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
           Stop = fun () -> async { return () }
-          CurrentRef = fun () -> Some "scripted" }
+          CurrentRef = fun () -> Some "scripted"
+          Realisation = fun () -> [] }
     environment, spawned, release
 
 let private shellProfileTests =

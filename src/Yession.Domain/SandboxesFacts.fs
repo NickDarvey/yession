@@ -51,6 +51,18 @@ and WorkSandboxStarted =
       /// turn human's (Plan 08 — no borrowing, and the agent has no scope of its own).
       /// `None` when nothing was forwarded, because then nobody's were.
       CredentialOwner : ActorRef option
+      /// Where this host could not give exactly what the sandbox's resources named, one line
+      /// each. Empty is the ordinary case and says nothing.
+      ///
+      /// Recorded on the START and not left to the `work_sandboxes` panel, because the panel
+      /// answers what is running NOW and this is a fact about a sandbox somebody's work then
+      /// ran inside. A sandbox stopped an hour ago still widened what it held, and the log is
+      /// where that is still true.
+      ///
+      /// Rendered lines rather than the leaves they came from, like `Forwarded` beside it:
+      /// what a leaf MEANS is the operator's vocabulary at the time, and a log that outlived
+      /// that vocabulary would be re-reading old grants through a profile that has moved.
+      Realisation : string list
       Actor : ActorRef }
 
 and WorkSandboxStopped =
