@@ -192,7 +192,21 @@ let private nodeOs : obj = importAll "node:os"
 let private childProcess : obj = importAll "node:child_process"
 
 [<Emit("$0.mkdtempSync($1.tmpdir() + '/yession-git-')")>]
-let private mkdtemp (fs: obj) (os: obj) : string = jsNative
+let private mkdtempRaw (fs: obj) (os: obj) : string = jsNative
+
+/// A fixture directory named the way the KERNEL will check it.
+///
+/// `os.tmpdir()` answers `/tmp` here (devenv sets TMPDIR), and `/tmp` is a symlink on
+/// macOS. A sandbox granted the path as written holds `/private/tmp/...` — srt
+/// canonicalises an allow — while the process then uses the `/tmp/...` spelling and is
+/// refused at the link node. That is the same fault #330 refuses for an operator and
+/// `SrtIntegration.fs` already avoids; without the `realpathSync` every repo verb under
+/// srt fails on this host with `Operation not permitted` and reads as a broken sandbox.
+let private mkdtemp (fs: obj) (os: obj) : string =
+    let made = mkdtempRaw fs os
+    match Fs.canonical made with
+    | Some path -> path
+    | None -> failwithf "the fixture directory %s does not resolve" made
 
 [<Emit("$0.mkdirSync($1, { recursive: true })")>]
 let private mkdir (fs: obj) (path: string) : unit = jsNative
