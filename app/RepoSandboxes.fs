@@ -118,6 +118,35 @@ let private lastApproved (events: SessionEvent list) (repo: RepoRef) : string li
         | _ -> None)
     |> List.tryLast
 
+/// What a repo's selection comes to on THIS host: the lines somebody says yes to.
+///
+/// A function here rather than a lambda in the composition root, because it settles two
+/// things a test has to be able to reach. First, that the lines are the host's realisation
+/// and not the selection's own words — the operator named a socket, the repo picked it, and
+/// on a host that cannot scope one the sandbox gets every socket, so that is what consent has
+/// to be about. Second, that consent BINDS to those lines: `Approve` refuses a set that is
+/// not the set asked for now, so an operator who moves the backend under a pending decision
+/// re-asks rather than inheriting a yes given about a narrower grant.
+///
+/// A selection of nothing resolves to nothing without asking the resolver. That is not an
+/// optimisation — a repo that selects no resource has nothing to consent to, and running it
+/// through a host that declares no profile would turn silence into a refusal.
+let capabilitiesOn
+    (limits: HostLimits)
+    (resolve: ResourceName list -> Result<ResourceClosure, string>)
+    (selection: ResourceName list)
+    : Result<RepoCapabilities, string> =
+    match selection with
+    | [] -> Ok { Granted = []; Sensitive = false }
+    | selection ->
+        resolve selection
+        |> Result.map (fun closure ->
+            { Granted = RealisedClosure.describeOn limits closure
+              // Read off the closure, never off the lines above: sensitivity is the
+              // operator's mark on a name and no host changes it, so a host that coarsened
+              // every leaf still has exactly the sensitive ones it started with.
+              Sensitive = ResourceClosure.isSensitive closure })
+
 let create
     (reposDir: string)
     (repos: unit -> Repos.ReposService option)

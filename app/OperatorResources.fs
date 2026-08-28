@@ -128,8 +128,14 @@ let private queryDef : QueryDef =
 ///
 /// Every name, not only the composites: a leaf's closure is itself, and an operator scanning
 /// for "what does this host allow at all" should not have to know which of their own names
-/// are which. `ResourceClosure.describe` is the same rendering an approval prompt will use,
-/// so what is shown here and what is shown there cannot drift into two answers.
+/// are which.
+///
+/// What a NAME grants, and deliberately not what a sandbox would end up holding. Those differ
+/// — a host is the third author of a grant and can only widen it — and an approval prompt
+/// shows the second, through `RealisedClosure.describeOn`. This surface cannot: a session
+/// runs sandboxes on more than one backend, they do not scope the same things, and a row per
+/// name has nowhere to put two answers. The per-leaf wording is shared either way, so the
+/// two readings differ by the host's sentence and never by how a grant is spelled.
 let rows (file: ProfileFile) : (string * QueryCell) list list =
     let profile = file.Resources
     ResourceProfile.declared profile

@@ -191,18 +191,31 @@ module ResourceClosure =
 
     let internal single = ofLeaves
 
-    /// What a human approves, one line per leaf, sensitive ones marked.
+    /// How a sensitive grant is marked, wherever one is shown to a person.
+    ///
+    /// One function rather than the two `sprintf`s it replaced, because a surface that
+    /// renders a leaf without the mark is a surface that under-states — and the second
+    /// renderer (what a host makes of the same leaf, below) is where that would have
+    /// happened. The mark belongs to the leaf, not to the sentence around it.
+    let mark (sensitivity: Sensitivity) (line: string) : string =
+        match sensitivity with
+        | Sensitivity.Sensitive -> sprintf "%s (sensitive)" line
+        | Sensitivity.Ordinary -> line
+
+    /// What a selection NAMES, one line per leaf, sensitive ones marked.
     ///
     /// Here rather than in a view, because "a leaf that materialises is a leaf that was
     /// shown" is the invariant this module exists for, and a view cannot be reached by the
     /// cheap tier. Sorted, so two runs of one closure read identically.
+    ///
+    /// The naming is the whole of what this says. A host is the third author of a grant and
+    /// the only one that can WIDEN it, so a person consenting reads
+    /// `RealisedClosure.describeOn` instead — this is the right answer for an operator
+    /// reading their own vocabulary and the wrong one to consent against.
     let describe (closure: ResourceClosure) : string list =
         closure.Grants
         |> Map.toList
-        |> List.map (fun (leaf, sensitivity) ->
-            match sensitivity with
-            | Sensitivity.Sensitive -> sprintf "%s (sensitive)" (ResourceLeaf.describe leaf)
-            | Sensitivity.Ordinary -> ResourceLeaf.describe leaf)
+        |> List.map (fun (leaf, sensitivity) -> mark sensitivity (ResourceLeaf.describe leaf))
         |> List.sort
 
 /// A distinction a host is able to MAKE about a grant.
@@ -348,17 +361,52 @@ module RealisedClosure =
         |> List.filter (fun (_, outcome) -> outcome <> LeafRealisation.AsAsked)
         |> List.sortBy (fun (leaf, _) -> ResourceLeaf.describe leaf)
 
+    /// One line for one leaf, saying what the sandbox ACTUALLY ends up holding.
+    ///
+    /// Private, and the two surfaces below are the whole reason: the differences alone and
+    /// the whole selection are two questions, and a coarsened socket that read one way in a
+    /// consent prompt and another in the timeline would be two answers to the one that
+    /// matters.
+    /// Takes the leaf ALREADY described, so that a mark put on the grant stays on the grant:
+    /// "the socket at /run/docker.sock (sensitive) — this host cannot scope that ...", never a
+    /// sentence with the mark stranded at the end of it.
+    let private line (described: string) (outcome: LeafRealisation) : string =
+        match outcome with
+        | LeafRealisation.AsAsked -> described
+        | LeafRealisation.Coarsened got ->
+            sprintf "%s — this host cannot scope that, so the sandbox gets %s" described got
+        | LeafRealisation.Withheld because ->
+            sprintf "%s — not granted: %s" described because
+
     /// One line per difference, for a person. The same rendering wherever it is shown, for the
     /// reason `ResourceClosure.describe` is here rather than in a view.
     let describeDifferences (realised: RealisedClosure) : string list =
-        differences realised
+        differences realised |> List.map (fun (leaf, outcome) -> line (ResourceLeaf.describe leaf) outcome)
+
+    /// What a human approves, one line per leaf, as THIS host will actually grant it.
+    ///
+    /// `ResourceClosure.describe` renders what the selection NAMED, which is what the
+    /// operator wrote and the repo picked. Consent is a different question, because the host
+    /// is a third author and the only one that can widen: a person shown `the socket at
+    /// /run/docker.sock` on a host that cannot scope one has consented to a scope that does
+    /// not exist there, and the sandbox holds every socket. So the lines a person says yes to
+    /// are these, and what they bind to changes when the host does.
+    ///
+    /// The mark rides through unchanged. A coarsened sensitive leaf is MORE worth marking
+    /// than it was, never less, and losing it here would be the masking this module refuses
+    /// everywhere else — arriving by the one author who is not a person.
+    let describeOn (limits: HostLimits) (closure: ResourceClosure) : string list =
+        let realised = of' limits (ResourceClosure.leaves closure)
+        let sensitive = ResourceClosure.sensitiveLeaves closure
+        realised.Outcomes
+        |> Map.toList
         |> List.map (fun (leaf, outcome) ->
-            match outcome with
-            | LeafRealisation.Coarsened got ->
-                sprintf "%s — this host cannot scope that, so the sandbox gets %s" (ResourceLeaf.describe leaf) got
-            | LeafRealisation.Withheld because ->
-                sprintf "%s — not granted: %s" (ResourceLeaf.describe leaf) because
-            | LeafRealisation.AsAsked -> ResourceLeaf.describe leaf)
+            let named =
+                ResourceClosure.mark
+                    (if Set.contains leaf sensitive then Sensitivity.Sensitive else Sensitivity.Ordinary)
+                    (ResourceLeaf.describe leaf)
+            line named outcome)
+        |> List.sort
 
 /// An operator's whole vocabulary, AFTER validation.
 ///

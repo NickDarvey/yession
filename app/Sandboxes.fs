@@ -243,6 +243,14 @@ let limitsFor (backend: SandboxBackend) (platform: string) : HostLimits =
         else HostLimits.of' [ HostDistinction.EgressByHost ]
     | DockerBackend -> HostLimits.of' [ HostDistinction.SocketsByPath ]
 
+/// What a backend can distinguish on the host this process is running on.
+///
+/// The one place that asks the process what it is. `limitsFor` takes the platform as an
+/// argument precisely so that every claim about it is checkable from either machine, and a
+/// second caller reading `process.platform` for itself would be a second answer that only
+/// ever agrees with the first on the box it was written on.
+let limitsHere (backend: SandboxBackend) : HostLimits = limitsFor backend (platform ())
+
 let grantsFrom
     (leaves: ResourceLeaf list)
     : Result<string list * string list * string list * string list * Map<string, string>, string> =
@@ -457,7 +465,7 @@ let preparePolicy
                 match grantsFor spec.Uses with
                 | Error e -> return Error e
                 | Ok granted ->
-                    return policyFor backend (limitsFor backend (platform ())) (ambientEnv ()) resolved workspace reposDir home granted spec
+                    return policyFor backend (limitsHere backend) (ambientEnv ()) resolved workspace reposDir home granted spec
         }
 
 // --- A buffered one-shot: settle once, deliver to every (even late) awaiter --------------

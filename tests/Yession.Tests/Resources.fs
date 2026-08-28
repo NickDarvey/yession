@@ -695,4 +695,151 @@ let tests =
                 for line in RealisedClosure.describeDifferences realised do
                     Expect.isFalse (line = "") "and none of them empty"
             }
+
+        // --- what a person CONSENTS to -----------------------------------------------------
+
+        // The refinement, stated as an equality: where the host is not a narrowing at all,
+        // consent reads exactly what the selection named. Its red says the two renderings
+        // have grown apart — which is how a prompt starts spelling a grant one way and the
+        // operator's own surface another.
+        check "on a host that can express everything, consent reads the selection's own words" <| fun () ->
+            property {
+                let! declarations = genDag
+                let! selection = genSelection declarations
+                let profile = ResourceProfile.load declarations |> expect
+                let closure = ResourceProfile.resolve profile selection |> expect
+                Expect.equal
+                    (RealisedClosure.describeOn HostLimits.unlimited closure)
+                    (ResourceClosure.describe closure)
+                    "the same lines"
+            }
+
+        // The masking property, arriving by the one author who is not a person. A host
+        // coarsens a grant and the mark on it must survive that — a sensitive leaf shown
+        // WIDER and unmarked is strictly worse than the sensitive leaf nobody widened.
+        check "however this host realises a selection, every leaf is shown and every sensitive one marked" <| fun () ->
+            property {
+                let! declarations = genDag
+                let! selection = genSelection declarations
+                let! limits = genLimits
+                let profile = ResourceProfile.load declarations |> expect
+                let closure = ResourceProfile.resolve profile selection |> expect
+                let lines = RealisedClosure.describeOn limits closure
+                Expect.equal
+                    (List.length lines)
+                    (Set.count (ResourceClosure.leaves closure))
+                    "one line per leaf, including the ones this host withheld"
+                Expect.equal
+                    (lines |> List.filter (fun line -> line.Contains "(sensitive)") |> List.length)
+                    (Set.count (ResourceClosure.sensitiveLeaves closure))
+                    "and the host changed no leaf's mark"
+            }
+
+        // The whole point of the surface: a person cannot say yes to a scope this host does
+        // not have. The line still NAMES the grant — that is what makes it findable — and
+        // then says what the sandbox gets instead, so the two can never be the same string.
+        check "a grant this host could not express is never shown as if it had been" <| fun () ->
+            property {
+                let! declarations = genDag
+                let! selection = genSelection declarations
+                let! limits = genLimits
+                let profile = ResourceProfile.load declarations |> expect
+                let closure = ResourceProfile.resolve profile selection |> expect
+                let realised = RealisedClosure.of' limits (ResourceClosure.leaves closure)
+                let lines = RealisedClosure.describeOn limits closure
+                let sensitive = ResourceClosure.sensitiveLeaves closure
+                for leaf, _ in RealisedClosure.differences realised do
+                    let named =
+                        ResourceClosure.mark
+                            (if Set.contains leaf sensitive then Sensitivity.Sensitive else Sensitivity.Ordinary)
+                            (ResourceLeaf.describe leaf)
+                    Expect.isFalse
+                        (lines |> List.contains named)
+                        (sprintf "%s is not what this host gives" named)
+                    Expect.isTrue
+                        (lines |> List.exists (fun line -> line.StartsWith named && line <> named))
+                        (sprintf "%s is named, and then said to come out differently" named)
+            }
+
+        // --- the surface a person presses a button on --------------------------------------
+        //
+        // `capabilitiesOn` is the seam the composition root fills, and these are here rather
+        // than beside the fold because what they pin is the algebra reaching a person: the
+        // same selection, put through two hosts, is two different things to say yes to.
+
+        // The fault this increment exists for. On a host that cannot scope a unix socket, a
+        // repo that selects one gets EVERY socket — and until now the prompt said the path.
+        testCase "a repo is shown what its host will grant, not what the resource named" <| fun () ->
+            let profile =
+                OperatorProfile.parse """
+                    { "version": 1,
+                      "resources": { "docker": { "socket": "/run/docker.sock" } } }"""
+                |> expect
+            let selection = [ ResourceName.create "docker" |> expect ]
+            let named =
+                ResourceProfile.resolve profile.Resources selection |> expect |> ResourceClosure.describe
+            let asked =
+                RepoSandboxes.capabilitiesOn
+                    (Sandboxes.limitsFor SrtBackend "linux")
+                    (ResourceProfile.resolve profile.Resources)
+                    selection
+                |> expect
+            Expect.notEqual asked.Granted named "the words the operator wrote are not the offer"
+            match asked.Granted, named with
+            | [ line ], [ grant ] ->
+                Expect.isTrue (line.StartsWith grant) (sprintf "the grant is still named, said: %s" line)
+                Expect.isTrue (line.Contains "any unix socket") (sprintf "and said to come out wider, said: %s" line)
+            | granted, _ -> failwithf "expected one line, got %A" granted
+
+        // The other half, and the reason the first is not vacuous: where the host narrows
+        // nothing, nothing is added to what a person reads. A prompt that editorialised on
+        // every grant would be a prompt whose extra sentence stops being read.
+        testCase "a grant this host can express reads exactly as the selection named it" <| fun () ->
+            let profile =
+                OperatorProfile.parse """
+                    { "version": 1,
+                      "resources": { "docker": { "socket": "/run/docker.sock" } } }"""
+                |> expect
+            let selection = [ ResourceName.create "docker" |> expect ]
+            let asked =
+                RepoSandboxes.capabilitiesOn
+                    (Sandboxes.limitsFor SrtBackend "darwin")
+                    (ResourceProfile.resolve profile.Resources)
+                    selection
+                |> expect
+            Expect.equal
+                asked.Granted
+                (ResourceProfile.resolve profile.Resources selection |> expect |> ResourceClosure.describe)
+                "the selection's own words"
+
+        // A repo that selects nothing has nothing to consent to, whatever the host is — and
+        // is never put through a resolver, which on a host declaring no profile at all would
+        // turn that silence into a refusal.
+        testCase "a repo that selects nothing asks for nothing, without resolving anything" <| fun () ->
+            let asked =
+                RepoSandboxes.capabilitiesOn
+                    (Sandboxes.limitsFor SrtBackend "linux")
+                    (fun _ -> failwith "nothing should have been resolved")
+                    []
+                |> expect
+            Expect.equal asked.Granted [] "nothing to show"
+            Expect.isFalse asked.Sensitive "and nobody to ask"
+
+        // Sensitivity is the operator's mark on a NAME, and the host is not an author of it.
+        // This is the bit that decides whether anybody is asked at all, so a host that
+        // coarsened the grant quietly clearing it would skip the prompt for the widest
+        // version of the very grant the mark exists for.
+        testCase "a host that widens a sensitive grant leaves it sensitive" <| fun () ->
+            let profile =
+                OperatorProfile.parse """
+                    { "version": 1,
+                      "resources": { "docker": { "socket": "/run/docker.sock", "sensitive": true } } }"""
+                |> expect
+            let asked =
+                RepoSandboxes.capabilitiesOn
+                    (Sandboxes.limitsFor SrtBackend "linux")
+                    (ResourceProfile.resolve profile.Resources)
+                    [ ResourceName.create "docker" |> expect ]
+                |> expect
+            Expect.isTrue asked.Sensitive "still worth asking about"
     ]
