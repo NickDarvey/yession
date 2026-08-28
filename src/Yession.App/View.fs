@@ -548,9 +548,9 @@ module View =
                     // is the one surface where reading all of it is the point.
                     granted |> List.map (fun line -> html $"""<li class="[overflow-wrap:anywhere]">{line}</li>""")
                 html $"""
-                    <div class="{Style.cls [ Style.noAgentBlock; "min-w-0" ]}" data-repo-approval="{(RepoRef.value repo : string)}">
+                    <div class="{Style.cls [ Style.noAgentBlock; "min-w-0" ]}" data-repo-approval="{RepoRef.value repo}">
                       <div class="{Style.person}">
-                        <span class="truncate min-w-0 text-ink-faint">{(RepoRef.value repo : string)}</span>
+                        <span class="truncate min-w-0 text-ink-faint">{RepoRef.value repo}</span>
                         <span class="{Style.label} ml-auto shrink-0">asks for</span>
                       </div>
                       <div class="{Style.noAgentPrompt}">
@@ -558,7 +558,7 @@ module View =
                         <div class="{Style.noAgentBody}">
                           <ul class="{Style.cls [ Style.label; "w-full min-w-0 whitespace-normal" ]}">{lines}</ul>
                           <button type="button" class="{Style.cls [ Style.btnPrimary; Style.noAgentAction; "w-full min-w-0" ]}"
-                                  data-repo-approve="{(RepoRef.value repo : string)}"
+                                  data-repo-approve="{RepoRef.value repo}"
                                   @click={Ev(fun _ -> actions.ApproveRepoCapabilities repo granted)}>Approve</button>
                         </div>
                       </div>
@@ -572,7 +572,7 @@ module View =
             |> List.map (fun (peer, name, field) ->
                 let token, words = whereIs model peer field
                 html $"""
-                    <div class="{Style.person}" data-peer-presence="{(PeerId.value peer : string)}">
+                    <div class="{Style.person}" data-peer-presence="{PeerId.value peer}">
                       <span class="{Style.cls [ Style.avatar; Style.humanAvatar (PeerId.value peer); Style.personAvatar ]}"></span>
                       <span class="truncate min-w-0">{name}</span>
                       <span class="{Style.label} ml-auto shrink-0" data-peer-at="{token}">{words}</span>
@@ -622,7 +622,7 @@ module View =
     let private credentialStatus (label: string) (credential: ConnectionView) : TemplateResult =
         match credential.SignInRequired with
         | None ->
-            html $"""<span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({(credential.Kind : string)})</span>"""
+            html $"""<span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({credential.Kind})</span>"""
         | Some _ ->
             html $"""<span class="{Style.statusErr}"><span class="{Style.statusDot}"></span>{label} — {Dom.Text.signInAgainStatus}</span>"""
 
@@ -721,7 +721,7 @@ module View =
             (orphan @ offered)
             |> List.map (fun offer ->
                 let id = ModelId.value offer.Id
-                html $"""<option value="{id}" ?selected={chosen = Some offer.Id}>{(offer.Name : string)}</option>""")
+                html $"""<option value="{id}" ?selected={chosen = Some offer.Id}>{offer.Name}</option>""")
         // What the picker cannot yet offer, said rather than left as a short list nobody can
         // explain. A lookup that failed is almost always "no account connected here yet",
         // and the panel above this one is the way out of that.
@@ -740,7 +740,7 @@ module View =
                 <select id="agent-model" class="{Style.fieldSelect}"
                         data-model-select="{chosen |> Option.map ModelId.value |> Option.defaultValue Dom.Text.modelDefault}"
                         @change={EvVal(fun v -> dispatch (SetModelMsg (match ModelId.create v with Ok id -> Some id | Error _ -> None)))}>
-                  <option value="" ?selected={(chosen.IsNone : bool)}>{Dom.Text.modelDefaultLabel}</option>
+                  <option value="" ?selected={chosen.IsNone}>{Dom.Text.modelDefaultLabel}</option>
                   {options}
                 </select>
                 <span class="{Style.fieldSelectMark}">{Icon.down}</span>
@@ -821,8 +821,8 @@ module View =
                 columns
                 |> List.map (fun column ->
                     html $"""
-                        <div class="{Style.sideRow}" data-query-field="{(column.Key : string)}">
-                          <span class="{Style.statusFaint}">{(column.Label : string)}</span>
+                        <div class="{Style.sideRow}" data-query-field="{column.Key}">
+                          <span class="{Style.statusFaint}">{column.Label}</span>
                           <span class="{Style.small}">{cellText fields column}</span>
                         </div>""")
             html $"""<div class="flex flex-col gap-1">{rows}</div>"""
@@ -835,14 +835,14 @@ module View =
             let head =
                 columns
                 |> List.map (fun column ->
-                    html $"""<th scope="col" class="{Style.queryHeadCell}">{(column.Label : string)}</th>""")
+                    html $"""<th scope="col" class="{Style.queryHeadCell}">{column.Label}</th>""")
             let body =
                 rows
                 |> List.map (fun row ->
                     let cells =
                         columns
                         |> List.map (fun column ->
-                            html $"""<td class="{Style.queryCell}" data-query-cell="{(column.Key : string)}">{cellText row column}</td>""")
+                            html $"""<td class="{Style.queryCell}" data-query-cell="{column.Key}">{cellText row column}</td>""")
                     html $"""<tr>{cells}</tr>""")
             html $"""
                 <div class="{Style.queryTable}">
@@ -861,7 +861,7 @@ module View =
             let name = QueryName.value def.Name
             html $"""
                 <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-query-panel="{name}">
-                  <span class="{Style.label}">{(def.Title : string)}</span>
+                  <span class="{Style.label}">{def.Title}</span>
                   {queryValueView def.Shape (Map.tryFind name queries.Values)}
                 </section>""")
 
@@ -1109,9 +1109,9 @@ module View =
         // Container = the translucent selection highlight (positioned `lo..hi` by the browser);
         // the caret bar is offset to `head` inside it; the label rides above the caret.
         html $"""
-            <span class="{Style.remoteCursor}" data-cursor-peer="{(PeerId.value peerId : string)}" style="background:{PeerColour.translucent peerId}">
+            <span class="{Style.remoteCursor}" data-cursor-peer="{PeerId.value peerId}" style="background:{PeerColour.translucent peerId}">
               <span class="{Style.remoteCursorCaret}" style="background:{colour}">
-                <span class="{Style.remoteCursorLabel}" style="background:{colour}">{(presence.DisplayName : string)}</span>
+                <span class="{Style.remoteCursorLabel}" style="background:{colour}">{presence.DisplayName}</span>
               </span>
             </span>"""
 
@@ -1179,9 +1179,9 @@ module View =
             html $"""
                 <section class="{Style.activity}" data-agent-stream>
                   <span class="{Style.activityPulse}"></span>
-                  <span class="{Style.activityText}" data-agent-turn="{(AgentTurnId.value turn : string)}">agent is responding</span>
-                  <span class="{Style.activityTurn}">turn {(AgentTurnId.value turn : string)}</span>
-                  <button type="button" class="{Style.btnDanger} ml-auto" data-interrupt-turn="{(AgentTurnId.value turn : string)}" @click={Ev(fun _ -> actions.Interrupt turn)}>Interrupt</button>
+                  <span class="{Style.activityText}" data-agent-turn="{AgentTurnId.value turn}">agent is responding</span>
+                  <span class="{Style.activityTurn}">turn {AgentTurnId.value turn}</span>
+                  <button type="button" class="{Style.btnDanger} ml-auto" data-interrupt-turn="{AgentTurnId.value turn}" @click={Ev(fun _ -> actions.Interrupt turn)}>Interrupt</button>
                 </section>"""
         | None -> html $"""<section class="hidden" data-agent-stream></section>"""
 
@@ -1197,13 +1197,13 @@ module View =
             |> List.map (fun entry ->
                 let id = entry.QueueId
                 html $"""
-                    <article class="{Style.queueItem}" data-queue-id="{(QueueId.value id : string)}" data-queue-author="{(PeerId.value entry.Author : string)}" data-queue-order="{string entry.Order}">
+                    <article class="{Style.queueItem}" data-queue-id="{QueueId.value id}" data-queue-author="{PeerId.value entry.Author}" data-queue-order="{string entry.Order}">
                       <span class="{Style.cls [ Style.avatarSm; Style.humanAvatar (PeerId.value entry.Author) ]}"></span>
-                      <div class="{Style.queueInput}" data-rich-body="{BodyKey.queued id}" data-rich-readonly="false" data-queue-input="{(QueueId.value id : string)}"></div>
+                      <div class="{Style.queueInput}" data-rich-body="{BodyKey.queued id}" data-rich-readonly="false" data-queue-input="{QueueId.value id}"></div>
                       <div class="{Style.queueTools}">
-                        <button type="button" class="{Style.btnIconBare}" aria-label="Move up" data-queue-up="{(QueueId.value id : string)}" @click={Ev(fun _ -> match QueueOrder.moveUp synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>{Icon.up}</button>
-                        <button type="button" class="{Style.btnIconBare}" aria-label="Move down" data-queue-down="{(QueueId.value id : string)}" @click={Ev(fun _ -> match QueueOrder.moveDown synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>{Icon.down}</button>
-                        <button type="button" class="{Style.btnIconBareDanger}" aria-label="Delete" data-queue-delete="{(QueueId.value id : string)}" @click={Ev(fun _ -> dispatch (DeleteQueuedMsg id))}>{Icon.close}</button>
+                        <button type="button" class="{Style.btnIconBare}" aria-label="Move up" data-queue-up="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveUp synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>{Icon.up}</button>
+                        <button type="button" class="{Style.btnIconBare}" aria-label="Move down" data-queue-down="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveDown synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>{Icon.down}</button>
+                        <button type="button" class="{Style.btnIconBareDanger}" aria-label="Delete" data-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeleteQueuedMsg id))}>{Icon.close}</button>
                       </div>
                     </article>""")
         let band = if List.isEmpty entries then Style.queueEmpty else Style.queue
@@ -1223,15 +1223,15 @@ module View =
             |> List.map (fun (editor, name) ->
                 html $"""
                     <span class="{Style.draftEditorDot}" style="background:{PeerColour.ofPeer editor}"
-                          title="{name}" data-draft-editor-peer="{(PeerId.value editor : string)}"></span>""")
+                          title="{name}" data-draft-editor-peer="{PeerId.value editor}"></span>""")
         // A collapsed draft: whose it is, one clamped line of it (the same read-only editor the
         // browser mounts everywhere, so the CRDT keeps it current), and who is in it. Opening it
         // collapses whatever was open — including your own composer.
         let summary (peerId: PeerId) =
             html $"""
                 <button type="button" class="{Style.draftSummary}" style="border-left-color:{PeerColour.ofPeer peerId}"
-                        data-draft-summary="{(PeerId.value peerId : string)}"
-                        data-draft-expand="{(PeerId.value peerId : string)}" @click={Ev(fun _ -> dispatch (ExpandDraftMsg peerId))}>
+                        data-draft-summary="{PeerId.value peerId}"
+                        data-draft-expand="{PeerId.value peerId}" @click={Ev(fun _ -> dispatch (ExpandDraftMsg peerId))}>
                   <span class="{Style.cls [ Style.avatarSm; Style.humanAvatar (PeerId.value peerId) ]}"></span>
                   <span class="{Style.draftSummaryName}">{ClientModel.nameOf peerId model}</span>
                   <span class="{Style.draftSummaryBody}" data-rich-body="{BodyKey.draft peerId}" data-rich-readonly="true"></span>
@@ -1270,17 +1270,17 @@ module View =
                 if target = myPeer then Lit.nothing
                 else html $"""<span class="{Style.draftAuthor}">{ClientModel.nameOf target model}'s message</span>"""
             html $"""
-                <article class="{Style.draftBox}" data-draft-id="{(PeerId.value target : string)}" data-draft-author="{(PeerId.value target : string)}">
+                <article class="{Style.draftBox}" data-draft-id="{PeerId.value target}" data-draft-author="{PeerId.value target}">
                   <div class="{Style.draftBody}">
                     {author}
-                    <div class="{Style.draftInput}" data-rich-body="{BodyKey.draft target}" data-rich-readonly="false" data-draft-input="{(PeerId.value target : string)}"></div>
+                    <div class="{Style.draftInput}" data-rich-body="{BodyKey.draft target}" data-rich-readonly="false" data-draft-input="{PeerId.value target}"></div>
                   </div>
                   <div class="{Style.draftCommit}">
                     <span class="{Style.draftEditors}">{editors target}</span>
                     {discard}
                     <button type="button" class="{sendClass}" aria-label="Send" aria-keyshortcuts="Enter"
                             title="{Dom.Text.composerKeys}"
-                            data-send-draft="{(PeerId.value target : string)}" @click={Ev(fun _ -> actions.SendDraft target)}>{Icon.send}</button>
+                            data-send-draft="{PeerId.value target}" @click={Ev(fun _ -> actions.SendDraft target)}>{Icon.send}</button>
                   </div>
                 </article>"""
         // "New message" only says something when you are in someone else's draft: it is the way
@@ -1315,8 +1315,8 @@ module View =
                     // common case, and one span per plain line is a span too many.
                     let classes = Style.ansiClasses span.Style
                     let inline' = Style.ansiInline span.Style
-                    if classes = "" && inline' = "" then html $"{(span.Text : string)}"
-                    else html $"""<span class="{classes}" style="{inline'}">{(span.Text : string)}</span>""")
+                    if classes = "" && inline' = "" then html $"{span.Text}"
+                    else html $"""<span class="{classes}" style="{inline'}">{span.Text}</span>""")
             // The newline BEFORE every line but the first, so a trailing line adds no
             // trailing blank one.
             if i = 0 then html $"{spans}" else html $"""{"\n"}{spans}""")
@@ -1375,8 +1375,8 @@ module View =
         // two apart at render time.
         let actNoteItem (item: ConversationItem) =
             html $"""
-                <article class="{Style.actNote}" data-message-id="{(MessageId.value item.MessageId : string)}" data-act-note data-message-author="{authorLabel item.Author}">
-                  <span class="{Style.actNoteText}">{authorName model item.Author} {(item.Body : string)}</span>
+                <article class="{Style.actNote}" data-message-id="{MessageId.value item.MessageId}" data-act-note data-message-author="{authorLabel item.Author}">
+                  <span class="{Style.actNoteText}">{authorName model item.Author} {item.Body}</span>
                 </article>"""
         let messageItem (item: ConversationItem) =
             let isAgent = (item.Author = ActorRef.Agent)
@@ -1416,7 +1416,7 @@ module View =
                     html $"""<div class="{Style.messageMeta}">{wokeInner}{statusInner}</div>"""
                 else Lit.nothing
             html $"""
-                <article class="{Style.messageItem}" data-message-id="{(MessageId.value item.MessageId : string)}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
+                <article class="{Style.messageItem}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
                   {meta}
                   <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
                 </article>"""
@@ -1434,12 +1434,12 @@ module View =
             let blockId = block.BlockId
             html $"""
                 <button type="button" class="{Style.chatChip}"
-                        data-chat-block="{(BlockId.value blockId : string)}"
+                        data-chat-block="{BlockId.value blockId}"
                         data-chat-block-status="{terminalBlockStatusLabel block.Status}"
-                        data-terminal-id="{(TerminalId.value terminalId : string)}"
+                        data-terminal-id="{TerminalId.value terminalId}"
                         @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (BlockTab (terminalId, blockId)))); actions.FocusPane ())}>
                   <span class="{Style.terminalPrompt}">$</span>
-                  <code class="{Style.chatChipCommand}">{(block.Command : string)}</code>
+                  <code class="{Style.chatChipCommand}">{block.Command}</code>
                   <span class="shrink-0">{terminalBlockStatus model block.Status}</span>
                 </button>"""
         let stretchItem (stretch: TerminalStretch) =
@@ -1448,9 +1448,9 @@ module View =
                 <button type="button" class="{Style.chatChip}"
                         data-chat-stretch="{TerminalStretch.key stretch}"
                         data-chat-stretch-end="{stretchEndLabel stretch.End}"
-                        data-terminal-id="{(TerminalId.value stretch.TerminalId : string)}"
+                        data-terminal-id="{TerminalId.value stretch.TerminalId}"
                         @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (StretchTab stretch))); actions.FocusPane ())}>
-                  <span class="{Style.chatChipText}">typed in {(stretch.Title : string)} for {length}</span>
+                  <span class="{Style.chatChipText}">typed in {stretch.Title} for {length}</span>
                   <span class="shrink-0">{stretchEnding model stretch.End}</span>
                 </button>"""
         // One call the agent made. No pane tab: unlike a block there is nothing recorded to
@@ -1485,7 +1485,7 @@ module View =
                 | [ one ] -> ToolUse.label one
                 | many -> sprintf "%d tools" (List.length many)
             html $"""
-                <details class="{Style.chatToolRun}" data-chat-tool-run="{(AgentTurnId.value turn : string)}">
+                <details class="{Style.chatToolRun}" data-chat-tool-run="{AgentTurnId.value turn}">
                   <summary class="{Style.chatToolSummary}">
                     <span class="{Style.chatChipText}">used {summary}</span>
                   </summary>
@@ -1506,17 +1506,17 @@ module View =
             // thing this line must never do.
             let count n inner = if n = 0 then Lit.nothing else inner
             let failed =
-                count tally.Failed (html $"""<span class="{Style.statusErr}">{Icon.crossSm} {(tally.Failed : int)}</span>""")
+                count tally.Failed (html $"""<span class="{Style.statusErr}">{Icon.crossSm} {tally.Failed}</span>""")
             let running =
-                count tally.Running (html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>{(tally.Running : int)}</span>""")
+                count tally.Running (html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>{tally.Running}</span>""")
             let done' =
-                count tally.Done (html $"""<span class="{Style.statusOk}">{Icon.checkSm} {(tally.Done : int)}</span>""")
+                count tally.Done (html $"""<span class="{Style.statusOk}">{Icon.checkSm} {tally.Done}</span>""")
             let counts =
                 html $"""<span class="{Style.chatTaskCounts}">{failed}{running}{done'}</span>"""
             let commands =
                 if tally.Commands = 1 then "1 command" else sprintf "%d commands" tally.Commands
             html $"""
-                <details class="{Style.chatTaskCard}" data-chat-task-card="{(AgentTurnId.value turn : string)}">
+                <details class="{Style.chatTaskCard}" data-chat-task-card="{AgentTurnId.value turn}">
                   <summary class="{Style.chatTaskSummary}">
                     <span class="{Style.chatChipText}">ran {commands}</span>
                     {counts}
@@ -1730,13 +1730,13 @@ module View =
             [ fact (sprintf "ran by %s" (authorName model (Authority.author block.Authority)))
               yield! exitFact ]
         html $"""
-            <article class="{Style.terminalBlock}" data-terminal-block="{(BlockId.value block.BlockId : string)}"
+            <article class="{Style.terminalBlock}" data-terminal-block="{BlockId.value block.BlockId}"
                      data-terminal-block-status="{terminalBlockStatusLabel block.Status}">
               <details>
                 <summary class="{Style.terminalBlockSummary}">
                   {author}
                   <span class="{Style.terminalPrompt}">$</span>
-                  <code class="{Style.terminalCommandText}">{(block.Command : string)}</code>
+                  <code class="{Style.terminalCommandText}">{block.Command}</code>
                   {notable}
                   <span class="{Style.terminalBlockMark}" aria-hidden="true">…</span>
                 </summary>
@@ -1782,7 +1782,7 @@ module View =
             |> Option.defaultValue (TerminalId.value entry.Terminal)
         let subject =
             if not showSubject then Lit.nothing
-            else html $"""<span class="{Style.chatChipWho}" data-pending-subject="terminal:{(TerminalId.value entry.Terminal : string)}">{what}</span>"""
+            else html $"""<span class="{Style.chatChipWho}" data-pending-subject="terminal:{TerminalId.value entry.Terminal}">{what}</span>"""
         // The command line is characters, so it is an input any peer can fix before it runs.
         let body =
             html $"""
@@ -1796,10 +1796,10 @@ module View =
             html $"""
                 <button type="button" class="{Style.btnIconBare}" aria-label="Move {what} up" @click={Ev(fun _ -> match TerminalQueueOrder.moveUp model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.up}</button>
                 <button type="button" class="{Style.btnIconBare}" aria-label="Move {what} down" @click={Ev(fun _ -> match TerminalQueueOrder.moveDown model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.down}</button>
-                <button type="button" class="{Style.btnIconBareDanger}" aria-label="Delete {what}" data-terminal-queue-delete="{(QueueId.value id : string)}" @click={Ev(fun _ -> dispatch (DeletePendingMsg id))}>{Icon.close}</button>"""
+                <button type="button" class="{Style.btnIconBareDanger}" aria-label="Delete {what}" data-terminal-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeletePendingMsg id))}>{Icon.close}</button>"""
         html $"""
             <article class="{Style.terminalQueuedReady}"
-                     data-terminal-queued="{(QueueId.value id : string)}" data-terminal-queued-status="{statusToken}">
+                     data-terminal-queued="{QueueId.value id}" data-terminal-queued-status="{statusToken}">
               {body}
               <div class="{Style.terminalQueuedRow}">
                 {statusLine}
@@ -1847,14 +1847,14 @@ module View =
         let control =
             if holder = mine then
                 html $"""
-                    <button type="button" class="{Style.btnPrimary}" data-terminal-release="{(TerminalId.value terminal : string)}"
+                    <button type="button" class="{Style.btnPrimary}" data-terminal-release="{TerminalId.value terminal}"
                             @click={Ev(fun _ -> actions.ReleaseTerminal terminal)}>Hand it back</button>"""
             else
                 // Any peer may take it, and no permission is asked for: collaborators are
                 // trusted, so a steal needs to be VISIBLE rather than authorised — which the
                 // event log is, and this button says so plainly.
                 html $"""
-                    <button type="button" class="{Style.btn}" data-terminal-take="{(TerminalId.value terminal : string)}"
+                    <button type="button" class="{Style.btn}" data-terminal-take="{TerminalId.value terminal}"
                             @click={Ev(fun _ -> actions.TakeTerminal terminal)}>Take over</button>"""
         html $"""
             <div class="{Style.terminalBandRow}" data-terminal-lease="{label}" aria-live="polite">
@@ -1924,20 +1924,20 @@ module View =
             |> List.map (fun (editor, name) ->
                 html $"""
                     <span class="{Style.draftEditorDot}" style="background:{PeerColour.ofPeer editor}"
-                          title="{name}" data-terminal-draft-editor="{(PeerId.value editor : string)}"></span>""")
+                          title="{name}" data-terminal-draft-editor="{PeerId.value editor}"></span>""")
         // Someone else mid-command: their live text, read-only here. Watching a collaborator
         // type a command is the same affordance as watching them type a message, which is
         // the whole reason the terminal composer is built out of the message composer's parts.
         let peerDraft (author: PeerId) =
             html $"""
                 <div class="{Style.terminalPeerDraft}" style="border-left-color:{PeerColour.ofPeer author}"
-                     data-terminal-draft-author="{(PeerId.value author : string)}">
+                     data-terminal-draft-author="{PeerId.value author}">
                   <span class="{Style.terminalPrompt}">$</span>
                   <input type="text" class="{Style.fieldMonoBare}" readonly aria-label="{ClientModel.nameOf author model}'s command"
                          data-terminal-input="{BodyKey.terminalDraft terminal author}">
                   <span class="{Style.terminalEditors}">{editors author}</span>
                   <button type="button" class="{Style.btnSendInField}" aria-label="Run"
-                          data-terminal-send="{(PeerId.value author : string)}"
+                          data-terminal-send="{PeerId.value author}"
                           @click={Ev(fun _ -> actions.SendTerminalDraft terminal author)}>{Icon.send}</button>
                 </div>"""
         let drafting = ClientModel.terminalDrafts terminal model
@@ -1978,7 +1978,7 @@ module View =
                         <div class="{Style.terminalCommandTrail}">
                           <span class="{Style.terminalEditors}">{editors mine}</span>
                           <button type="button" class="{runClass}" aria-label="Run" aria-keyshortcuts="Enter"
-                                  data-terminal-send="{(PeerId.value mine : string)}"
+                                  data-terminal-send="{PeerId.value mine}"
                                   @click={Ev(fun _ -> actions.SendTerminalDraft terminal mine)}>{Icon.send}</button>
                         </div>
                       </div>
@@ -1990,12 +1990,12 @@ module View =
             if not integrationLost then Lit.nothing
             else
                 html $"""
-                    <div class="{Style.terminalBandRow}" data-terminal-lost="{(TerminalId.value terminal : string)}" aria-live="polite">
+                    <div class="{Style.terminalBandRow}" data-terminal-lost="{TerminalId.value terminal}" aria-live="polite">
                       <span class="{Style.statusErr}">not marking</span>
                       <span class="{Style.small}">{Dom.Text.terminalNotMarking}</span>
                       {detailNote "terminal-lost" [ Dom.Text.terminalNotMarkingWhy ]}
                       <div class="ml-auto flex items-center gap-2">
-                        <button type="button" class="{Style.btnPrimary}" data-terminal-rearm="{(TerminalId.value terminal : string)}"
+                        <button type="button" class="{Style.btnPrimary}" data-terminal-rearm="{TerminalId.value terminal}"
                                 @click={Ev(fun _ -> actions.RearmTerminal terminal)}>Re-arm</button>
                       </div>
                     </div>"""
@@ -2083,7 +2083,7 @@ module View =
             else
                 html $"""
                     <span class="{Style.statusErr}"
-                          data-terminal-replay-gone="{(TerminalId.value view.TerminalId : string)}">recording not kept</span>"""
+                          data-terminal-replay-gone="{TerminalId.value view.TerminalId}">recording not kept</span>"""
         html $"""
             <section class="{Style.terminalComposer}">
               <span class="{Style.bandRail}"></span>
@@ -2157,7 +2157,7 @@ module View =
         match found with
         | None ->
             html $"""
-                <div class="{Style.paneReadonly}" data-pane-block="{(BlockId.value blockId : string)}">
+                <div class="{Style.paneReadonly}" data-pane-block="{BlockId.value blockId}">
                   <div class="{Style.terminalOutputEmpty}">not on this device</div>
                 </div>"""
         | Some block ->
@@ -2179,7 +2179,7 @@ module View =
                                  |> Option.defaultValue []) then Lit.nothing
                 else
                     html $"""
-                        <button type="button" class="{Style.btn}" data-pane-show-in-terminal="{(BlockId.value blockId : string)}"
+                        <button type="button" class="{Style.btn}" data-pane-show-in-terminal="{BlockId.value blockId}"
                                 @click={Ev(fun _ ->
                                               dispatch (ShowInPaneMsg (ReadingAt (terminalId, blockId)))
                                               actions.RevealBlock terminalId blockId
@@ -2216,11 +2216,11 @@ module View =
                           {terminalBlockOutput feed block}
                         </div>"""
             html $"""
-                <section class="{Style.paneBody}" data-pane-block="{(BlockId.value blockId : string)}">
+                <section class="{Style.paneBody}" data-pane-block="{BlockId.value blockId}">
                   <div class="{Style.paneFacts}">
                     <div class="{Style.terminalBlockCommand}">
                       <span class="{Style.terminalPrompt}">$</span>
-                      <code class="{Style.terminalCommandText}">{(block.Command : string)}</code>
+                      <code class="{Style.terminalCommandText}">{block.Command}</code>
                       <span class="ml-auto shrink-0">{terminalBlockStatus model block.Status}</span>
                     </div>
                   </div>
@@ -2255,7 +2255,7 @@ module View =
               <div class="{Style.paneFacts}" data-pane-stretch="{TerminalStretch.key stretch}">
                 <div class="{Style.terminalQueuedRow}">
                   <span class="{Style.chatChipWho}">{authorName model stretch.Holder}</span>
-                  <span class="{Style.small}">typed in {(stretch.Title : string)} for {length}</span>
+                  <span class="{Style.small}">typed in {stretch.Title} for {length}</span>
                   <span class="ml-auto shrink-0">{stretchEnding model stretch.End}</span>
                 </div>
                 {recording}
@@ -2306,13 +2306,13 @@ module View =
                 |> List.map (fun (peer, name) ->
                     html $"""
                         <span class="{Style.draftEditorDot}" style="background:{PeerColour.ofPeer peer}"
-                              title="{name}" data-terminal-tab-peer="{(PeerId.value peer : string)}"></span>""")
+                              title="{name}" data-terminal-tab-peer="{PeerId.value peer}"></span>""")
             let rewind =
                 if not affords.CanRewind then Lit.nothing
                 else
                     html $"""
                         <button type="button" class="{Style.btnIconBare}" data-terminal-list-rewind="{id}"
-                                aria-label="Watch {(TerminalTitle.value view.Title : string)} from behind its edge"
+                                aria-label="Watch {TerminalTitle.value view.Title} from behind its edge"
                                 @click={Ev(fun _ ->
                                               // ONE message. It used to be this and a select
                                               // beside it, and the second cleared the pin the
@@ -2326,14 +2326,14 @@ module View =
                 else
                     html $"""
                         <button type="button" class="{Style.btnIconBare}" data-terminal-reattach="{id}"
-                                aria-label="Attach {(TerminalTitle.value view.Title : string)} again"
+                                aria-label="Attach {TerminalTitle.value view.Title} again"
                                 @click={Ev(fun _ -> actions.ReattachTerminal view.TerminalId)}>{Icon.attach}</button>"""
             let kill =
                 if not affords.CanKill then Lit.nothing
                 else
                     html $"""
                         <button type="button" class="{Style.btnIconBareDanger}" data-terminal-close="{id}"
-                                aria-label="Kill {(TerminalTitle.value view.Title : string)}"
+                                aria-label="Kill {TerminalTitle.value view.Title}"
                                 @click={Ev(fun _ -> actions.CloseTerminal view.TerminalId)}>{Icon.stop}</button>"""
             let nameClass = if view.IsOpen then Style.terminalListName else Style.terminalListNameClosed
             html $"""
@@ -2341,7 +2341,7 @@ module View =
                   {state}
                   <span class="min-w-0 flex items-center">
                     <button type="button" class="{nameClass}" data-terminal-list-row="{id}"
-                            @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (TerminalTab view.TerminalId))); actions.FocusPane ())}>{(TerminalTitle.value view.Title : string)}</button>
+                            @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (TerminalTab view.TerminalId))); actions.FocusPane ())}>{TerminalTitle.value view.Title}</button>
                     <span class="{Style.terminalTabPeers}">{peers}</span>
                   </span>
                   <span class="{Style.terminalListVerbs}">{rewind}{reattach}{kill}</span>
@@ -2389,7 +2389,7 @@ module View =
                 |> List.map (fun (peer, name) ->
                     html $"""
                         <span class="{Style.draftEditorDot}" style="background:{PeerColour.ofPeer peer}"
-                              title="{name}" data-terminal-tab-peer="{(PeerId.value peer : string)}"></span>""")
+                              title="{name}" data-terminal-tab-peer="{PeerId.value peer}"></span>""")
             // Two literal spellings of one button, because lit-html cannot inject an
             // attribute NAME through a hole — and the open/closed hooks must stay apart:
             // there is nothing to run in a closed terminal, only something to read.
@@ -2398,12 +2398,12 @@ module View =
                     <button type="button" role="tab" class="{klass}" data-pane-tab="{key}" data-terminal-tab="{id}"
                             aria-selected="{selectedAttr}" tabindex="{tabIndex}" title="{hint}"
                             data-pane-tab-pinned="{pinnedAttr}"
-                            @click={Ev(fun _ -> activate ())}>{(TerminalTitle.value view.Title : string)}{pinMark}<span class="{Style.terminalTabPeers}">{peers}</span></button>"""
+                            @click={Ev(fun _ -> activate ())}>{TerminalTitle.value view.Title}{pinMark}<span class="{Style.terminalTabPeers}">{peers}</span></button>"""
             else
                 html $"""
                     <button type="button" role="tab" class="{klass}" data-pane-tab="{key}" data-terminal-closed-tab="{id}"
                             aria-selected="{selectedAttr}" tabindex="{tabIndex}"
-                            @click={Ev(fun _ -> activate ())}>{(TerminalTitle.value view.Title : string)}<span class="{Style.small}"> · closed</span><span class="{Style.terminalTabPeers}">{peers}</span></button>"""
+                            @click={Ev(fun _ -> activate ())}>{TerminalTitle.value view.Title}<span class="{Style.small}"> · closed</span><span class="{Style.terminalTabPeers}">{peers}</span></button>"""
         // What a tab is CALLED — read by the tab itself and by the properties bar, which names
         // the selected one. One function, so the strip and the bar can never disagree about
         // what you are looking at.
@@ -2473,7 +2473,7 @@ module View =
             let affords = ClientModel.affordances view model
             let truncated =
                 if view.DroppedBytes > 0 then
-                    html $"""<div class="{Style.terminalTruncated}" data-terminal-truncated="{string view.DroppedBytes}">{(view.DroppedBytes : int)} bytes dropped</div>"""
+                    html $"""<div class="{Style.terminalTruncated}" data-terminal-truncated="{string view.DroppedBytes}">{view.DroppedBytes} bytes dropped</div>"""
                 else Lit.nothing
             let blocks =
                 // An idle prompt IS the empty state a terminal-shaped surface already has a
@@ -2513,7 +2513,7 @@ module View =
                         | _ -> "behind live"
                     html $"""
                         <div class="{Style.terminalLiveFloat}">
-                          <span class="{Style.statusFaint}" data-terminal-behind="{(TerminalId.value view.TerminalId : string)}">{behind}</span>
+                          <span class="{Style.statusFaint}" data-terminal-behind="{TerminalId.value view.TerminalId}">{behind}</span>
                         </div>"""
             // In live mode the block history gives way to the SCREEN (Plan 14, stage 6). A
             // program is running here and what it displays is not a list of commands and
@@ -2551,7 +2551,7 @@ module View =
                     else
                         html $"""
                             <div class="{Style.terminalScrollback}" data-terminal-scrollback
-                                 data-terminal-id="{(TerminalId.value view.TerminalId : string)}">
+                                 data-terminal-id="{TerminalId.value view.TerminalId}">
                               <div class="{Style.terminalStream}">
                                 {truncated}
                                 {blocks}
@@ -2612,7 +2612,7 @@ module View =
                         if not view.IsOpen || Option.isSome view.Lease then Lit.nothing
                         else
                             html $"""
-                                <button type="button" class="{Style.terminalBarAct}" data-terminal-take="{(TerminalId.value view.TerminalId : string)}"
+                                <button type="button" class="{Style.terminalBarAct}" data-terminal-take="{TerminalId.value view.TerminalId}"
                                         @click={Ev(fun _ -> actions.TakeTerminal view.TerminalId)}>take</button>"""
                     // The one control between this terminal's two reads, in one slot whatever
                     // it is doing (Plan 25, stage 3). In the bar rather than in the content
