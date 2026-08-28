@@ -1352,15 +1352,28 @@ let private fixtureProject =
 let private fixtureSource =
     Path.Combine (repoRoot, "analyzers", "fixtures", "TemplateHoleFixture", "Holes.fs")
 
+/// The CLI answers by EXITING non-zero, and it does that for two different reasons: it
+/// reported something, or it fell over. Those must not read the same. It reads a project by
+/// COMPILING it, and asking the typed tree about an expression the compiler only got through
+/// by error recovery throws out of FCS — so an unrestored project takes the whole run down.
+/// A run that died judged nothing, and reporting it as "a hole renders the wrong thing" sends
+/// the next reader to a template that is fine.
 let private analyze (projects: string list) =
-    runCapturing
-        "dotnet"
-        [ "fsharp-analyzers"
-          for p in projects do
-              "--project"
-              p
-          "--analyzers-path"
-          analyzerOutput ]
+    let code, output =
+        runCapturing
+            "dotnet"
+            [ "fsharp-analyzers"
+              for p in projects do
+                  "--project"
+                  p
+              "--analyzers-path"
+              analyzerOutput ]
+
+    if output.Contains "critical: Unhandled exception" then
+        printfn "%s" output
+        failwith "lint: the analyzer died reading these projects, so it has judged no template hole either way"
+
+    code, output
 
 /// The lines a diagnostic was reported on, whatever else it said. Enough to compare against
 /// the fixture's markers and nothing more: pinning the message text would make every reword
@@ -1384,6 +1397,12 @@ let private reportedLines (output: string) =
 let private analyzers () =
     restore ()
     exec "dotnet" [ "build"; "analyzers/Yession.Analyzers/Yession.Analyzers.fsproj"; "-c"; "Release" ]
+    // Both restores are load-bearing, and the solution one is easy to think redundant on a
+    // machine that has built before. It is not: `lint` runs FIRST in the PR gate, on a fresh
+    // checkout where nothing has restored anything, and a project whose references have not
+    // resolved compiles only through error recovery — which is the one thing the typed-tree
+    // API cannot be asked about. The fixture is not in the solution, so it needs its own.
+    exec "dotnet" [ "restore"; "Yession.slnx" ]
     exec "dotnet" [ "restore"; fixtureProject ]
 
     let code, output = analyze (solutionProjects ())
