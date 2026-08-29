@@ -327,12 +327,37 @@ first's.
   (AgentSandbox): allowlisted baseline + proxy passthrough, a per-session scratch HOME
   (`<data>/agent-home` — `~/.claude` state lives and dies with the session), exactly one
   credential, and a process-group kill on the SDK's forwarded abort signal.
-  srt — the default — adds OS confinement around it: the CLI reads and writes its scratch
-  HOME and reads the host runtime, and nothing else of the operator's files; and it reaches
-  only `AgentSandbox`'s domains (`YESSION_SESSION_AGENT_NET`). `YESSION_SESSION_AGENT_BACKEND=host` opts out, leaving the file
-  system and network open to the CLI. Docker is BY DESIGN not an agent backend: a container
-  per session boot is the opposite of the sub-second start the agent needs, and the
-  WorkSandbox keeps it.
+  srt adds OS confinement around it: the CLI reads and writes its scratch HOME and reads
+  the host runtime, and nothing else of the operator's files; and it reaches only
+  `AgentSandbox`'s domains (`YESSION_SESSION_AGENT_NET`). Docker is BY DESIGN not an agent
+  backend: a container per session boot is the opposite of the sub-second start the agent
+  needs, and the WorkSandbox keeps it.
+  - **The default is `host`, and unlike the WorkSandbox's that is a shortfall rather than
+    a decision.** `YESSION_SESSION_AGENT_BACKEND=srt` confines the CLI and is the answer
+    this wants; it is not the default because it does not yet work. The variable used to
+    be read TWICE, with two defaults — `SessionMain` said `srt` and validated srt's tools
+    on the strength of it, `Agent.fs` said `host` where the spawner is actually built — so
+    a deployment that set nothing ran the CLI unconfined while every statement the session
+    made about itself said otherwise. #364 made it one reader; making that reader say `srt`
+    turned the release gate's live turn red, stalling its whole 90s having streamed
+    nothing.
+    - **What is NOT the cause**, since each was checked: every `Srt` suite passes,
+      including the one pinning that the agent's own sandbox keeps the runtime that starts
+      the CLI, and the one driving the async spawn seam end to end. The read scope reaches
+      the SDK's vendored binary under devenv, because `process.execPath` allows `/nix/store`
+      back. So the fault is something only a real turn reaches, which is exactly the tier
+      no pull request runs.
+    - **The suspicion, untested.** srt filters egress through a proxy of its own, and the
+      spawner hands the SDK the POLICY env verbatim (`options.env` IS that map, by
+      construction). Anything srt's wrap would add to a child's environment for its own
+      proxy — a CA bundle, a proxy address — is therefore not obviously surviving into the
+      CLI, and a CLI that cannot verify the interception hangs rather than failing loudly,
+      which is the symptom. Settling it needs the live tier and nothing else:
+      `gh workflow run verify.yml --ref <branch> -f capabilities="LiveAgent Ports Native
+      Srt" -f only="add_repo"`, with `YESSION_SESSION_AGENT_BACKEND=srt`.
+    - Until then the agent CLI is confined only by its env allowlist and its scratch HOME —
+      the same standing as `host` everywhere else, and stated here rather than implied by a
+      default nobody could have run.
   - The SDK's spawn seam is SYNCHRONOUS and srt's wrap is not, so the srt tier hands the
     SDK a stand-in process whose streams are live immediately and joins the real child to
     them when the wrap resolves. It is plumbing, not policy, and the `Srt` suite drives it

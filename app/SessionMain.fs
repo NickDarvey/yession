@@ -115,11 +115,21 @@ let private grantsFor (selection: ResourceName list) : Result<ResourceLeaf list,
 // The AgentSandbox backend (`YESSION_SESSION_AGENT_BACKEND`): where the agent CLI process
 // runs — host or srt, never docker (a work-sandbox-only backend). Both tiers go through
 // the SDK's `spawnClaudeCodeProcess` seam with an allowlisted env and a scratch HOME
-// (Agent.fs); srt adds the OS-level confinement around it. Defaults to `srt` for the
-// same reason the WorkSandbox does. Parsed HERE, at boot, so a bad value fails the
-// session at start rather than mid-turn. Fail closed, never a silent fallback.
+// (Agent.fs); srt adds the OS-level confinement around it. Parsed HERE, at boot, so a bad
+// value fails the session at start rather than mid-turn. Fail closed, never a silent
+// fallback, and read in exactly one place — `SandboxBackends` (the suite) keeps it there,
+// because this variable had two readers with two defaults and the weaker one was winning.
+//
+// The default is `host`, which is NOT the WorkSandbox's answer and is not what this ought
+// to be. It is what the srt agent path has actually been proven to do: #364 made this
+// `srt`, and the release gate's live turn then stalled its full 90s having streamed
+// nothing — the agent CLI comes up inside srt and never answers. Every srt suite passes,
+// including the one pinning that the agent's own sandbox keeps the runtime that starts the
+// CLI, so what fails is something only a real turn reaches; docs/GAPS.md carries the
+// suspicion and what it would take to settle it. Confining the agent CLI by default is
+// worth having and is not a default anybody can turn on until that works.
 let private agentBackend =
-    match SandboxBackend.parseAgent (Interop.envOr "YESSION_SESSION_AGENT_BACKEND" "srt") with
+    match SandboxBackend.parseAgent (Interop.envOr "YESSION_SESSION_AGENT_BACKEND" "host") with
     | Ok backend -> backend
     | Error e -> failwithf "agent sandbox: %s" e
 
