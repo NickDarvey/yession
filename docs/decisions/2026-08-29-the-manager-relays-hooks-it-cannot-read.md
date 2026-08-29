@@ -86,6 +86,3 @@ this repository, in the session that watches pull requests.
   the alternative is a session verifying its own endpoint, and that is not built.
 - **A filter that genuinely needs disjunction.** That is the moment to ask what it is really
   for, not the moment to add an operator.
-- **Multi-tenant filters.** A session may declare any filter, so on a shared Manager one
-  user's session could ask for another's deliveries. Recorded in GAPS with the exit — bind a
-  subscription to what the subscriber's credential can see.
