@@ -22,7 +22,9 @@
 
   <ItemGroup>
     <Compile Include="TemplateHoles.fs" />
+    <Compile Include="Emits.fs" />
     <Compile Include="EmitMacro.fs" />
+    <Compile Include="EmitBody.fs" />
   </ItemGroup>
 
   <ItemGroup>
