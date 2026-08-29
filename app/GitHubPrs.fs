@@ -51,10 +51,14 @@ type PrFetchOutcome =
     | PrUnchanged
     | PrFetchFailed of PrFetchFailure
 
-/// THE SEAM: one look at one pull request, with whatever credential the caller resolved.
+/// THE SEAM: one look at one pull request, with whatever credential the caller resolved
+/// and whatever it last knew — the ETags to ask conditionally with, and the snapshot they
+/// were taken alongside. Both, because the two halves of a look move independently: the
+/// snapshot is what fills in the half that answered 304.
+///
 /// The poller, the watch verb and every test hold this signature, so replacing polling
 /// with a pushed stream later replaces an implementation rather than a design.
-type FetchPr = string option -> PrRef -> PrEtags -> Async<PrFetchOutcome>
+type FetchPr = string option -> PrRef -> PrEtags -> PrSnapshot option -> Async<PrFetchOutcome>
 
 // --- the provider's JSON, decoded ------------------------------------------------------
 
@@ -143,41 +147,72 @@ let private failureOf (reply: FetchReply) : PrFetchFailure =
 /// reason `GitHubConnection.refusedAt` takes one: a suite needs somewhere to point it
 /// that is not the live provider.
 let fetchOver (apiBase: string) : FetchPr =
-    fun token pr etags ->
+    fun token pr etags last ->
         async {
             let bearer = defaultArg token ""
             let repo = RepoRef.value pr.Repo
+            let succeeded (reply: FetchReply) = reply.reachable && reply.status >= 200 && reply.status < 300
+            let notModified (reply: FetchReply) = reply.reachable && reply.status = 304
             let prUrl = sprintf "%s/repos/%s/pulls/%d" (apiBase.TrimEnd '/') repo pr.Number
             let! prReply = getConditional prUrl bearer etags.Pr |> Interop.awaitPromise
-            if prReply.reachable && prReply.status = 304 then
-                // The pull request itself has not moved, so neither has its head sha —
-                // and the checks URL is keyed by that sha. Asking again would spend a
-                // request to be told the same thing.
-                return PrUnchanged
-            elif not (prReply.reachable && prReply.status >= 200 && prReply.status < 300) then
-                return PrFetchFailed (failureOf prReply)
-            else
-                match Decode.fromString prDecoder prReply.body with
-                | Error e -> return PrFetchFailed (PrUnreachable (sprintf "unrecognised pull request reply: %s" e))
-                | Ok (state, title, headSha, mergeable) ->
-                    let checksUrl =
-                        sprintf "%s/repos/%s/commits/%s/check-runs?per_page=100" (apiBase.TrimEnd '/') repo headSha
-                    let! checksReply = getConditional checksUrl bearer etags.Checks |> Interop.awaitPromise
-                    // A checks endpoint that fails does not fail the whole look: the pull
-                    // request's own state is the more important half and is already in
-                    // hand. `ChecksNone` would be a lie, so an unreadable rollup keeps
-                    // whatever the last one said by reporting pending — the next poll
-                    // settles it either way.
+            // The pull request's own fields, decoded when it answered with a body and
+            // carried over from the last look when it answered 304.
+            //
+            // BOTH halves are always asked, and that is the point. The check runs on a
+            // commit go queued -> in_progress -> completed without the pull request
+            // resource moving at all, so returning early on its 304 is how a watch sits
+            // on `pending` for the whole life of a build that has already gone green.
+            // Asking twice is free in the only currency that binds: GitHub does not count
+            // a 304 against the primary rate limit.
+            let fields =
+                if notModified prReply then
+                    // Nothing to carry means nothing to say. Unreachable in practice — an
+                    // ETag only exists because a body came back once — but total here
+                    // rather than a guess.
+                    Ok (last |> Option.map (fun s -> s.State, s.Title, s.HeadSha, s.Mergeable))
+                elif succeeded prReply then
+                    Decode.fromString prDecoder prReply.body
+                    |> Result.map Some
+                    |> Result.mapError (sprintf "unrecognised pull request reply: %s")
+                else Ok None
+            match fields with
+            | Error e -> return PrFetchFailed (PrUnreachable e)
+            | Ok None when not (notModified prReply) -> return PrFetchFailed (failureOf prReply)
+            | Ok None -> return PrUnchanged
+            | Ok (Some (state, title, headSha, mergeable)) ->
+                let checksUrl =
+                    sprintf "%s/repos/%s/commits/%s/check-runs?per_page=100" (apiBase.TrimEnd '/') repo headSha
+                let! checksReply = getConditional checksUrl bearer etags.Checks |> Interop.awaitPromise
+                if notModified prReply && notModified checksReply then
+                    // Both halves unchanged: there is nothing to fold and nothing to say.
+                    return PrUnchanged
+                else
+                    // A checks endpoint that says nothing readable does not fail the whole
+                    // look — the pull request's own state is the more important half and
+                    // is already in hand. On the SAME head sha the last rollup still
+                    // stands (a 304 can only mean that, because the checks URL is keyed by
+                    // the sha); on a new one it does not, and pending is the honest answer
+                    // for a commit whose runs have not been read. Never `ChecksNone`,
+                    // which would claim there are none.
+                    let unread =
+                        match last with
+                        | Some s when s.HeadSha = headSha -> s.Checks
+                        | _ -> ChecksPending
                     let checks =
-                        if checksReply.reachable && checksReply.status >= 200 && checksReply.status < 300 then
+                        if succeeded checksReply then
                             match Decode.fromString checkRunsDecoder checksReply.body with
                             | Ok runs -> rollupOf runs
-                            | Error _ -> ChecksPending
-                        elif checksReply.reachable && checksReply.status = 304 then ChecksPending
-                        else ChecksPending
+                            | Error _ -> unread
+                        else unread
                     let snapshot =
                         { State = state; Title = title; HeadSha = headSha; Checks = checks; Mergeable = mergeable }
-                    return PrChanged (snapshot, { Pr = prReply.etag; Checks = checksReply.etag })
+                    // An ETag is replaced only by a half that actually answered with one.
+                    // A 304 carries back the ETag we sent, so keeping the old one says the
+                    // same thing without depending on the provider echoing it.
+                    let nextEtags =
+                        { Pr = (if succeeded prReply then prReply.etag else etags.Pr)
+                          Checks = (if succeeded checksReply then checksReply.etag else etags.Checks) }
+                    return PrChanged (snapshot, nextEtags)
         }
 
 // --- the poller --------------------------------------------------------------------------
@@ -281,7 +316,7 @@ let create
             | _ ->
                 entry.SkipUntilEpoch <- None
                 let! token = resolveToken entry.Watcher
-                let! outcome = fetch token entry.Pr entry.Etags
+                let! outcome = fetch token entry.Pr entry.Etags entry.Snapshot
                 match outcome with
                 | PrUnchanged -> return false
                 | PrChanged (snapshot, etags) ->
@@ -385,7 +420,7 @@ let watchService
                                 (ChecksRollup.describe existing.Known.Checks))
                 | None ->
                     let! token = resolveToken credential
-                    let! outcome = fetch token pr PrEtags.none
+                    let! outcome = fetch token pr PrEtags.none None
                     match outcome with
                     | PrFetchFailed PrNotFound ->
                         return
