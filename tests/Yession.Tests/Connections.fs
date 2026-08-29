@@ -1819,7 +1819,7 @@ let private scriptedFetch (outcomes: GitHubPrs.PrFetchOutcome list) : ScriptedFe
     let calls = ResizeArray<string option * GitHubPrs.PrEtags> ()
     { Calls = calls
       Fetch =
-        fun token _ etags ->
+        fun token _ etags _ ->
             async {
                 calls.Add (token, etags)
                 if remaining.Count = 0 then return GitHubPrs.PrUnchanged
@@ -2058,7 +2058,7 @@ let private prFetchTests =
             async {
                 let! stub = startStubGitHubApi ()
                 let fetch = GitHubPrs.fetchOver stub.Url
-                match! fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none with
+                match! fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none None with
                 | GitHubPrs.PrChanged (snapshot, etags) ->
                     Expect.equal snapshot.State PrOpen "open"
                     Expect.equal snapshot.HeadSha "abc123" "head sha"
@@ -2075,11 +2075,49 @@ let private prFetchTests =
             async {
                 let! stub = startStubGitHubApi ()
                 let fetch = GitHubPrs.fetchOver stub.Url
-                match! fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none with
-                | GitHubPrs.PrChanged (_, etags) ->
-                    match! fetch (Some "token-abc") prOne etags with
+                match! fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none None with
+                | GitHubPrs.PrChanged (snapshot, etags) ->
+                    match! fetch (Some "token-abc") prOne etags (Some snapshot) with
                     | GitHubPrs.PrUnchanged -> ()
                     | other -> failwithf "expected unchanged, got %A" other
+                | other -> failwithf "expected a snapshot, got %A" other
+            }
+
+        testCaseAsync "check runs that move on an unchanged pull request still reach the caller" <|
+            async {
+                let! stub = startStubGitHubApi ()
+                let fetch = GitHubPrs.fetchOver stub.Url
+                let! first = fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none None
+                let etags, seen =
+                    match first with
+                    | GitHubPrs.PrChanged (s, e) -> e, Some s
+                    | other -> failwithf "expected a snapshot, got %A" other
+                // A suite going from green to running touches the check runs on the head
+                // commit and nothing else — the pull request resource does not move, so it
+                // answers 304. This is what CI finishing looks like from here.
+                stub.SetCheckRuns """{"check_runs":[{"status":"in_progress","conclusion":null}]}"""
+                match! fetch (Some "token-abc") prOne etags seen with
+                | GitHubPrs.PrChanged (snapshot, _) ->
+                    Expect.equal snapshot.Checks ChecksPending "the moved rollup arrived even though the pull request did not"
+                | other -> failwithf "expected a snapshot, got %A" other
+            }
+
+        testCaseAsync "a pull request that moves on its own keeps the rollup its checks last reported" <|
+            async {
+                let! stub = startStubGitHubApi ()
+                let fetch = GitHubPrs.fetchOver stub.Url
+                let! first = fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none None
+                let etags, seen =
+                    match first with
+                    | GitHubPrs.PrChanged (s, e) -> e, Some s
+                    | other -> failwithf "expected a snapshot, got %A" other
+                // The other half of the same rule: an edit moves the pull request while its
+                // checks answer 304 on the same head sha. Reporting pending there would
+                // invent a transition out of a title change.
+                stub.SetPr """{"state":"open","merged":false,"title":"Add feature, renamed","head":{"sha":"abc123"},"mergeable":true}"""
+                match! fetch (Some "token-abc") prOne etags seen with
+                | GitHubPrs.PrChanged (snapshot, _) ->
+                    Expect.equal snapshot.Checks ChecksGreen "the unmoved rollup was carried, not reset to pending"
                 | other -> failwithf "expected a snapshot, got %A" other
             }
 
@@ -2087,10 +2125,13 @@ let private prFetchTests =
             async {
                 let! stub = startStubGitHubApi ()
                 let fetch = GitHubPrs.fetchOver stub.Url
-                let! first = fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none
-                let etags = match first with GitHubPrs.PrChanged (_, e) -> e | _ -> GitHubPrs.PrEtags.none
+                let! first = fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none None
+                let etags, seen =
+                    match first with
+                    | GitHubPrs.PrChanged (s, e) -> e, Some s
+                    | _ -> GitHubPrs.PrEtags.none, None
                 stub.SetPr """{"state":"closed","merged":true,"title":"Add feature","head":{"sha":"abc123"},"mergeable":null}"""
-                match! fetch (Some "token-abc") prOne etags with
+                match! fetch (Some "token-abc") prOne etags seen with
                 | GitHubPrs.PrChanged (snapshot, _) -> Expect.equal snapshot.State PrMerged "the merge arrived"
                 | other -> failwithf "expected a snapshot, got %A" other
             }
@@ -2100,11 +2141,11 @@ let private prFetchTests =
                 let! stub = startStubGitHubApi ()
                 let fetch = GitHubPrs.fetchOver stub.Url
                 stub.SetStatus 401
-                match! fetch (Some "stale") prOne GitHubPrs.PrEtags.none with
+                match! fetch (Some "stale") prOne GitHubPrs.PrEtags.none None with
                 | GitHubPrs.PrFetchFailed GitHubPrs.PrUnauthorized -> ()
                 | other -> failwithf "expected unauthorized, got %A" other
                 stub.SetStatus 404
-                match! fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none with
+                match! fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none None with
                 | GitHubPrs.PrFetchFailed GitHubPrs.PrNotFound -> ()
                 | other -> failwithf "expected not found, got %A" other
             }
