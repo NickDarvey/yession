@@ -260,6 +260,12 @@ Register an App (not an OAuth App), and:
   expiration off yields a permanent token instead, and nothing tells you which of the two
   you registered.
 
+- **Point its webhook at your Manager, if you have declared a hook endpoint** (see
+  §Webhooks). Set the URL to `<YESSION_MANAGER_URL>/hooks/github` and paste in the secret
+  the manager page shows. A watched pull request then reacts in seconds instead of within
+  the poll interval. Skip it and everything still works — polling is the mechanism, and a
+  hook only advances its clock.
+
 Then name its client id:
 
 ```

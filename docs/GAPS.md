@@ -611,8 +611,9 @@ first's.
   needs admin on the repo, and inbound delivery needs a deployment github.com can reach,
   which the loopback default is not. What follows from that, all accepted:
   - **Up to fifteen seconds of latency while a suite is in flight, and up to a minute
-    otherwise**, with no way to ask for less short of editing the two constants in
-    `GitHubPrs`. Only the pending cadence costs anything — a settled watch is two
+    otherwise** — unless a hook endpoint is declared and the App's webhook points at it
+    (deployment.md §Webhooks), which drops it to seconds. There is no way to ask for less
+    from polling short of editing the two constants in `GitHubPrs`. Only the pending cadence costs anything — a settled watch is two
     conditional requests that both answer 304, which GitHub does not charge for — and the
     pending one puts the ceiling around ten pull requests with live suites at once per
     credential. Lowering it again buys latency at that ceiling's expense, which is the

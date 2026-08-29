@@ -17,6 +17,7 @@ module Yession.Host.GitHubPrs
 open System
 open Fable.Core
 open Yession.Domain
+open Yession.Domain.Hooks
 open Yession.Domain.Prs
 open Yession.Domain.Tools
 
@@ -222,6 +223,8 @@ type PrWatchRow =
     { Pr : PrRef
       Watcher : ActorRef
       Snapshot : PrSnapshot option
+      /// Has a delivery ever reached this watch?
+      Pushed : bool
       /// `None` while the last look worked; the reason otherwise, so a query reader
       /// learns what is wrong rather than seeing a row that silently stopped moving.
       Health : string option }
@@ -270,7 +273,18 @@ type private WatchEntry =
       /// Distinct from `SkipUntilEpoch` because they are different facts: that one is the
       /// provider telling us to come back later, this one is our own cadence. Either can
       /// hold a watch, and the later of the two wins by simply both being checked.
-      mutable DueAtEpoch : int64 }
+      mutable DueAtEpoch : int64
+      /// Is a look at this watch in flight? One push delivers several events within a
+      /// second, and two overlapping looks could each `detect` the same transition and
+      /// record it twice — so a poke arriving mid-look is remembered rather than raced.
+      mutable InFlight : bool
+      /// A poke that arrived while a look was in flight. The completing look runs once
+      /// more for it, which collapses a burst into at most one extra look.
+      mutable PokeAgain : bool
+      /// Has a delivery ever reached this watch? Reported in the query, because "is my hook
+      /// wired up?" is otherwise unanswerable from anywhere: a working hook and a missing
+      /// one look identical apart from latency, and latency is what nobody measures.
+      mutable Pushed : bool }
 
 /// Every pull request this session watches, and what it last learned about them.
 type PrWatchers =
@@ -285,6 +299,14 @@ type PrWatchers =
       /// could forget to append them is a driver that eventually does — and the baseline
       /// this compares against is only durable if what advanced it was recorded.
       Poll : unit -> Async<bool>
+      /// Look at every watch on this repo NOW, whatever its cadence said — what a pushed
+      /// delivery does. It never overrides the PROVIDER's hold: GitHub naming the moment it
+      /// will answer again is not something a push knows better than.
+      ///
+      /// A delivery is a poke rather than a payload: it says look, not what to think. So
+      /// the ETags, the baseline, the transition detection and the wake stay the one path
+      /// they were, and a delivery that never arrives costs an interval rather than a fact.
+      Poke : RepoRef -> Async<bool>
       Rows : unit -> PrWatchRow list }
 
 module PrWatchers =
@@ -294,6 +316,7 @@ module PrWatchers =
     let none : PrWatchers =
         { Apply = fun _ -> ()
           Poll = fun () -> async { return false }
+          Poke = fun _ -> async { return false }
           Rows = fun () -> [] }
 
 /// Build the poller.
@@ -330,7 +353,10 @@ let create
                       Etags = PrEtags.none
                       Health = None
                       SkipUntilEpoch = None
-                      DueAtEpoch = 0L })
+                      DueAtEpoch = 0L
+                      InFlight = false
+                      PokeAgain = false
+                      Pushed = false })
 
     /// How long until this watch is next due, given what a look just found. `None` is a
     /// look that produced no rollup — a failure — and waits the slow interval like a
@@ -340,11 +366,13 @@ let create
         | Some ChecksPending -> int64 PendingIntervalMs / 1000L
         | _ -> int64 SettledIntervalMs / 1000L
 
-    let pollEntry (entry: WatchEntry) : Async<bool> =
+    let pollEntry (force: bool) (entry: WatchEntry) : Async<bool> =
         async {
             let nowEpoch = (now ()).ToUnixTimeSeconds ()
             let heldByProvider = entry.SkipUntilEpoch |> Option.exists (fun until -> int64 until > nowEpoch)
-            if heldByProvider || entry.DueAtEpoch > nowEpoch then return false
+            // A poke overrides OUR cadence and never the provider's hold — asking inside a
+            // window GitHub already named would spend a request to be refused.
+            if heldByProvider || (not force && entry.DueAtEpoch > nowEpoch) then return false
             else
                 entry.SkipUntilEpoch <- None
                 let! token = resolveToken entry.Watcher
@@ -390,6 +418,28 @@ let create
                     return moved
         }
 
+    /// One look at one watch, with the in-flight bookkeeping around it. A poke that lands
+    /// while a look is running is remembered and served by that look when it finishes, so a
+    /// push delivering five events in a second costs one extra look rather than five — and,
+    /// more importantly, never two overlapping ones recording the same transition twice.
+    let rec look (force: bool) (entry: WatchEntry) : Async<bool> =
+        async {
+            if force then entry.Pushed <- true
+            if entry.InFlight then
+                entry.PokeAgain <- entry.PokeAgain || force
+                return false
+            else
+                entry.InFlight <- true
+                let! moved = pollEntry force entry
+                entry.InFlight <- false
+                if entry.PokeAgain then
+                    entry.PokeAgain <- false
+                    let! again = look true entry
+                    return moved || again
+                else
+                    return moved
+        }
+
     { Apply = apply
       Poll =
         fun () ->
@@ -398,7 +448,16 @@ let create
                 // A snapshot of the list, so a watch added mid-tick is picked up by the
                 // next one rather than mutating what this one is walking.
                 for entry in List.ofSeq entries do
-                    let! entryMoved = pollEntry entry
+                    let! entryMoved = look false entry
+                    moved <- moved || entryMoved
+                return moved
+            }
+      Poke =
+        fun repo ->
+            async {
+                let mutable moved = false
+                for entry in entries |> List.filter (fun e -> e.Pr.Repo = repo) do
+                    let! entryMoved = look true entry
                     moved <- moved || entryMoved
                 return moved
             }
@@ -406,7 +465,11 @@ let create
         fun () ->
             entries
             |> List.map (fun e ->
-                { Pr = e.Pr; Watcher = e.Watcher; Snapshot = e.Snapshot; Health = e.Health }) }
+                { Pr = e.Pr
+                  Watcher = e.Watcher
+                  Snapshot = e.Snapshot
+                  Pushed = e.Pushed
+                  Health = e.Health }) }
 
 // --- the watch verbs ----------------------------------------------------------------------
 
@@ -507,6 +570,96 @@ let watchService
                         return Ok (sprintf "stopped watching %s" (PrRef.render pr))
             } }
 
+// --- the hook subscription -------------------------------------------------------------------
+// Push, where the deployment can take it. A delivery does not tell this session anything —
+// it tells it to LOOK, and the poll above is still what produces every fact. So this is an
+// accelerator with no second code path behind it: where hooks are configured a transition
+// lands in seconds, and where they are not the interval above is unchanged.
+
+/// Where a delivery carries the repository it concerns.
+///
+/// THE one provider-shaped string this feature puts in front of the Manager — and it goes
+/// there as DATA, inside a filter the Manager stores and compares without ever knowing what
+/// it means. That is the whole trade: the Manager relays, this file knows.
+let repoPath : FieldPath =
+    match FieldPath.create "body.repository.full_name" with
+    | Ok path -> path
+    | Error e -> failwithf "github repo path: %s" e
+
+/// What this session asks to be forwarded: deliveries naming this repo. Per REPO and not
+/// per pull request, because that is what a delivery names — the poke is repo-wide and the
+/// poller decides which of its watches moved.
+let filterFor (repo: RepoRef) : DeliveryFilter = { Where = [ repoPath, RepoRef.value repo ] }
+
+/// The hook subscriptions this session holds, one per watched repo.
+type PrHooks =
+    { /// Reconcile against the repos currently watched — at boot, and after every watch or
+      /// unwatch. The same shape as `PrWatchers.Apply`, for the same reason: the log's
+      /// watches are the one source of what is subscribed, so the two cannot drift.
+      Apply : RepoRef list -> unit
+      /// Which repo a delivery concerns, from the subscription it names.
+      ///
+      /// Read from THIS session's own records, never from the delivery. That is what makes
+      /// "a delivery is a poke" true rather than aspirational: the body is never parsed, so
+      /// there is nothing in it to be wrong about or to lie with.
+      RepoOf : string -> RepoRef option }
+
+module PrHooks =
+
+    /// A session that subscribes to nothing — the composition default, and what a session
+    /// with no control channel gets. Not an error state: polling is the mechanism.
+    let none : PrHooks =
+        { Apply = fun _ -> ()
+          RepoOf = fun _ -> None }
+
+/// Build the reconciler over the Manager's hook control leg.
+///
+/// Every failure here is logged and dropped, deliberately: a subscription that could not be
+/// made costs latency and nothing else, because the poll still runs. Failing the watch over
+/// it would make an optional accelerator a required dependency.
+let hooks
+    (subscribe: DeliveryFilter -> Async<Result<string, string>>)
+    (unsubscribe: string -> Async<Result<bool, string>>)
+    : PrHooks =
+
+    // `None` is claimed-but-not-yet-acknowledged: the slot is taken synchronously so a
+    // second reconcile arriving before the Manager answers cannot subscribe twice.
+    let mutable held : (RepoRef * string option) list = []
+
+    { Apply =
+        fun repos ->
+            let wanted = List.distinct repos
+            for repo in wanted do
+                if held |> List.exists (fun (r, _) -> r = repo) |> not then
+                    held <- held @ [ repo, None ]
+                    Async.StartImmediate (
+                        async {
+                            match! subscribe (filterFor repo) with
+                            | Ok id ->
+                                held <- held |> List.map (fun (r, current) -> if r = repo then r, Some id else r, current)
+                            | Error e ->
+                                eprintfn "hook subscription for %s failed, falling back to polling: %s" (RepoRef.value repo) e
+                                held <- held |> List.filter (fun (r, _) -> r <> repo)
+                        })
+            for repo, id in held |> List.filter (fun (r, _) -> not (List.contains r wanted)) do
+                held <- held |> List.filter (fun (r, _) -> r <> repo)
+                match id with
+                | Some subscriptionId ->
+                    Async.StartImmediate (
+                        async {
+                            match! unsubscribe subscriptionId with
+                            | Ok _ -> ()
+                            | Error e -> eprintfn "dropping hook subscription for %s failed: %s" (RepoRef.value repo) e
+                        })
+                // Unwatched before the Manager answered: the id to drop does not exist yet,
+                // so the subscription outlives the watch until the launch ends and the
+                // Manager drops everything under its secret. Rare, and bounded by that.
+                | None -> ()
+      RepoOf =
+        fun id ->
+            held
+            |> List.tryPick (fun (repo, current) -> if current = Some id then Some repo else None) }
+
 // --- the query -----------------------------------------------------------------------------
 // A QUERY, so registering it IS the UI change (the `mcp_servers` argument): the settings
 // surface maps over whatever the session declared, and the registry generates the agent's
@@ -562,5 +715,12 @@ let query (current: unit -> PrWatchers) : Queries.QueryRegistration =
                                | Some s -> CellText (ChecksRollup.describe s.Checks)
                                | None -> CellAbsent)
                               "watcher", CellText (ActorRef.token row.Watcher)
-                              "status", CellText (defaultArg row.Health "ok") ])))
+                              "status",
+                              CellText (
+                                  match row.Health, row.Pushed with
+                                  | Some health, _ -> health
+                                  // The difference between a hook that is wired up and one
+                                  // that is not, which is otherwise only visible as latency.
+                                  | None, true -> "ok (push)"
+                                  | None, false -> "ok") ])))
             } }

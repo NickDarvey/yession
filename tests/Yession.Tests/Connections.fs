@@ -12,6 +12,7 @@ open Yession.Domain
 open Yession.Domain.Sandboxes
 open Yession.Domain.Access
 open Yession.Domain.Chat
+open Yession.Domain.Hooks
 open Yession.Domain.Prs
 open Yession.Manager
 
@@ -2015,6 +2016,65 @@ let private prPollTests =
                 Expect.isTrue afterWindow "and the answer moved the row"
             }
 
+        testCaseAsync "a pushed delivery looks now, whatever the cadence said" <|
+            async {
+                let mutable clock = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
+                let script =
+                    scriptedFetch
+                        [ GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, GitHubPrs.PrEtags.none)
+                          GitHubPrs.PrChanged (snapshotOf PrMerged ChecksGreen, GitHubPrs.PrEtags.none) ]
+                let poller = pollerOver (fun () -> clock) script.Fetch (RecordedTransitions ()) (ResizeArray ())
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
+                let! _ = poller.Poll ()
+                // Settled, so a tick a second later would not look. A delivery does.
+                clock <- clock.AddSeconds 1.0
+                let! _ = poller.Poll ()
+                Expect.equal script.Calls.Count 1 "the tick respected the interval"
+                let! moved = poller.Poke prOne.Repo
+                Expect.equal script.Calls.Count 2 "the delivery did not"
+                Expect.isTrue moved "and the merge it found moved the row"
+            }
+
+        testCaseAsync "a pushed delivery never overrides the window github named" <|
+            async {
+                // Asking inside a window the provider already refused would spend a request
+                // to be refused again — a push does not know better than the rate limiter.
+                let mutable clock = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
+                let resetAt = int (clock.AddMinutes(10.0).ToUnixTimeSeconds ())
+                let script = scriptedFetch [ GitHubPrs.PrFetchFailed (GitHubPrs.PrRateLimited (Some resetAt)) ]
+                let poller = pollerOver (fun () -> clock) script.Fetch (RecordedTransitions ()) (ResizeArray ())
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
+                let! _ = poller.Poll ()
+                let spent = script.Calls.Count
+                let! _ = poller.Poke prOne.Repo
+                Expect.equal script.Calls.Count spent "the hold stands"
+            }
+
+        testCaseAsync "a delivery for another repo leaves this watch alone" <|
+            async {
+                let script = scriptedFetch []
+                let poller = pollerOver fixedNow script.Fetch (RecordedTransitions ()) (ResizeArray ())
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
+                let other = RepoRef.create "someone/else" |> expect
+                let! moved = poller.Poke other
+                Expect.equal script.Calls.Count 0 "nothing on that repo is watched here"
+                Expect.isFalse moved "so nothing moved"
+            }
+
+        testCaseAsync "a watch a delivery has reached says so, so a wired-up hook is visible" <|
+            async {
+                let script = scriptedFetch [ GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, GitHubPrs.PrEtags.none) ]
+                let poller = pollerOver fixedNow script.Fetch (RecordedTransitions ()) (ResizeArray ())
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
+                match poller.Rows () with
+                | [ row ] -> Expect.isFalse row.Pushed "nothing has delivered yet"
+                | rows -> failwithf "expected one row, got %d" rows.Length
+                let! _ = poller.Poke prOne.Repo
+                match poller.Rows () with
+                | [ row ] -> Expect.isTrue row.Pushed "and now something has"
+                | rows -> failwithf "expected one row, got %d" rows.Length
+            }
+
         testCase "the watches a boot rebuilds from the log are the ones it polls" <| fun () ->
             // What the session does at boot: fold its own log, hand the watches to the
             // poller, and show them. A watch survives a restart because the log has it —
@@ -2064,6 +2124,86 @@ let private prPollTests =
                 poller.Apply []
                 Expect.isEmpty (poller.Rows ()) "an unwatched pull request is not polled and not shown"
             }
+    ]
+
+let private prHookTests =
+    let repoOne = RepoRef.create "trinketworks/yession" |> expect
+    let repoTwo = RepoRef.create "someone/else" |> expect
+    /// The reconciler over a recorded control leg. `Async.StartImmediate` runs a
+    /// synchronous body to completion, so a reply is in hand by the time Apply returns.
+    let hooksOver (reply: DeliveryFilter -> Result<string, string>) =
+        let subscribed = ResizeArray<DeliveryFilter> ()
+        let dropped = ResizeArray<string> ()
+        let hooks =
+            GitHubPrs.hooks
+                (fun filter ->
+                    subscribed.Add filter
+                    async { return reply filter })
+                (fun id ->
+                    dropped.Add id
+                    async { return Ok true })
+        hooks, subscribed, dropped
+    let mutable minted = 0
+    let mintingReply _ =
+        minted <- minted + 1
+        Ok (sprintf "sub-%d" minted)
+
+    testList "pull request hook subscriptions" [
+        testCase "a watched repo is subscribed once, however many of its pull requests are watched" <| fun () ->
+            // A delivery names a REPO, so that is the unit; which of its watches moved is
+            // the poller's question, not the Manager's.
+            minted <- 0
+            let hooks, subscribed, _ = hooksOver mintingReply
+            hooks.Apply [ repoOne; repoOne; repoTwo ]
+            Expect.equal subscribed.Count 2 "one per repo, not one per watch"
+
+        testCase "re-applying an unchanged set subscribes nothing further" <| fun () ->
+            minted <- 0
+            let hooks, subscribed, dropped = hooksOver mintingReply
+            hooks.Apply [ repoOne ]
+            hooks.Apply [ repoOne ]
+            Expect.equal subscribed.Count 1 "a boot rebuild or any watch verb re-applies; it must be free"
+            Expect.isEmpty dropped "and drops nothing"
+
+        testCase "a repo that is no longer watched has its subscription dropped" <| fun () ->
+            minted <- 0
+            let hooks, _, dropped = hooksOver mintingReply
+            hooks.Apply [ repoOne; repoTwo ]
+            hooks.Apply [ repoOne ]
+            Expect.equal (List.ofSeq dropped) [ "sub-2" ] "the one that went, and only it"
+
+        testCase "the filter asks for deliveries naming that repo" <| fun () ->
+            minted <- 0
+            let hooks, subscribed, _ = hooksOver mintingReply
+            hooks.Apply [ repoOne ]
+            let expected = { Where = [ GitHubPrs.repoPath, "trinketworks/yession" ] }
+            Expect.equal (List.ofSeq subscribed) [ expected ] "one equality, over the path a delivery carries it at"
+
+        testCase "a delivery's repo is read from this session's own record, never from the body" <| fun () ->
+            // Which is what makes a delivery a poke: the payload is never parsed, so there
+            // is nothing in it to be wrong about or to lie with.
+            minted <- 0
+            let hooks, _, _ = hooksOver mintingReply
+            hooks.Apply [ repoOne ]
+            Expect.equal (hooks.RepoOf "sub-1") (Some repoOne) "the subscription it named"
+            Expect.equal (hooks.RepoOf "sub-99") None "and nothing for one this session does not hold"
+
+        testCase "a subscription that could not be made leaves polling to it" <| fun () ->
+            // Push is an accelerator. Failing the watch over it would make an optional
+            // thing a required one.
+            let hooks, _, _ = hooksOver (fun _ -> Error "no hook endpoints declared")
+            hooks.Apply [ repoOne ]
+            Expect.equal (hooks.RepoOf "sub-1") None "nothing is held"
+            // And the slot is released, so a later reconcile tries again rather than
+            // believing it already subscribed.
+            let hooks2, subscribed2, _ = hooksOver mintingReply
+            hooks2.Apply [ repoOne ]
+            hooks2.Apply [ repoOne ]
+            Expect.equal subscribed2.Count 1 "a successful one is not retried"
+
+        testCase "a session with no control channel subscribes to nothing" <| fun () ->
+            GitHubPrs.PrHooks.none.Apply [ repoOne ]
+            Expect.equal (GitHubPrs.PrHooks.none.RepoOf "sub-1") None "polling is the whole mechanism there"
     ]
 
 /// A stub of GitHub's REST API: one pull request and one set of check runs, each with a
@@ -2317,6 +2457,7 @@ let tests =
         claudeTests
         githubTests
         prPollTests
+        prHookTests
         Tag.needs "Broker service" [ Tag.Ports ] (fun () -> brokerTests)
         Tag.needs "Connection control routes" [ Tag.Ports ] (fun () -> routeTests)
         Tag.needs "GitHub sign-in routes" [ Tag.Ports ] (fun () -> githubRouteTests)
