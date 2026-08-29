@@ -693,7 +693,7 @@ let private runAgent () : RunAgent option =
     | "credential-probe" ->
         if envCreds || connectedSomewhere () then Some (dispatching credentialProbe) else None
     | _ ->
-        if envCreds || connectedSomewhere () then Some (dispatching (Agent.runWith dataDir)) else None
+        if envCreds || connectedSomewhere () then Some (dispatching (Agent.runWith dataDir agentBackend)) else None
 
 [<Fable.Core.Emit("(function (handler) { return (process.stdin.on('close', handler), process.stdin.on('end', handler), process.stdin.resume()) })($0)")>]
 let private onStdinClosed (handler: unit -> unit) : unit = Fable.Core.Util.jsNative

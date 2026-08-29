@@ -1,15 +1,21 @@
 # Known gaps
 
-An honest inventory of what Yession does **not** do yet, as of the `5.x-beta` line. Phases
-1–4 are accepted, plus later work delivered outside the numbered phases — client
-presentation (Metro/Zune styling, rich-text editing, collaborative presence cursors),
-telemetry (Plan 04), the Manager→Session control-RPC reverse legs, secrets + ABAC
-(Plan 06), BYO user authorization (Plan 07), connections and Claude sign-in (Plan 08),
-remote and mounted session access (Plans 09/10/12), idle reaping (Plan 11), and
-terminals on the WorkSandbox (Plan 13, every stage). The plans those numbers name are gone;
-each one's reasoning now sits beside the code it governs.
+An honest inventory of what Yession does **not** do yet, as of the `9.x-beta` line. Phases
+1–4 are accepted, and so is every numbered plan this file cites — client presentation
+(Metro/Zune styling, rich-text editing, collaborative presence cursors), telemetry
+(Plan 04), the Manager→Session control-RPC reverse legs, secrets + ABAC (Plan 06), BYO user
+authorization (Plan 07), connections and Claude sign-in (Plan 08), remote and mounted
+session access (Plans 09/10/12), idle reaping (Plan 11), terminals on the WorkSandbox
+(Plan 13, every stage), repo integration and the imperative session API (Plans 14/15),
+declared MCP servers and the providers that answer them (Plans 16–19), a session that opens
+cold (Plan 20), credential rotation (Plan 21), the classifier seam every act passes
+(Plan 23), srt's read model (Plan 24), and a repo's own sandbox declarations (Plan 27). The
+plans those numbers name are gone; each one's reasoning now sits beside the code it governs,
+and the number is what joins two entries in different sections to one piece of work.
 Everything below is deliberate scope, recorded so nobody discovers it in production.
-Items are roughly ordered by how much they matter.
+Items are roughly ordered WITHIN a section by how much they matter; the sections are not
+ranked against each other, and the last of them holds trust boundaries as sharp as the
+first's.
 
 ## Security & trust
 
@@ -171,8 +177,9 @@ Items are roughly ordered by how much they matter.
       (Operation not permitted)`, exit 128, and every repo verb was refused for the
       sandbox's whole lifetime in words blaming the binary and the read scope. Neither was
       at fault, and taking the sentence's advice — declaring `~/.config/git` as a resource
-      and defaulting it — would have handed back part of the home Plan 24 exists to deny. Every git spawned by the repo verbs is now built by one function that carries
-      the env, so a probe cannot again gate verbs it does not run as.
+      and defaulting it — would have handed back part of the home Plan 24 exists to deny.
+      Every git spawned by the repo verbs is now built by one function that carries the env,
+      so a probe cannot again gate verbs it does not run as.
     - **Linux cannot reproduce that class of fault, which is why it shipped.** srt denies a
       read on Linux by mounting emptiness over the path, so a denied config reads as ENOENT
       and git shrugs; Seatbelt denies it in place, and `EPERM` is fatal. Any suite that
@@ -272,23 +279,24 @@ Items are roughly ordered by how much they matter.
       a leak and the difference between them is not understood.
 
       **Solved, and not by widening anything.** The mutex is only taken when NuGet's
-      migration marker is absent, so the whole path is avoidable — measured, on unpatched
-      srt, with nothing shared granted:
+      migration marker is absent, so the whole path is avoidable — and the marker is not a
+      grant, it is a file in the private home this session already makes for the sandbox.
+      A repo writes it with `files:` (#358), which `Sandboxes.SessionLayout.prepareHome`
+      seeds before anything runs and `HomePath` refuses to let escape that home:
 
-      - `XDG_DATA_HOME` pointed at an operator directory holding `NuGet/Migrations/1`,
-        mounted READ-ONLY. `MigrationRunner.GetMigrationsDirectory` reads that variable, and
-        `Run` checks the marker BEFORE constructing the mutex. Read-only is deliberate: if
-        some workload does want to write there it fails loudly rather than working on one
-        machine.
-      - `CLAUDE_CODE_TMPDIR` on the Session Process, or MSBuild writes its response file to
-        the shared `/tmp/claude` that srt bakes in by default and the compiler then cannot
-        find it (`FSC error FS3194`).
-      - `NUGET_PACKAGES` at the mounted cache, or the sandbox's private HOME means every
-        sandbox re-downloads.
+          files:
+            ".local/share/NuGet/Migrations/1": ""
+
+      `MigrationRunner.GetMigrationsDirectory` resolves `$HOME/.local/share` absent an
+      `XDG_DATA_HOME`, and `Run` checks the marker BEFORE constructing the mutex — so
+      nothing of the operator's is named or mounted. Two env settings are separate from the
+      mutex and still wanted: `CLAUDE_CODE_TMPDIR` on the Session Process, or MSBuild writes
+      its response file to the shared `/tmp/claude` that srt bakes in by default and the
+      compiler then cannot find it (`FSC error FS3194`); and `NUGET_PACKAGES` at an
+      operator's cache, or the sandbox's private HOME means every sandbox re-downloads.
 
       With those, `dotnet --info`, `restore`, `build` and `fsi` all exit 0 and
-      `/tmp/.dotnet` is never touched. The control holds too: empty the share and every one
-      of them fails on `NuGet-Migrations`.
+      `/tmp/.dotnet` is never touched.
 
       The marker is not a lie on a fresh HOME. `Migration1` deletes legacy `v3-cache` /
       `plugins-cache` and fixes permissions on EXISTING NuGet directories; a home nothing
@@ -549,7 +557,7 @@ Items are roughly ordered by how much they matter.
 
 - **The live agent's tool results are text renderings** of the typed capability
   results; there is no structured tool-result schema. The agent can read back what its
-  own terminal commands did (`read_terminal_block`, plus the digest on the context pack
+  own terminal commands did (`read_terminal`, plus the digest on the context pack
   — Plan 13 stages 3a/3b), but there is still no tool for reading session history beyond
   the prompt transcript.
 - **The context pack is a flat transcript** rebuilt per turn from the full projection —
@@ -563,13 +571,6 @@ Items are roughly ordered by how much they matter.
   option), and the queued-message UI has no "locked" visual during the drain broadcast
   window (a peer can briefly type into an entry that is about to vanish — the edit is
   safely discarded, but the UX flickers).
-- **The Node suite's timeout is one budget for every tier.** `tasks.fsx` gives the whole Node
-  run 240s, so a per-case deadline is spent out of a pool every other suite is drawing on: a
-  case that legitimately needs two minutes cannot have them without risking the runner killing
-  the run before any suite reports. That is not hypothetical — it is how the first live clone
-  case failed, and the reason the one that ships is capped at 90s (ten times its real 6.9s)
-  rather than at something comfortable. A tier that spawns real processes and a tier of pure
-  folds want different budgets; they have one.
 - **A turn has no step ceiling, and nothing automatic bounds a runaway one.** `maxTurns` is
   OPTIONAL on the Agent SDK's `query()`, and unset means no cap — which is what `Agent.fs`
   now passes, the same setting interactive Claude Code runs under. The ceiling that used to
@@ -889,7 +890,6 @@ Items are roughly ordered by how much they matter.
   whose own refusal — "what this repo asks for changed since you looked" — is exactly the
   sentence somebody needs and cannot see. Not specific to that command, and not fixable
   inside it: a rejection needs somewhere to be shown, and there is nowhere yet.
-
 - **A block waiting on a keystroke is announced to the agent and to nobody else.**
   `execute_command` answers `TerminalCommandInteractive` the moment detection hands the
   terminal over, and the agent has `write_terminal`/`read_terminal` to resolve it — but if it
