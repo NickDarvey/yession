@@ -625,6 +625,8 @@ let private startControlServer (callers: (string * Control.ControlCaller) list) 
                         api
                         None
                         (fun _ _ -> Subscription.none)
+                        (fun _ _ -> "")
+                        (fun _ _ -> false)
                         onUnauthorized
                         req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore

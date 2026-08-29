@@ -16,6 +16,7 @@ open Yession.Domain.Terminals
 open Yession.Domain.Tools
 open Yession.Domain.Access
 open Yession.Domain.Chat
+open Yession.Domain.Hooks
 open Yession.Manager
 open Yession.Oidc
 open Yession.App
@@ -505,9 +506,13 @@ let private freePort () : Async<int> =
     }
 
 /// Start a bare control server over the given secret→session table, plus the real
-/// notification and MCP hubs wired to their SSE routes. Returns both hubs so a test
-/// can push down the same wires the Manager uses.
-let private startControlServer (secrets: (string * SessionId) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub<SessionNotification> * KeyedRetainedHub.KeyedRetainedHub<McpServerSet>> =
+/// notification and MCP hubs wired to their SSE routes, and the real hook relay over
+/// whatever endpoints the test declares. Returns the hubs and the relay so a test can push
+/// down the same wires the Manager uses.
+let private startControlServerOver
+    (endpoints: WebhookRelay.HookEndpoint list)
+    (secrets: (string * SessionId) list)
+    : Async<Interop.HttpServer * string * NotificationHub.NotificationHub<SessionNotification> * KeyedRetainedHub.KeyedRetainedHub<McpServerSet> * WebhookRelay.Relay> =
     async {
         let table =
             secrets
@@ -520,14 +525,30 @@ let private startControlServer (secrets: (string * SessionId) list) : Async<Inte
         // This bare control server has no OIDC provider; the DCR route is not under test.
         let registerClient _ (sessionId: SessionId) _ : Yession.Oidc.RegisterClientResponse =
             { ClientId = SessionId.value sessionId; ClientSecret = "unused"; Issuer = "http://unused" }
+        // Ids are sequential rather than random so a test can name the subscription it
+        // just made; nothing in the relay depends on them being unguessable.
+        let mutable minted = 0
+        let relay =
+            WebhookRelay.create endpoints hub.NotifySecret (fun () ->
+                minted <- minted + 1
+                sprintf "sub-%d" minted)
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
-            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register registerClient None None (fun _ _ -> Subscription.none) ignore req res) then
+            if not (
+                WebhookRelay.tryHandle relay req res
+                || Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register registerClient None None (fun _ _ -> Subscription.none) relay.Subscribe relay.Unsubscribe ignore req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "not found"
         let server = Interop.createServer handler
         let! listening =
             Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
-        return listening, sprintf "http://127.0.0.1:%d" (Interop.serverPort listening), hub, mcp
+        return listening, sprintf "http://127.0.0.1:%d" (Interop.serverPort listening), hub, mcp, relay
+    }
+
+/// The common case: no hook endpoints declared.
+let private startControlServer (secrets: (string * SessionId) list) =
+    async {
+        let! server, url, hub, mcp, _ = startControlServerOver [] secrets
+        return server, url, hub, mcp
     }
 
 let private controlRpcTests =
@@ -640,8 +661,42 @@ let private uiRenderTests =
                     SessionQuery.defaults
                     [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
                     []
+                    []
             Expect.isTrue (html.Contains Dom.Manager.managerBuild) "the header carries its own hook, distinct from a row's"
             Expect.isTrue (html.Contains Yession.Host.Version.current) "and its own version, from the same place --version reads"
+
+        testCase "a declared hook endpoint puts its secret on the page" <| fun () ->
+            // The Manager GENERATES this secret rather than being told one, so the page is
+            // the only place an operator can read it before pasting it into a provider. If
+            // it is not here, the endpoint cannot be configured at all.
+            let endpoints =
+                WebhookRelay.endpointsFor
+                    "ui-kek:CCCC"
+                    [ { Name = "github"; Rotation = 0; Signature = WebhookRelay.SignatureSpec.webSub } ]
+            let secret = (List.head endpoints).Secrets |> List.head
+            let html =
+                ManagerUi.page
+                    "app.css"
+                    (PublicAccess.create "https://yession.example.com" "https://{id}.example.com" |> expect)
+                    SessionQuery.defaults
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+                    []
+                    endpoints
+            Expect.isTrue (html.Contains secret) "the secret is readable, not hidden behind a reveal"
+            Expect.isTrue
+                (html.Contains "https://yession.example.com/hooks/github")
+                "and so is the address to point the provider at"
+
+        testCase "a deployment that declared no hook endpoints renders no hook section" <| fun () ->
+            let html =
+                ManagerUi.page
+                    "app.css"
+                    PublicAccess.Loopback
+                    SessionQuery.defaults
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+                    []
+                    []
+            Expect.isFalse (html.Contains "data-hooks") "an empty table would imply there is something to fill in"
 
         testCase "the page is self-contained: an inline script drives it, no external sources" <| fun () ->
             let html =
@@ -650,6 +705,7 @@ let private uiRenderTests =
                     PublicAccess.Loopback
                     SessionQuery.defaults
                     [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+                    []
                     []
             Expect.isTrue (html.Contains "<script>") "an inline script drives the UI (no bundle)"
             Expect.isTrue (html.Contains "/sessions/") "the inline script talks to the fragment routes"
@@ -1552,10 +1608,16 @@ let private sseTests =
 // end (real sockets, real client parser) is verify-tier.
 // -----------------------------------------------------------------------------
 
+/// One delivery, standing in for whatever the relay forwards. These suites are about the
+/// transport, not the payload — what matters is that it crosses intact and reaches only the
+/// secret it was pushed to.
+let private aDelivery =
+    WebhookDelivered ("sub-1", "github", [ "x-github-event", "pull_request" ], """{"repository":{"full_name":"trinketworks/yession"}}""")
+
 let private notificationTests =
     testList "Manager→Session notifications: codec & hub" [
         testCase "a notification round-trips through the control wire codec" <| fun () ->
-            let original = EnvironmentChanged ()
+            let original = WebhookDelivered ("sub-1", "github", [ "x-github-event", "pull_request" ], """{"repository":{"full_name":"trinketworks/yession"}}""")
             let roundTripped =
                 ControlWire.toString ControlWire.sessionNotification original
                 |> ControlWire.fromString ControlWire.sessionNotification
@@ -1576,21 +1638,174 @@ let private notificationTests =
             let unsubA2 = hub.Register "secret-a" (fun _ -> a2 <- a2 + 1)
             let _ = hub.Register "secret-b" (fun _ -> b <- b + 1)
 
-            hub.NotifySecret "secret-a" (EnvironmentChanged ())
+            hub.NotifySecret "secret-a" aDelivery
             Expect.equal (a1, a2, b) (1, 1, 0) "both A sinks fired; B's did not (per-secret scoping)"
 
             // Unsubscribe removes exactly one sink; the sibling keeps receiving.
             unsubA2.Stop ()
-            hub.NotifySecret "secret-a" (EnvironmentChanged ())
+            hub.NotifySecret "secret-a" aDelivery
             Expect.equal (a1, a2, b) (2, 1, 0) "the unsubscribed sink stopped; the other continued"
 
             // Dropping the secret (its launch ended) silences everything under it.
             hub.Drop "secret-a"
-            hub.NotifySecret "secret-a" (EnvironmentChanged ())
+            hub.NotifySecret "secret-a" aDelivery
             Expect.equal (a1, a2, b) (2, 1, 0) "a dropped secret receives nothing"
 
             // Notifying an unknown secret is a no-op, never a throw.
-            hub.NotifySecret "secret-unknown" (EnvironmentChanged ())
+            hub.NotifySecret "secret-unknown" aDelivery
+    ]
+
+let private hookRelayTests =
+    let path raw = FieldPath.create raw |> expect
+    let kek = "test-kek:AAAA"
+    let spec name rotation : WebhookRelay.EndpointSpec =
+        { Name = name; Rotation = rotation; Signature = WebhookRelay.SignatureSpec.webSub }
+    /// A relay over one endpoint, plus what it pushed and to whom.
+    let relayOver (endpoints: WebhookRelay.HookEndpoint list) =
+        let pushed = ResizeArray<string * SessionNotification> ()
+        let mutable minted = 0
+        let relay =
+            WebhookRelay.create endpoints (fun secret n -> pushed.Add (secret, n)) (fun () ->
+                minted <- minted + 1
+                sprintf "sub-%d" minted)
+        relay, pushed
+    let signedWith (secret: string) (body: string) =
+        [ "x-hub-signature-256", "sha256=" + Interop.hmacSha256 secret body "hex" ]
+    let aBody = """{"repository":{"full_name":"trinketworks/yession"},"number":7}"""
+
+    testList "The hook relay" [
+        testCase "a declaration names endpoints, and a rotation is optional" <| fun () ->
+            let parsed = WebhookRelay.parseEndpoints "github, ci@2" (fun _ -> "") |> expect
+            Expect.equal
+                (parsed |> List.map (fun e -> e.Name, e.Rotation))
+                [ "github", 0; "ci", 2 ]
+                "both endpoints, and the one that named a rotation kept it"
+
+        testCase "an endpoint name that could not be a path segment is refused" <| fun () ->
+            // It is a URL path segment and an environment-variable suffix at once.
+            Expect.isError (WebhookRelay.parseEndpoints "git hub" (fun _ -> "")) "a space is neither"
+
+        testCase "a signature spec that is not header:encoding is refused" <| fun () ->
+            Expect.isError (WebhookRelay.SignatureSpec.parse "x-sig") "one field is not a spec"
+
+        testCase "a digest encoding the relay cannot produce is refused at boot" <| fun () ->
+            // Rather than at the first delivery, which is when nobody is looking.
+            Expect.isError (WebhookRelay.SignatureSpec.parse "x-sig:base32") "hex and base64 are what Node digests"
+
+        testCase "a rotation accepts the secret before it, so no delivery is refused mid-rotation" <| fun () ->
+            match WebhookRelay.endpointsFor kek [ spec "github" 2 ] with
+            | [ endpoint ] ->
+                Expect.equal endpoint.Secrets.Length 2 "the current one and its predecessor"
+                Expect.equal
+                    (List.item 1 endpoint.Secrets)
+                    (WebhookRelay.secretAt kek "github" 1)
+                    "and the predecessor is the previous rotation's"
+            | other -> failwithf "expected one endpoint, got %d" other.Length
+
+        testCase "the first rotation has no predecessor to accept" <| fun () ->
+            match WebhookRelay.endpointsFor kek [ spec "github" 0 ] with
+            | [ endpoint ] -> Expect.equal endpoint.Secrets.Length 1 "one secret, because there was never another"
+            | other -> failwithf "expected one endpoint, got %d" other.Length
+
+        testCase "two endpoints never share a secret" <| fun () ->
+            Expect.notEqual
+                (WebhookRelay.secretAt kek "github" 0)
+                (WebhookRelay.secretAt kek "linear" 0)
+                "otherwise one provider's secret would verify another's deliveries"
+
+        testCase "a signed delivery reaches the subscriptions whose filter matches" <| fun () ->
+            let endpoints = WebhookRelay.endpointsFor kek [ spec "github" 0 ]
+            let relay, pushed = relayOver endpoints
+            let mine = relay.Subscribe "secret-a" { Where = [ path "body.repository.full_name", "trinketworks/yession" ] }
+            relay.Subscribe "secret-b" { Where = [ path "body.repository.full_name", "someone/else" ] } |> ignore
+            let secret = (List.head endpoints).Secrets |> List.head
+            Expect.equal (relay.Deliver "github" (signedWith secret aBody) aBody) 204 "the delivery was accepted"
+            Expect.equal
+                (pushed |> Seq.map fst |> List.ofSeq)
+                [ "secret-a" ]
+                "only the launch whose filter matched was pushed to"
+            match List.ofSeq pushed with
+            | [ _, WebhookDelivered (subscription, endpoint, _, body) ] ->
+                Expect.equal subscription mine "it names the subscription that matched"
+                Expect.equal endpoint "github" "and the endpoint it arrived on"
+                Expect.equal body aBody "and carries the delivery unchanged"
+            | other -> failwithf "expected one push, got %A" other
+
+        testCase "a filter may name a header" <| fun () ->
+            let endpoints = WebhookRelay.endpointsFor kek [ spec "github" 0 ]
+            let relay, pushed = relayOver endpoints
+            relay.Subscribe "secret-a" { Where = [ path "headers.x-github-event", "pull_request" ] } |> ignore
+            let secret = (List.head endpoints).Secrets |> List.head
+            let headers = signedWith secret aBody @ [ "X-GitHub-Event", "pull_request" ]
+            Expect.equal (relay.Deliver "github" headers aBody) 204 "accepted"
+            Expect.equal (Seq.length pushed) 1 "a header is addressed the same way a body field is"
+
+        testCase "a delivery signed with the previous secret still arrives during a rotation" <| fun () ->
+            let endpoints = WebhookRelay.endpointsFor kek [ spec "github" 1 ]
+            let relay, pushed = relayOver endpoints
+            relay.Subscribe "secret-a" DeliveryFilter.everything |> ignore
+            let previous = WebhookRelay.secretAt kek "github" 0
+            Expect.equal (relay.Deliver "github" (signedWith previous aBody) aBody) 204 "accepted"
+            Expect.equal (Seq.length pushed) 1 "which is what makes a rotation seamless"
+
+        testCase "an unsigned delivery is refused" <| fun () ->
+            let relay, pushed = relayOver (WebhookRelay.endpointsFor kek [ spec "github" 0 ])
+            relay.Subscribe "secret-a" DeliveryFilter.everything |> ignore
+            Expect.equal (relay.Deliver "github" [] aBody) 401 "no signature, no delivery"
+            Expect.isEmpty pushed "and nothing was forwarded"
+
+        testCase "a delivery signed with the wrong secret is refused" <| fun () ->
+            let relay, pushed = relayOver (WebhookRelay.endpointsFor kek [ spec "github" 0 ])
+            relay.Subscribe "secret-a" DeliveryFilter.everything |> ignore
+            Expect.equal (relay.Deliver "github" (signedWith "not-the-secret" aBody) aBody) 401 "refused"
+            Expect.isEmpty pushed "and nothing was forwarded"
+
+        testCase "a signature over different bytes is refused" <| fun () ->
+            // The whole point of signing the body: a delivery cannot be edited in flight.
+            let endpoints = WebhookRelay.endpointsFor kek [ spec "github" 0 ]
+            let relay, _ = relayOver endpoints
+            let secret = (List.head endpoints).Secrets |> List.head
+            let headers = signedWith secret aBody
+            Expect.equal (relay.Deliver "github" headers """{"repository":{"full_name":"attacker/repo"}}""") 401 "refused"
+
+        testCase "a body that is not a json object is refused, after its signature checks out" <| fun () ->
+            let endpoints = WebhookRelay.endpointsFor kek [ spec "github" 0 ]
+            let relay, _ = relayOver endpoints
+            let secret = (List.head endpoints).Secrets |> List.head
+            Expect.equal (relay.Deliver "github" (signedWith secret "not json") "not json") 400 "there is nothing to address"
+
+        testCase "an endpoint nobody declared does not exist" <| fun () ->
+            let relay, _ = relayOver (WebhookRelay.endpointsFor kek [ spec "github" 0 ])
+            Expect.equal (relay.Deliver "linear" [] aBody) 404 "and says so without checking a signature"
+
+        testCase "unsubscribing stops that subscription and leaves its siblings" <| fun () ->
+            let endpoints = WebhookRelay.endpointsFor kek [ spec "github" 0 ]
+            let relay, pushed = relayOver endpoints
+            let first = relay.Subscribe "secret-a" DeliveryFilter.everything
+            relay.Subscribe "secret-a" DeliveryFilter.everything |> ignore
+            let secret = (List.head endpoints).Secrets |> List.head
+            Expect.isTrue (relay.Unsubscribe "secret-a" first) "it was there"
+            Expect.isFalse (relay.Unsubscribe "secret-a" first) "and is not any more"
+            relay.Deliver "github" (signedWith secret aBody) aBody |> ignore
+            Expect.equal (Seq.length pushed) 1 "the sibling still receives"
+
+        testCase "a launch that ended takes its subscriptions with it" <| fun () ->
+            let endpoints = WebhookRelay.endpointsFor kek [ spec "github" 0 ]
+            let relay, pushed = relayOver endpoints
+            relay.Subscribe "secret-a" DeliveryFilter.everything |> ignore
+            relay.Subscribe "secret-b" DeliveryFilter.everything |> ignore
+            relay.Drop "secret-a"
+            let secret = (List.head endpoints).Secrets |> List.head
+            relay.Deliver "github" (signedWith secret aBody) aBody |> ignore
+            Expect.equal (pushed |> Seq.map fst |> List.ofSeq) [ "secret-b" ] "only the launch that is still alive"
+
+        testCase "one launch cannot unsubscribe another's" <| fun () ->
+            let relay, _ = relayOver (WebhookRelay.endpointsFor kek [ spec "github" 0 ])
+            let mine = relay.Subscribe "secret-a" DeliveryFilter.everything
+            Expect.isFalse (relay.Unsubscribe "secret-b" mine) "a subscription belongs to the launch that made it"
+
+        testCase "a Manager declaring no endpoints serves none" <| fun () ->
+            Expect.equal (WebhookRelay.Relay.none.Deliver "github" [] aBody) 404 "there is nowhere to deliver to"
     ]
 
 let private notificationStreamTests =
@@ -1613,14 +1828,14 @@ let private notificationStreamTests =
                     async {
                         if not (List.isEmpty receivedA) || remaining <= 0 then return ()
                         else
-                            hub.NotifySecret "secret-a" (EnvironmentChanged ())
+                            hub.NotifySecret "secret-a" aDelivery
                             do! Async.Sleep 50
                             return! pump (remaining - 1)
                     }
                 do! pump 60
 
                 Expect.isTrue (not (List.isEmpty receivedA)) "A received the notification pushed to its secret"
-                Expect.equal (List.head receivedA) (EnvironmentChanged ()) "the notification decoded correctly across the wire"
+                Expect.equal (List.head receivedA) aDelivery "the notification decoded correctly across the wire"
                 Expect.isTrue (List.isEmpty receivedB) "B never received a notification pushed to A's secret (per-session scoping)"
 
                 // Cancel closes the stream; the server unsubscribes the sink, so further
@@ -1628,11 +1843,87 @@ let private notificationStreamTests =
                 cancelA.Stop ()
                 do! Async.Sleep 200
                 let settled = List.length receivedA
-                hub.NotifySecret "secret-a" (EnvironmentChanged ())
+                hub.NotifySecret "secret-a" aDelivery
                 do! Async.Sleep 200
                 Expect.equal (List.length receivedA) settled "after cancel, no further notifications arrive"
 
                 cancelB.Stop ()
+                server.close ignore
+            }
+    ]
+
+/// POST a delivery the way a provider would: our own headers, our own body, no control
+/// secret. Local to the suite because the product has no reason to make this request.
+[<Emit("""(function (url, headers, body) {
+  const h = { 'content-type': 'application/json' }
+  for (const [k, v] of headers) h[k] = v
+  return fetch(url, { method: 'POST', headers: h, body }).then(r => r.status)
+})($0, $1, $2)""")>]
+let private postDelivery (url: string) (headers: (string * string) list) (body: string) : JS.Promise<int> = jsNative
+
+let private hookDeliveryStreamTests =
+    testList "A hook delivery across the control channel (the relay end to end)" [
+        testCaseAsync "a session subscribes, a signed delivery arrives on its notification stream, and unsubscribing stops it" <|
+            async {
+                let kek = "e2e-kek:BBBB"
+                let endpoints =
+                    WebhookRelay.endpointsFor
+                        kek
+                        [ { Name = "github"; Rotation = 0; Signature = WebhookRelay.SignatureSpec.webSub } ]
+                let! server, url, _, _, _ =
+                    startControlServerOver endpoints [ "secret-a", (SessionId.create "hook-a" |> expect) ]
+
+                let mutable received : SessionNotification list = []
+                let cancel = ControlClient.subscribeNotifications url "secret-a" (fun n -> received <- received @ [ n ])
+
+                let filter =
+                    { Where = [ FieldPath.create "body.repository.full_name" |> expect, "trinketworks/yession" ] }
+                let! subscription = ControlClient.subscribeHook url "secret-a" filter
+                let subscriptionId = expect subscription
+
+                let body = """{"repository":{"full_name":"trinketworks/yession"}}"""
+                let secret = (List.head endpoints).Secrets |> List.head
+                let deliver () =
+                    postDelivery
+                        (sprintf "%s/hooks/github" url)
+                        [ "x-hub-signature-256", "sha256=" + Interop.hmacSha256 secret body "hex" ]
+                        body
+                    |> Interop.awaitPromise
+
+                // The relay's answer is checked BEFORE the wait: a delivery that never
+                // arrives could be a refused signature, an undeclared endpoint, or a stream
+                // that has not connected yet, and a bare timeout cannot tell those apart.
+                let! accepted = deliver ()
+                Expect.equal accepted 204 "the relay accepted the signed delivery"
+
+                // The stream connects asynchronously and nothing is buffered, so deliver
+                // until the first arrives (or a generous timeout) — the sibling suite's rule.
+                let rec pump (remaining: int) =
+                    async {
+                        if not (List.isEmpty received) || remaining <= 0 then return ()
+                        else
+                            let! _ = deliver ()
+                            do! Async.Sleep 50
+                            return! pump (remaining - 1)
+                    }
+                do! pump 60
+
+                match received with
+                | WebhookDelivered (id, endpoint, _, delivered) :: _ ->
+                    Expect.equal id subscriptionId "the delivery names the subscription that asked for it"
+                    Expect.equal endpoint "github" "and the endpoint it arrived on"
+                    Expect.equal delivered body "and carries the bytes the provider signed"
+                | other -> failwithf "expected a delivery, got %A" other
+
+                match! ControlClient.unsubscribeHook url "secret-a" subscriptionId with
+                | Ok dropped -> Expect.isTrue dropped "the subscription was there to drop"
+                | Error e -> failwith e
+                let settled = List.length received
+                let! _ = deliver ()
+                do! Async.Sleep 200
+                Expect.equal (List.length received) settled "after unsubscribing, deliveries stop"
+
+                cancel.Stop ()
                 server.close ignore
             }
     ]
@@ -2164,6 +2455,7 @@ let tests =
         themeContrastTests
         sseTests
         notificationTests
+        hookRelayTests
         mcpTests
         registryTests
         Tag.needs "Session Process as an OS process (Step 23)" [ Tag.Ports; Tag.Native ] (fun () -> processTests)
@@ -2175,6 +2467,7 @@ let tests =
         // missing capability could possibly report itself.
         Tag.needs "Session-owned environment across real processes" [ Tag.Ports; Tag.Native; Tag.Srt ] (fun () -> controlRpcTests)
         Tag.needs "Manager→Session notifications over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> notificationStreamTests)
+        Tag.needs "A hook delivery across the control channel (the relay end to end)" [ Tag.Ports ] (fun () -> hookDeliveryStreamTests)
         Tag.needs "MCP server set over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> mcpStreamTests)
         Tag.needs "Session registry stream over SSE (Plan 09)" [ Tag.Ports; Tag.Native ] (fun () -> registryStreamTests)
         Tag.needs "Management UI flow (Step 25)" [ Tag.Ports; Tag.Native ] (fun () -> uiFlowTests)

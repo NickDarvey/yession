@@ -276,6 +276,48 @@ Four endpoints are overridable, which is what the test suites drive rather than 
 provider: `YESSION_GITHUB_DEVICE_URL`, `YESSION_GITHUB_TOKEN_URL`, `YESSION_GITHUB_USER_URL`,
 and `YESSION_GITHUB_API_URL` (the REST base a watched pull request is read from).
 
+### Webhooks
+
+The Manager can take signed deliveries from a service and hand them to whichever sessions
+asked for them. It never reads one: a session declares a filter over the paths it cares
+about, and the Manager matches without knowing what any of them mean
+([ADR](decisions/2026-08-29-the-manager-relays-hooks-it-cannot-read.md)).
+
+Declare an endpoint per service:
+
+```
+YESSION_WEBHOOK_ENDPOINTS=github
+```
+
+Each one is served at `<YESSION_MANAGER_URL>/hooks/<name>`, so this needs a **fronted**
+deployment — nothing outside the machine can POST to loopback. The manager page grows a
+**hook endpoints** section showing, per endpoint, the address to give the provider and the
+secret it must sign with. You do not choose that secret: the Manager derives it from the key
+your credential manager already holds, which is also why endpoints are refused at boot under
+an ephemeral secret store — a secret that changes at every restart would break inbound
+deliveries silently.
+
+To rotate one, bump its counter and paste the new secret in:
+
+```
+YESSION_WEBHOOK_ENDPOINTS=github@1
+```
+
+Both the new secret and the one before it are accepted, so there is no window where live
+deliveries are refused. Bump again to retire the old one.
+
+Deliveries are verified as HMAC-SHA256 over the raw body, hex, in `X-Hub-Signature-256`
+behind `sha256=` — the WebSub convention, which is what GitHub, Shopify and Linear follow.
+Override it per endpoint as `header:encoding:prefix`:
+
+```
+YESSION_WEBHOOK_SIGNATURE_GITHUB=x-shopify-hmac-sha256:base64:
+```
+
+Not supported: schemes that sign a constructed string carrying a timestamp, which is what
+Stripe (`<t>.<body>`) and Slack (`v0:<ts>:<body>`) do. Those need the scheme itself rather
+than more configuration.
+
 ### Tailscale
 
 One listener carries everything: the Manager at `/`, each session at `/s/<id>`.

@@ -11,6 +11,7 @@ open Yession.Domain
 open Yession.Domain.Sandboxes
 open Yession.Domain.Tools
 open Yession.Domain.Access
+open Yession.Domain.Hooks
 open Yession.Manager
 open Yession.Oidc
 
@@ -256,6 +257,42 @@ let subscribeConnections (baseUrl: string) (secret: string) (onList: Sink<Connec
         (sprintf "%s/control/connections" baseUrl)
         secret
         (decoding "connection status" ControlWire.connectionStatusList onList)
+
+/// Declare what this session wants forwarded from the Manager's hook endpoints, and stop.
+///
+/// The filter is DATA — the Manager stores it and compares, never interprets it — so what
+/// this session knows about its provider stays in this session. Answers the subscription
+/// id, which is what a delivery names when it arrives on the notification leg.
+let subscribeHook (baseUrl: string) (secret: string) (filter: DeliveryFilter) : Async<Result<string, string>> =
+    async {
+        try
+            let! text =
+                postJson
+                    (sprintf "%s/control/hooks/subscribe" baseUrl)
+                    secret
+                    (ControlWire.toString ControlWire.subscribeHookRequest { Filter = filter })
+                |> Interop.awaitPromise
+            return ControlWire.fromString ControlWire.subscribeHookResponse text |> Result.map (fun r -> r.Id)
+        with e ->
+            return Error (sprintf "control unreachable: %s" e.Message)
+    }
+
+/// Stop one of this session's subscriptions. `false` when the Manager had no such
+/// subscription for this launch — which a restart makes ordinary, since a launch's
+/// subscriptions die with it.
+let unsubscribeHook (baseUrl: string) (secret: string) (id: string) : Async<Result<bool, string>> =
+    async {
+        try
+            let! text =
+                postJson
+                    (sprintf "%s/control/hooks/unsubscribe" baseUrl)
+                    secret
+                    (ControlWire.toString ControlWire.unsubscribeHookRequest { ControlWire.UnsubscribeHookRequest.Id = id })
+                |> Interop.awaitPromise
+            return ControlWire.fromString ControlWire.unsubscribeHookResponse text |> Result.map (fun r -> r.Dropped)
+        with e ->
+            return Error (sprintf "control unreachable: %s" e.Message)
+    }
 
 /// Dynamic client registration: bind this launch's OAuth client to its control secret.
 /// Called after the session's server listens — the redirect URI needs the OS-assigned

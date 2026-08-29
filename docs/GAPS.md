@@ -419,6 +419,24 @@ first's.
   session. Relaunching one is no longer a manual click: `GET /sessions/{id}/open` launches a
   stopped session and lands on its address (Plan 11), and the client offers that route when the
   session it was talking to has gone.
+- **The hook relay takes a session's word on what it may receive.** The Manager verifies a
+  DELIVERY (it comes from the internet) and trusts a SUBSCRIPTION (it comes over the
+  authenticated control channel from a child it spawned), which is the stated posture rather
+  than an oversight ([ADR](decisions/2026-08-29-the-manager-relays-hooks-it-cannot-read.md)).
+  What follows, all accepted:
+  - **A session may declare any filter**, so on a Manager shared between people one user's
+    session could ask for another's deliveries. Nothing structural prevents it. The exit is
+    to bind a subscription to what the subscriber's credential can see — named, not built.
+  - **Only HMAC over the raw body is verifiable.** Schemes that sign a constructed string
+    carrying a timestamp (Stripe, Slack) are not, and configuring one is refused at boot
+    rather than failing at the first delivery. The relay forwards a delivery's headers, so a
+    session could verify its own endpoint; that is not built either.
+  - **A rotation is a counter an operator bumps**, and the previous secret stays accepted
+    until they bump again. Nothing expires it on a timer, so an operator who never bumps a
+    second time leaves two live secrets rather than one.
+  - **Endpoints need a durable secret store**, because the signing secret is derived from
+    its KEK. Declaring them on an ephemeral store is refused at boot — the alternative was
+    handing out a secret that stops working at the next restart, silently and only inbound.
 - **The Manager is practically a singleton.** Nothing global is assumed (per-instance
   data directories, OS-assigned session ports), but two Managers over the SAME data
   directory are unsupported — there is no lock until the SQLite move — and the
