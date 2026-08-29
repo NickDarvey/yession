@@ -1748,6 +1748,32 @@ module AgentSandbox =
         | HostBackend
         | DockerBackend -> hostClaudeSpawner ()
 
+    /// Everything the SDK needs to run one turn's CLI: the environment to give it, and the
+    /// spawner that puts it behind the seam.
+    ///
+    /// One verb, because those two are one decision seen twice. The map the SDK is handed
+    /// and the map the sandbox POLICY confines have to be the SAME map — a caller that
+    /// built one and passed the other would run the CLI with a credential its own policy
+    /// never admitted. The scratch HOME belongs to the same decision: the policy names it,
+    /// so a caller that skipped creating it would confine the CLI to a directory that is
+    /// not there.
+    ///
+    /// The backend arrives as a VALUE, settled once at session boot, and is deliberately
+    /// NOT read from the environment here. It used to be, and that second reader carried a
+    /// second default that disagreed with the first: a deployment setting nothing ran the
+    /// CLI unconfined while its own session had already accepted, and validated the tools
+    /// for, srt. `SandboxBackends` (the suite) is what keeps it to one reader.
+    let prepare
+        (backend: SandboxBackend)
+        (dataDir: string)
+        (credential: (string * string) option)
+        : {| Env : Map<string, string>; Spawner : obj |} =
+        let home = SessionLayout.agentHome dataDir
+        Fs.ensureDir home
+        let ambient = ambientEnv ()
+        let env = envFor ambient home credential
+        {| Env = env; Spawner = claudeSpawnerFor backend ambient home env |}
+
 // --- Backend selection --------------------------------------------------------------------
 
 /// The session's `CreateSandbox` for its configured backend. `Error` fails the session

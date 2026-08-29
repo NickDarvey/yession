@@ -202,14 +202,6 @@ let sdkFailureReason (raw: string) : string =
 /// points the SDK at a system Claude Code install instead. Empty = SDK default.
 let private claudePath () = Interop.envOr "YESSION_BIN_CLAUDE" ""
 
-/// Where the CLI process runs (`YESSION_SESSION_AGENT_BACKEND`): host or srt, never docker.
-/// SessionMain parses this at boot and fails the session on anything else, so by the
-/// time a turn runs the value is known good — this reads it back, it does not re-decide.
-let private agentBackend () =
-    match SandboxBackend.parseAgent (Interop.envOr "YESSION_SESSION_AGENT_BACKEND" "host") with
-    | Ok backend -> backend
-    | Error e -> failwithf "agent sandbox: %s" e
-
 [<Emit("Object.fromEntries($0)")>]
 let private toEnvObj (entries: (string * string) array) : obj = jsNative
 
@@ -332,7 +324,8 @@ let registryFor (capabilities: AgentCapabilities) : ToolRegistry =
     merged |> ToolUseLog.wrap capabilities.Tools.Record
 
 /// The Claude Agent SDK–backed `RunAgent`, over this session's data directory (the CLI's
-/// scratch HOME hangs off it) and parameterized by the turn's credential:
+/// scratch HOME hangs off it), the backend that confines the CLI — decided once at
+/// session boot and passed in, never re-read here — and the turn's credential:
 /// `None` = the ambient credential variables pass through (the documented last resort
 /// — how CI's LiveAgent tier feeds the agent); `Some (envVar, value)` = the spawned
 /// CLI runs with exactly that credential, both ambient credential variables displaced.
@@ -344,13 +337,10 @@ let registryFor (capabilities: AgentCapabilities) : ToolRegistry =
 /// interrupt cancels the live query promptly (the returned failure is then discarded
 /// by the orchestrator); the spawner's own kill fires only on the SDK's forwarded
 /// signal, after the graceful stdin-EOF window.
-let runWith (dataDir: string) (credential: (string * string) option) : RunAgent =
+let runWith (dataDir: string) (backend: SandboxBackend) (credential: (string * string) option) : RunAgent =
     fun context capabilities signal onChunk ->
         async {
-            let home = Sandboxes.SessionLayout.agentHome dataDir
-            Fs.ensureDir home
-            let ambient = Sandboxes.ambientEnv ()
-            let env = Sandboxes.AgentSandbox.envFor ambient home credential
+            let cli = Sandboxes.AgentSandbox.prepare backend dataDir credential
             // What this turn can call, assembled where every driver of a tool call assembles
             // it — the registry, then the audit, in that order and only once.
             let registry = registryFor capabilities
@@ -362,14 +352,14 @@ let runWith (dataDir: string) (credential: (string * string) option) : RunAgent 
                        // carries the choice rather than the runner holding one, so a
                        // person changing it changes the next turn and nothing else.
                        model = context.Model |> Option.map ModelId.value |> Option.defaultValue "" |}
-                    (toEnvObj (Map.toArray env))
+                    (toEnvObj (Map.toArray cli.Env))
                     (claudePath ())
                     (descriptorsOf registry)
                     (invokeOf registry)
                     (ToolRegistry.allowedTools registry |> Array.ofList)
                     (fun text -> onChunk { Text = text })
                     signal.OnAbort
-                    (Sandboxes.AgentSandbox.claudeSpawnerFor (agentBackend ()) ambient home env)
+                    cli.Spawner
                 |> Interop.awaitPromise
             let usage =
                 { InputTokens = outcome.inputTokens
@@ -385,4 +375,4 @@ let runWith (dataDir: string) (credential: (string * string) option) : RunAgent 
 /// The ambient-credential runner over a given data directory (existing call sites and the
 /// env fallback). The data dir is where the CLI's scratch HOME goes, so a caller that has no
 /// launch of its own passes `Launch.unlaunched.DataDir` and says so by doing it.
-let run (dataDir: string) : RunAgent = runWith dataDir None
+let run (dataDir: string) (backend: SandboxBackend) : RunAgent = runWith dataDir backend None
