@@ -981,7 +981,7 @@ Async.StartImmediate (
             })
         // ...and keep asking. Nothing pushes a pull request's state at a session that no
         // provider can reach, so asking is the whole mechanism (see `GitHubPrs`).
-        Interop.setInterval GitHubPrs.PollIntervalMs (fun () ->
+        Interop.setInterval GitHubPrs.TickIntervalMs (fun () ->
             Async.StartImmediate (
                 async {
                     let! moved = prWatchers.Poll ()
