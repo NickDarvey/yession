@@ -272,23 +272,24 @@ Items are roughly ordered by how much they matter.
       a leak and the difference between them is not understood.
 
       **Solved, and not by widening anything.** The mutex is only taken when NuGet's
-      migration marker is absent, so the whole path is avoidable — measured, on unpatched
-      srt, with nothing shared granted:
+      migration marker is absent, so the whole path is avoidable — and the marker is not a
+      grant, it is a file in the private home this session already makes for the sandbox.
+      A repo writes it with `files:` (#358), which `Sandboxes.SessionLayout.prepareHome`
+      seeds before anything runs and `HomePath` refuses to let escape that home:
 
-      - `XDG_DATA_HOME` pointed at an operator directory holding `NuGet/Migrations/1`,
-        mounted READ-ONLY. `MigrationRunner.GetMigrationsDirectory` reads that variable, and
-        `Run` checks the marker BEFORE constructing the mutex. Read-only is deliberate: if
-        some workload does want to write there it fails loudly rather than working on one
-        machine.
-      - `CLAUDE_CODE_TMPDIR` on the Session Process, or MSBuild writes its response file to
-        the shared `/tmp/claude` that srt bakes in by default and the compiler then cannot
-        find it (`FSC error FS3194`).
-      - `NUGET_PACKAGES` at the mounted cache, or the sandbox's private HOME means every
-        sandbox re-downloads.
+          files:
+            ".local/share/NuGet/Migrations/1": ""
+
+      `MigrationRunner.GetMigrationsDirectory` resolves `$HOME/.local/share` absent an
+      `XDG_DATA_HOME`, and `Run` checks the marker BEFORE constructing the mutex — so
+      nothing of the operator's is named or mounted. Two env settings are separate from the
+      mutex and still wanted: `CLAUDE_CODE_TMPDIR` on the Session Process, or MSBuild writes
+      its response file to the shared `/tmp/claude` that srt bakes in by default and the
+      compiler then cannot find it (`FSC error FS3194`); and `NUGET_PACKAGES` at an
+      operator's cache, or the sandbox's private HOME means every sandbox re-downloads.
 
       With those, `dotnet --info`, `restore`, `build` and `fsi` all exit 0 and
-      `/tmp/.dotnet` is never touched. The control holds too: empty the share and every one
-      of them fails on `NuGet-Migrations`.
+      `/tmp/.dotnet` is never touched.
 
       The marker is not a lie on a fresh HOME. `Migration1` deletes legacy `v3-cache` /
       `plugins-cache` and fixes permissions on EXISTING NuGet directories; a home nothing
