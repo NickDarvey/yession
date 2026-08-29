@@ -295,6 +295,8 @@ verify                       # == check Browser Ports Native Docker LiveAgent Ke
                              #    Takes check's trailing args, so `verify --only "<text>"` works.
 lint                         # actionlint over .github/workflows, then the F# analyzers over
                              #   every project in Yession.slnx. Runs first in the PR gate.
+                             #   Exits 1 having judged the source and rejected it; exits 2
+                             #   having judged NOTHING, because it does not compile — `build`.
 check --only "<text>"        # narrow BOTH runtimes to cases whose full name contains <text>.
                              #   Buys back the RUNNING, not the compiling: 66s -> 44s on the
                              #   cheap tier, and far more on a tier that spawns browsers.
@@ -333,6 +335,17 @@ fixtures — a violating macro quoted literally in a scanned file would have bee
 violation — and needed a case asserting it had matched at least 300 emits, because a pattern
 that has stopped seeing them and a codebase that obeys the rule read identically in a green
 run. Reading the attribute's value off the typed tree costs none of that.
+
+One rule answers for the others (`Unjudged.fs`). A declaration the compiler could not build is
+not in the typed tree, so no rule sees it, each correctly reports nothing, and the run ends in
+exactly the shape a clean one has — which is how `lint` came to report a product clean, and
+exit 0, over a file carrying a macro that violated both emit rules. The break was one stray
+indentation: a `let` at column 0 under a `namespace` is dropped along with the attribute on it,
+while everything else in the file is still judged, so the run is not empty — it is short by
+exactly the declaration nobody could read. The compiler already knows, and its diagnostics come
+free with the type-check every rule depends on, so this reports the first error in the file and
+`lint` exits 2 rather than 1: "these rules did not read this" must not arrive looking like
+"these rules found nothing", and the next step is `build`, not a rule to go and fix.
 
 Every rule carries a fixture — `analyzers/fixtures/<Rule>Fixture` — whose source says in
 `// YES00n` markers which of its cases must be reported, and `lint` checks the verdicts

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Not a product project and deliberately not in Yession.slnx, for the same reason the
+    other fixtures are not — and one more: its source does not compile, on purpose. `lint`
+    restores it and analyzes it on its own, which never builds it.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Uncompilable.fs" />
+  </ItemGroup>
+
+</Project>
