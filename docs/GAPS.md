@@ -1,15 +1,21 @@
 # Known gaps
 
-An honest inventory of what Yession does **not** do yet, as of the `5.x-beta` line. Phases
-1–4 are accepted, plus later work delivered outside the numbered phases — client
-presentation (Metro/Zune styling, rich-text editing, collaborative presence cursors),
-telemetry (Plan 04), the Manager→Session control-RPC reverse legs, secrets + ABAC
-(Plan 06), BYO user authorization (Plan 07), connections and Claude sign-in (Plan 08),
-remote and mounted session access (Plans 09/10/12), idle reaping (Plan 11), and
-terminals on the WorkSandbox (Plan 13, every stage). The plans those numbers name are gone;
-each one's reasoning now sits beside the code it governs.
+An honest inventory of what Yession does **not** do yet, as of the `9.x-beta` line. Phases
+1–4 are accepted, and so is every numbered plan this file cites — client presentation
+(Metro/Zune styling, rich-text editing, collaborative presence cursors), telemetry
+(Plan 04), the Manager→Session control-RPC reverse legs, secrets + ABAC (Plan 06), BYO user
+authorization (Plan 07), connections and Claude sign-in (Plan 08), remote and mounted
+session access (Plans 09/10/12), idle reaping (Plan 11), terminals on the WorkSandbox
+(Plan 13, every stage), repo integration and the imperative session API (Plans 14/15),
+declared MCP servers and the providers that answer them (Plans 16–19), a session that opens
+cold (Plan 20), credential rotation (Plan 21), the classifier seam every act passes
+(Plan 23), srt's read model (Plan 24), and a repo's own sandbox declarations (Plan 27). The
+plans those numbers name are gone; each one's reasoning now sits beside the code it governs,
+and the number is what joins two entries in different sections to one piece of work.
 Everything below is deliberate scope, recorded so nobody discovers it in production.
-Items are roughly ordered by how much they matter.
+Items are roughly ordered WITHIN a section by how much they matter; the sections are not
+ranked against each other, and the last of them holds trust boundaries as sharp as the
+first's.
 
 ## Security & trust
 
@@ -550,7 +556,7 @@ Items are roughly ordered by how much they matter.
 
 - **The live agent's tool results are text renderings** of the typed capability
   results; there is no structured tool-result schema. The agent can read back what its
-  own terminal commands did (`read_terminal_block`, plus the digest on the context pack
+  own terminal commands did (`read_terminal`, plus the digest on the context pack
   — Plan 13 stages 3a/3b), but there is still no tool for reading session history beyond
   the prompt transcript.
 - **The context pack is a flat transcript** rebuilt per turn from the full projection —
@@ -564,13 +570,6 @@ Items are roughly ordered by how much they matter.
   option), and the queued-message UI has no "locked" visual during the drain broadcast
   window (a peer can briefly type into an entry that is about to vanish — the edit is
   safely discarded, but the UX flickers).
-- **The Node suite's timeout is one budget for every tier.** `tasks.fsx` gives the whole Node
-  run 240s, so a per-case deadline is spent out of a pool every other suite is drawing on: a
-  case that legitimately needs two minutes cannot have them without risking the runner killing
-  the run before any suite reports. That is not hypothetical — it is how the first live clone
-  case failed, and the reason the one that ships is capped at 90s (ten times its real 6.9s)
-  rather than at something comfortable. A tier that spawns real processes and a tier of pure
-  folds want different budgets; they have one.
 - **A turn has no step ceiling, and nothing automatic bounds a runaway one.** `maxTurns` is
   OPTIONAL on the Agent SDK's `query()`, and unset means no cap — which is what `Agent.fs`
   now passes, the same setting interactive Claude Code runs under. The ceiling that used to
@@ -885,7 +884,6 @@ Items are roughly ordered by how much they matter.
   whose own refusal — "what this repo asks for changed since you looked" — is exactly the
   sentence somebody needs and cannot see. Not specific to that command, and not fixable
   inside it: a rejection needs somewhere to be shown, and there is nowhere yet.
-
 - **A block waiting on a keystroke is announced to the agent and to nobody else.**
   `execute_command` answers `TerminalCommandInteractive` the moment detection hands the
   terminal over, and the agent has `write_terminal`/`read_terminal` to resolve it — but if it
