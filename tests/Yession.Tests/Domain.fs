@@ -806,7 +806,6 @@ let private launchTests =
 
 let private repo (raw: string) = RepoRef.create raw |> expect
 let private sandboxName (raw: string) = SandboxName.create raw |> expect
-
 let private configTests =
     testList "yession.yaml (Plan 27)" [
 

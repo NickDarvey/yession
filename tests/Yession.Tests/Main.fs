@@ -89,6 +89,7 @@ let all =
         Tag.needs "Oidc" [] (fun () -> Oidc.tests)
         Tag.needs "Phase4" [] (fun () -> Phase4.tests)
         Tag.needs "the resources algebra" [] (fun () -> Resources.tests)
+        Tag.needs "seeded files" [] (fun () -> SeededFiles.tests)
         Tag.needs "Properties" [] (fun () -> Properties.tests)
         Tag.needs "Acceptance" [] (fun () -> Acceptance.tests)
         Tag.needs "InMemory" [] (fun () -> InMemory.tests)

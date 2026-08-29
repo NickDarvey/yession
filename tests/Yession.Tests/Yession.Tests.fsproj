@@ -70,6 +70,7 @@
     <Compile Include="Phase4.fs" />
     <Compile Include="Hedgehog.fs" />
     <Compile Include="Resources.fs" />
+    <Compile Include="SeededFiles.fs" />
     <Compile Include="Properties.fs" />
     <Compile Include="Acceptance.fs" />
     <Compile Include="InMemory.fs" />
