@@ -177,8 +177,9 @@ first's.
       (Operation not permitted)`, exit 128, and every repo verb was refused for the
       sandbox's whole lifetime in words blaming the binary and the read scope. Neither was
       at fault, and taking the sentence's advice — declaring `~/.config/git` as a resource
-      and defaulting it — would have handed back part of the home Plan 24 exists to deny. Every git spawned by the repo verbs is now built by one function that carries
-      the env, so a probe cannot again gate verbs it does not run as.
+      and defaulting it — would have handed back part of the home Plan 24 exists to deny.
+      Every git spawned by the repo verbs is now built by one function that carries the env,
+      so a probe cannot again gate verbs it does not run as.
     - **Linux cannot reproduce that class of fault, which is why it shipped.** srt denies a
       read on Linux by mounting emptiness over the path, so a denied config reads as ENOENT
       and git shrugs; Seatbelt denies it in place, and `EPERM` is fatal. Any suite that
