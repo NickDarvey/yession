@@ -34,6 +34,20 @@ sandboxes:
 
     forward: [ github ]              # so `git push` works from a terminal
 
+    # This flake needs `nix develop`, which is a nix-command feature, and nix reads
+    # that setting from /etc/nix/nix.conf — a symlink, so a sandbox denying `/` cannot
+    # read it by the spelling nix uses. Stating it here is not a workaround for that:
+    # which experimental features THIS repository's build needs is a fact about this
+    # repository, not about anybody's machine, and a host that had a readable nix.conf
+    # would still be answering a question we should be asking.
+    #
+    # It names no path and no hostname, which is the whole test for what may appear in
+    # this file. `NUGET_PACKAGES` and the rest live in the operator's profile because
+    # they do name paths.
+    env:
+      NIX_CONFIG: "experimental-features = nix-command flakes"
+
+
   # `verify` is minutes long. A second sandbox on the same configuration means the gate runs
   # beside interactive work instead of holding the shell — which is the example Plan 15 stage 2
   # gave for why named sandboxes exist at all.
@@ -44,3 +58,7 @@ sandboxes:
     workdir: .
     uses: [ nix, dotnet, node, ca ]
     forward: [ github ]
+
+    # The same reason as `dev`; `like:` does not exist yet, so it is written twice.
+    env:
+      NIX_CONFIG: "experimental-features = nix-command flakes"
