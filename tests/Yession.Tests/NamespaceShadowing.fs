@@ -33,8 +33,8 @@ module Yession.Tests.NamespaceShadowing
 // `RecordShapes` is: that belongs to some third file's `open` list, which changes without
 // either author present.
 //
-// No capability: it reads files, like `RecordShapes`, `TestSources`, `EmitSources` and
-// `LockSource` beside it.
+// No capability: it reads files, like `RecordShapes`, `TestSources` and `LockSource`
+// beside it.
 
 open Fable.Core
 open Fable.Core.JsInterop

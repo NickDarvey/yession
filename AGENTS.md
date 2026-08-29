@@ -320,9 +320,25 @@ only by running that exact binding on the platform it targets. A parameter kept 
 other than being emitted says so with a leading underscore, which is the whole suppression
 story and deliberately the language's own convention rather than one this rule invents.
 
+The third reads the same macro from the other end (`EmitBody.fs`): Fable substitutes `$N` with
+the caller's argument TEXT and pastes the result into the caller's scope, so a body that
+declares a JavaScript binding can collide with a variable the caller happens to have named the
+same (`const pc = $0` emitting `const pc = pc`, a temporal dead zone error that took the shell
+down and reported as eight unrelated browser timeouts), and a placeholder written twice
+evaluates its argument twice (a fresh peer id minted three times, so a first visit stored one
+and returned another). Both are unrepresentable when the substitutions arrive as parameters of
+a real function, which is what the rule asks for. It was a suite that matched `[<Emit(...)>]`
+in F# source with a hand-kept list of directories to walk; that scan could not write its own
+fixtures — a violating macro quoted literally in a scanned file would have been a real
+violation — and needed a case asserting it had matched at least 300 emits, because a pattern
+that has stopped seeing them and a codebase that obeys the rule read identically in a green
+run. Reading the attribute's value off the typed tree costs none of that.
+
 Every rule carries a fixture — `analyzers/fixtures/<Rule>Fixture` — whose source says in
 `// YES00n` markers which of its cases must be reported, and `lint` checks the verdicts
-against them in both directions on every run. That is what stops a rule going silently blind:
+against them in both directions on every run, counting only that rule's own diagnostics — the
+two emit rules read the same macros from opposite ends, so a case one is asking about is
+routinely something the other has an opinion on. That is what stops a rule going silently blind:
 a loader that no longer matches the assembly name, a typed-tree shape moved by a compiler
 upgrade, a project that failed to restore — each of those reports a clean product and passes.
 

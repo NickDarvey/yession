@@ -39,9 +39,9 @@ module Yession.Tests.RecordShapes
 // example is therefore scanned against itself and never against the product — which still
 // catches a collision inside one, and leaves no directory unscanned.
 //
-// No capability: it reads files. `TestSources`, `EmitSources` and `LockSource` are the
-// other source contracts here, and this is the same trade — the fault is cheap to see at
-// the declaration and expensive to see anywhere else.
+// No capability: it reads files. `TestSources` and `LockSource` are the other source
+// contracts here, and this is the same trade — the fault is cheap to see at the declaration
+// and expensive to see anywhere else.
 
 open Fable.Core
 open Fable.Core.JsInterop
@@ -51,7 +51,7 @@ open System.Text.RegularExpressions
 let private nodeFs : obj = importAll "node:fs"
 
 // Node 20+ walks a tree for us; the repo pins 24. One expression, no declarations, nothing
-// repeated — the shape `EmitSources` requires.
+// repeated — the shape the YES003 analyzer requires.
 [<Emit("$0.readdirSync($1, { recursive: true }).filter(n => n.endsWith('.fs'))")>]
 let private fsharpFilesUnder (fs: obj) (root: string) : string array = jsNative
 
@@ -193,9 +193,9 @@ let private offenders () =
                  |> String.concat ", ")))
 
 // The fixtures are assembled with escapes rather than written across real lines, for the
-// reason `TestSources` and `EmitSources` assemble theirs: a declaration spelled out down
-// the page here would be a real declaration in a real scanned file, and this suite would
-// be reading its own fixtures back as product code.
+// reason `TestSources` assembles theirs: a declaration spelled out down the page here would
+// be a real declaration in a real scanned file, and this suite would be reading its own
+// fixtures back as product code.
 let private plainFixture = "type Fixture =\n    { Alpha : int\n      Beta : string }"
 let private inlineFixture = "type Fixture = { Alpha : int; Beta : string }"
 let private attributedFixture = "[<RequireQualifiedAccess>]\ntype Fixture =\n    { Alpha : int }"

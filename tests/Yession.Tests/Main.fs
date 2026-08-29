@@ -102,7 +102,6 @@ let all =
         // after it in the same process. Cheap tier deliberately — the mutation happens there,
         // and only its consequence needs a live tier.
         Tag.needs "Test sources" [] (fun () -> TestSources.tests)
-        Tag.needs "Emit bodies" [] (fun () -> EmitSources.tests)
         // The fourth source contract: which record types may share a field set. Cheap tier
         // for the reason the others are — the fault is a declaration, and a guard on the
         // declaration fires on the pull request that writes it rather than on whichever

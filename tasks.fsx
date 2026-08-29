@@ -1352,7 +1352,8 @@ let private analyzerOutput =
 /// and a shared one would let a blind rule hide behind a sighted one's verdicts.
 let private fixtures =
     [ "YES001", "TemplateHoleFixture", "Holes.fs"
-      "YES002", "EmitMacroFixture", "Emits.fs" ]
+      "YES002", "EmitMacroFixture", "Emits.fs"
+      "YES003", "EmitBodyFixture", "Bodies.fs" ]
 
 let private fixtureProject name =
     Path.Combine ("analyzers", "fixtures", name, name + ".fsproj")
@@ -1383,19 +1384,26 @@ let private analyze (projects: string list) =
 
     code, output
 
-/// The lines a diagnostic was reported on in one fixture, whatever else it said. Enough to
-/// compare against that fixture's markers and nothing more: pinning the message text would
-/// make every reword of it a failure of the rule.
-let private reportedLines (source: string) (output: string) =
-    let at = Text.RegularExpressions.Regex.Escape source + @"\((\d+),"
+/// The lines ONE rule reported on in one fixture, whatever else it said. Enough to compare
+/// against that fixture's markers and nothing more: pinning the message text would make every
+/// reword of it a failure of the rule.
+///
+/// Filtered by the rule's code, because a fixture answers for one rule's eyesight and the
+/// others are still looking. The emit rules read the same macros from opposite ends, so a case
+/// one of them is asking about is routinely something the other has an opinion on — a repeated
+/// `$0` is a correct macro to `YES002` and a re-evaluated argument to `YES003`, and each
+/// fixture needs to be able to carry it without the other's verdict landing in the count.
+let private reportedLines (code: string) (source: string) (output: string) =
+    let at = Text.RegularExpressions.Regex.Escape source + @"\((\d+),\d+\): \w+ " + code + " :"
 
     [ for m in Text.RegularExpressions.Regex.Matches (output, at) -> int m.Groups.[1].Value ]
     |> List.distinct
     |> List.sort
 
 // `analyzers/Yession.Analyzers` reads the typed tree for the things the compiler will not
-// say: what a Lit template hole renders, and whether an `[<Emit>]` macro names the arguments
-// its binding takes (each rule's own source says why the compiler cannot). They are run here
+// say: what a Lit template hole renders, whether an `[<Emit>]` macro names the arguments its
+// binding takes, and whether the JavaScript around those substitutions survives being pasted
+// into a caller's scope (each rule's own source says why the compiler cannot). They are run here
 // rather than in `check` because they are the same shape of check as actionlint — source
 // judged without running it — and because the PR gate runs `lint` first, where rules this
 // cheap belong.
@@ -1434,7 +1442,7 @@ let private analyzers () =
             |> List.ofArray
 
         let _, fixtureOutput = analyze [ fixtureProject name ]
-        let actual = reportedLines file fixtureOutput
+        let actual = reportedLines code file fixtureOutput
 
         if actual <> expected then
             printfn "%s" fixtureOutput
