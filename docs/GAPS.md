@@ -587,13 +587,18 @@ Items are roughly ordered by how much they matter.
   which is no bound at all for a session nobody is watching. A per-session woken-turn budget
   is the next dial and is deliberately not built in advance.
 - **Watching a pull request is polling, deliberately.** A session asks GitHub about each
-  watched pull request every 60 seconds rather than being told
+  watched pull request rather than being told
   ([ADR](decisions/2026-08-27-pr-state-by-polling.md)); the reasons are that a repo webhook
   needs admin on the repo, and inbound delivery needs a deployment github.com can reach,
   which the loopback default is not. What follows from that, all accepted:
-  - **Up to a minute of latency**, and no way to ask for less short of editing
-    `GitHubPrs.PollIntervalMs`. The hosted dispatching service the ADR describes is the
-    exit, and it does not exist.
+  - **Up to fifteen seconds of latency while a suite is in flight, and up to a minute
+    otherwise**, with no way to ask for less short of editing the two constants in
+    `GitHubPrs`. Only the pending cadence costs anything — a settled watch is two
+    conditional requests that both answer 304, which GitHub does not charge for — and the
+    pending one puts the ceiling around ten pull requests with live suites at once per
+    credential. Lowering it again buys latency at that ceiling's expense, which is the
+    argument for a pushed transport instead; the hosted dispatching service the ADR
+    describes is the exit, and it does not exist.
   - **Check runs only.** The legacy commit-status API is not read, so a repo whose CI
     reports only statuses (no check runs) reads as having no checks rather than as
     failing — the safe direction, and invisible.

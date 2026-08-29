@@ -9,10 +9,10 @@ module Yession.Host.GitHubPrs
 //
 // Polling, not webhooks, and that is a decision rather than a stopgap: a repo webhook
 // needs admin on every repo somebody wants watched, and inbound delivery needs a
-// deployment GitHub can reach — which the loopback default is not. Two conditional GETs
-// per watch per minute cost nothing (a 304 does not count against the rate limit) and
-// work in every deployment shape there is. `FetchPr` is where a future push transport
-// plugs in without anything downstream noticing.
+// deployment GitHub can reach — which the loopback default is not. A settled watch costs
+// two conditional GETs that both answer 304, which is free (GitHub does not count one
+// against the rate limit), and it works in every deployment shape there is. `FetchPr` is
+// where a future push transport plugs in without anything downstream noticing.
 
 open System
 open Fable.Core
@@ -226,18 +226,34 @@ type PrWatchRow =
       /// learns what is wrong rather than seeing a row that silently stopped moving.
       Health : string option }
 
-/// How often a session re-asks GitHub about the pull requests it watches.
+/// How often a session re-asks GitHub about a pull request it watches — and it depends on
+/// what the last look found, because the two waits are not the same wait.
 ///
-/// Sixty seconds, chosen against what a watcher is waiting for: CI finishing, or a merge
-/// landing. Nobody acts on either inside a minute, and the steady state is nearly free —
-/// GitHub does not count a 304 against the primary rate limit, so an idle watch costs two
-/// conditional requests a minute out of five thousand an hour.
+/// A watch whose checks are PENDING is the one somebody is sitting in front of: a suite is
+/// in flight and about to say something, and fifteen seconds is the difference between
+/// noticing and having moved on. Everything else — settled green, settled red, merged,
+/// closed, or a look that failed — waits the full minute, which is what the original sixty
+/// was chosen against: CI finishing, or a merge landing, and nobody acts on either sooner.
+///
+/// The ledger, because only the fast cadence costs anything. A settled watch is two
+/// conditional requests that both answer 304, and GitHub does not count a 304 against the
+/// primary rate limit — so it is free at any interval. A pending watch is not: its checks
+/// endpoint really is moving, so it spends four polls a minute out of five thousand an
+/// hour. That puts the practical ceiling around ten pull requests with live suites at once
+/// per credential, and it is the reason a pushed transport is worth having rather than
+/// simply lowering this number again.
+let PendingIntervalMs = 15000
+let SettledIntervalMs = 60000
+
+/// The driver's tick: the shorter of the two, so a watch is polled within one tick of
+/// falling due at either cadence. WHICH watches are due is decided per entry — a tick is
+/// an opportunity to poll, not a poll.
 ///
 /// No jitter, and one tick's watches are polled in sequence rather than at once. A single
 /// session watching a handful of pull requests is not a thundering herd, and a slow
 /// request delaying the next watch is the backpressure worth having — the same argument
 /// `McpClient.PollIntervalMs` makes.
-let PollIntervalMs = 60000
+let TickIntervalMs = PendingIntervalMs
 
 type private WatchEntry =
     { Pr : PrRef
@@ -247,7 +263,14 @@ type private WatchEntry =
       mutable Etags : PrEtags
       mutable Health : string option
       /// Set when GitHub said to come back later; the epoch second it named.
-      mutable SkipUntilEpoch : int option }
+      mutable SkipUntilEpoch : int option
+      /// The epoch second this watch is next due, from what its last look found. Zero
+      /// until it has had one, which is what makes a fresh watch due immediately.
+      ///
+      /// Distinct from `SkipUntilEpoch` because they are different facts: that one is the
+      /// provider telling us to come back later, this one is our own cadence. Either can
+      /// hold a watch, and the later of the two wins by simply both being checked.
+      mutable DueAtEpoch : int64 }
 
 /// Every pull request this session watches, and what it last learned about them.
 type PrWatchers =
@@ -306,19 +329,35 @@ let create
                       Snapshot = None
                       Etags = PrEtags.none
                       Health = None
-                      SkipUntilEpoch = None })
+                      SkipUntilEpoch = None
+                      DueAtEpoch = 0L })
+
+    /// How long until this watch is next due, given what a look just found. `None` is a
+    /// look that produced no rollup — a failure — and waits the slow interval like a
+    /// settled one, so a watch that cannot be read does not hammer at the fast cadence.
+    let dueIn (checks: ChecksRollup option) : int64 =
+        match checks with
+        | Some ChecksPending -> int64 PendingIntervalMs / 1000L
+        | _ -> int64 SettledIntervalMs / 1000L
 
     let pollEntry (entry: WatchEntry) : Async<bool> =
         async {
             let nowEpoch = (now ()).ToUnixTimeSeconds ()
-            match entry.SkipUntilEpoch with
-            | Some until when int64 until > nowEpoch -> return false
-            | _ ->
+            let heldByProvider = entry.SkipUntilEpoch |> Option.exists (fun until -> int64 until > nowEpoch)
+            if heldByProvider || entry.DueAtEpoch > nowEpoch then return false
+            else
                 entry.SkipUntilEpoch <- None
                 let! token = resolveToken entry.Watcher
                 let! outcome = fetch token entry.Pr entry.Etags entry.Snapshot
+                // Whatever the look found, this watch has had its turn: the next one is
+                // scheduled from what it now knows, so a suite finishing drops the watch
+                // back to the slow cadence on the very poll that noticed.
+                let schedule (checks: ChecksRollup option) =
+                    entry.DueAtEpoch <- nowEpoch + dueIn checks
                 match outcome with
-                | PrUnchanged -> return false
+                | PrUnchanged ->
+                    schedule (entry.Snapshot |> Option.map (fun s -> s.Checks))
+                    return false
                 | PrChanged (snapshot, etags) ->
                     let transitions = PrTransitions.detect entry.Known snapshot
                     if not (List.isEmpty transitions) then
@@ -328,6 +367,7 @@ let create
                     entry.Snapshot <- Some snapshot
                     entry.Etags <- etags
                     entry.Health <- None
+                    schedule (Some snapshot.Checks)
                     return moved
                 | PrFetchFailed failure ->
                     let health =
@@ -346,6 +386,7 @@ let create
                     | PrNotFound | PrUnreachable _ -> ()
                     let moved = entry.Health <> Some health
                     entry.Health <- Some health
+                    schedule None
                     return moved
         }
 

@@ -1900,10 +1900,16 @@ let private prPollTests =
                     scriptedFetch
                         [ GitHubPrs.PrChanged (snapshotOf PrMerged ChecksGreen, GitHubPrs.PrEtags.none)
                           GitHubPrs.PrChanged (snapshotOf PrMerged ChecksGreen, GitHubPrs.PrEtags.none) ]
-                let poller = pollerOver fixedNow script.Fetch recorded (ResizeArray ())
+                // The clock moves past the settled interval between the two polls, so
+                // the second one really is a second LOOK. Without that it would be skipped
+                // as not-yet-due and the assertion below would pass for the wrong reason.
+                let mutable clock = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
+                let poller = pollerOver (fun () -> clock) script.Fetch recorded (ResizeArray ())
                 poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
                 let! first = poller.Poll ()
+                clock <- clock.AddSeconds 61.0
                 let! second = poller.Poll ()
+                Expect.equal script.Calls.Count 2 "github was asked twice"
                 Expect.isTrue first "the merge moved something"
                 Expect.isFalse second "the same answer twice is not news"
                 Expect.equal (List.ofSeq recorded |> List.map (fun (_, _, t) -> t)) [ [ PrWasMerged ] ] "one record"
@@ -1932,6 +1938,56 @@ let private prPollTests =
                 match poller.Rows () with
                 | [ row ] -> Expect.isSome row.Health "the row says what is wrong"
                 | rows -> failwithf "expected one row, got %d" rows.Length
+            }
+
+        testCaseAsync "a watch whose checks are in flight is asked again inside the minute" <|
+            async {
+                let mutable clock = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
+                let script =
+                    scriptedFetch
+                        [ GitHubPrs.PrChanged (snapshotOf PrOpen ChecksPending, GitHubPrs.PrEtags.none)
+                          GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, GitHubPrs.PrEtags.none) ]
+                let poller = pollerOver (fun () -> clock) script.Fetch (RecordedTransitions ()) (ResizeArray ())
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
+                let! _ = poller.Poll ()
+                clock <- clock.AddSeconds 16.0
+                let! _ = poller.Poll ()
+                Expect.equal script.Calls.Count 2 "a suite in flight is what somebody is waiting on, so it is re-asked"
+            }
+
+        testCaseAsync "a watch whose checks have settled waits the full minute" <|
+            async {
+                let mutable clock = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
+                let script =
+                    scriptedFetch
+                        [ GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, GitHubPrs.PrEtags.none)
+                          GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, GitHubPrs.PrEtags.none) ]
+                let poller = pollerOver (fun () -> clock) script.Fetch (RecordedTransitions ()) (ResizeArray ())
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
+                let! _ = poller.Poll ()
+                clock <- clock.AddSeconds 16.0
+                let! _ = poller.Poll ()
+                Expect.equal script.Calls.Count 1 "nothing is in flight, so the fast cadence is not spent on it"
+                clock <- clock.AddSeconds 45.0
+                let! _ = poller.Poll ()
+                Expect.equal script.Calls.Count 2 "past the minute it is asked again"
+            }
+
+        testCaseAsync "a look that failed waits the full minute rather than the fast one" <|
+            async {
+                // Otherwise an unreachable provider is retried four times a minute, which
+                // is the one cadence a failing watch must not have.
+                let mutable clock = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
+                let script =
+                    scriptedFetch
+                        [ GitHubPrs.PrFetchFailed (GitHubPrs.PrUnreachable "network down")
+                          GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, GitHubPrs.PrEtags.none) ]
+                let poller = pollerOver (fun () -> clock) script.Fetch (RecordedTransitions ()) (ResizeArray ())
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
+                let! _ = poller.Poll ()
+                clock <- clock.AddSeconds 16.0
+                let! _ = poller.Poll ()
+                Expect.equal script.Calls.Count 1 "a failure does not earn the fast cadence"
             }
 
         testCaseAsync "a rate-limited watch waits for the window github named" <|
@@ -1994,11 +2050,13 @@ let private prPollTests =
                     scriptedFetch
                         [ GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, etags)
                           GitHubPrs.PrUnchanged ]
-                let poller = pollerOver fixedNow script.Fetch (RecordedTransitions ()) (ResizeArray ())
+                let mutable clock = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
+                let poller = pollerOver (fun () -> clock) script.Fetch (RecordedTransitions ()) (ResizeArray ())
                 poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
                 let! _ = poller.Poll ()
                 // The same watch, re-applied: a boot rebuild or any watch/unwatch does this.
                 poller.Apply [ watching { State = PrOpen; Checks = ChecksGreen } ]
+                clock <- clock.AddSeconds 61.0
                 let! _ = poller.Poll ()
                 Expect.equal (snd script.Calls.[1]) etags "the second look quotes the etags the first was given"
                 poller.Apply []

@@ -8,9 +8,9 @@
 
 ## Decision
 
-A session watches a pull request by **polling GitHub for it**, every 60 seconds, with two
-conditional GETs (the pull request, then its head commit's check runs), spending the
-credential of whoever started the watch. Transitions — merged, closed, reopened, checks
+A session watches a pull request by **polling GitHub for it**, with two conditional GETs
+(the pull request, then its head commit's check runs), spending the credential of whoever
+started the watch. Every 15 seconds while its checks are pending, every 60 otherwise. Transitions — merged, closed, reopened, checks
 green, checks red — are appended to the session's own log and read back on the timeline;
 current state is the `github_prs` query.
 
@@ -49,15 +49,27 @@ That service does not exist, and until it does, registering your own App is not 
 fallback path but the only one — and the one a security-conscious operator would choose
 anyway.
 
-## Why sixty seconds?
+## Why two intervals?
 
-Chosen against what a watcher is actually waiting for — CI finishing, a merge landing —
-neither of which anybody acts on inside a minute.
+Because the two waits are not the same wait. A settled watch is waiting for something that
+has not started — a push, a merge — and nobody acts on either inside a minute. A watch whose
+checks are PENDING is one somebody is sitting in front of, with a suite in flight that is
+about to say something, and fifteen seconds there is the difference between noticing and
+having moved on.
 
-The steady state is close to free. GitHub does not count a `304` against the primary rate
-limit, so an idle watch costs two conditional requests a minute against a budget of 5000 an
-hour, and a pull request that has not moved short-circuits its checks request entirely (the
-checks URL is keyed by the head sha, so an unmoved PR cannot have moved checks).
+Splitting them is what makes the fast cadence affordable. GitHub does not count a `304`
+against the primary rate limit, so a settled watch is free at any interval: two conditional
+requests that both answer 304, against a budget of 5000 an hour. A pending watch is not
+free, because its checks endpoint really is moving — four polls a minute, which puts the
+ceiling around ten pull requests with live suites at once per credential. A single interval
+would have had to pick one of those two facts to serve.
+
+Both halves are always asked, and an earlier version of this document said the opposite: it
+claimed an unmoved pull request "short-circuits its checks request entirely (the checks URL
+is keyed by the head sha, so an unmoved PR cannot have moved checks)". That is false. The
+runs ON a sha go queued to completed while the sha sits still, which is precisely what CI
+finishing looks like — so the short-circuit could hold a watch at `pending` for the whole
+life of a build that had already gone green.
 
 Rate limiting is honoured by GitHub's own `x-ratelimit-reset` rather than a backoff invented
 here: the provider names the moment it will answer again, and any number we picked would be
@@ -101,6 +113,6 @@ rule being bent for it.
   ([ADR](2026-08-28-deployment-fronts-everything-or-nothing.md)) no longer exists.
 - **GitHub streaming PR state.** If the provider offered a subscription a client could hold
   open, this becomes the reconnect path rather than the mechanism.
-- **A watcher that needs seconds, not a minute.** The interval is a constant with an
-  argument attached; if somebody is watching a PR to merge it the moment CI goes green,
-  that argument is worth re-making rather than quietly lowering the number.
+- **A watcher that needs seconds, not fifteen.** Lowering the pending interval again
+  spends the ceiling above rather than buying latency for free, so the answer at that point
+  is a pushed transport, not a smaller number.
