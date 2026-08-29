@@ -168,26 +168,11 @@ first's.
     fallback is wrong, so the git sandbox proves `git --version` before any verb runs one
     and refuses with a sentence naming `YESSION_BIN_GIT` and this host's resources profile
     instead of passing the host binary's excuse through.
-    - **That probe then refused a git that worked, because it was the one git spawn built
-      without the hardened env.** `git --version` ran with an EMPTY env, which is an env no
-      verb ever runs with: git resolves its global config path before it does anything at
-      all, tolerates an `EACCES` there and treats every other errno as fatal, and Seatbelt
-      answers `EPERM`. So on a macOS host whose operator has a `~/.config/git/config` — a
-      home-manager install always does — the probe died `fatal: unable to access …
-      (Operation not permitted)`, exit 128, and every repo verb was refused for the
-      sandbox's whole lifetime in words blaming the binary and the read scope. Neither was
-      at fault, and taking the sentence's advice — declaring `~/.config/git` as a resource
-      and defaulting it — would have handed back part of the home Plan 24 exists to deny.
-      Every git spawned by the repo verbs is now built by one function that carries the env,
-      so a probe cannot again gate verbs it does not run as.
-    - **Linux cannot reproduce that class of fault, which is why it shipped.** srt denies a
-      read on Linux by mounting emptiness over the path, so a denied config reads as ENOENT
-      and git shrugs; Seatbelt denies it in place, and `EPERM` is fatal. Any suite that
-      plants an unreadable file and expects git to fail is therefore green on the platform
-      CI runs no matter which env the spawn carries. The regression test instead plants a
-      MALFORMED config somewhere the sandbox may read, which fails identically on both
-      platforms — it pins that no git spawned here reads the operator's global config, not
-      the errno that made the difference visible.
+    - **A denied read is ENOENT on Linux and EPERM on macOS**, so a whole class of fault is
+      invisible on the platform CI runs: git shrugs at the first and dies on the second. That
+      asymmetry once shipped a probe that refused a working git, and it is why the
+      regression test plants a MALFORMED config rather than an unreadable one
+      ([ADR](decisions/2026-08-28-one-function-builds-every-git-spawn.md)).
     - **`/proc` and `/sys` are outside the scope by construction.** srt's root-deny
       expansion skips both (it remounts `/proc` itself, and a tmpfs over `/sys` breaks
       tooling for a tree that is read-only anyway). Neither is a route back to the denied
@@ -209,24 +194,11 @@ first's.
       the way to a granted path, which is the same one-line widening `/usr/bin/git` ->
       `/var/select` wanted above.
 
-      **That fix was built, measured, shipped, and then reverted — do not simply rebuild
-      it.** A fork of srt 0.0.67 admitting `file-read-metadata` on SYMLINK vnodes does work:
-      `nix.conf` becomes readable by both spellings, and a link to a target nothing grants
-      still stays denied. It also makes `/run` traversable, and on a nix-darwin host that
-      changes what `command -v nix` resolves to — from the working Lix at
-      `/nix/var/nix/profiles/default/bin/nix` to `/run/current-system/sw/bin/nix`, which
-      aborts under Seatbelt (the entry below). Measured both ways: the fork fixes reading
-      `nix.conf` and breaks running `nix`.
-
-      It is also unnecessary, because what a sandbox actually wanted from `nix.conf` is
-      reachable as an operator resource: `NIX_CONFIG = experimental-features = nix-command
-      flakes` as an env leaf. With it, on UNPATCHED srt, `nix --version`, `nix store ping`
-      and `nix eval` all work. So the limitation above stands, and costs nothing here.
-
-      If it is ever worth carrying again, the shape to prefer is emitting BOTH spellings of
-      an allow — the written form beside the canonical one — which fixes the mismatch at the
-      paths an operator actually granted instead of widening metadata host-wide. That was
-      never built.
+      A fork that did exactly that was built, measured and reverted: it makes `nix.conf`
+      readable and `nix` unrunnable on the same host, and what the sandbox wanted from that
+      file is declarable instead. **Do not simply rebuild it** — the measurements, and the
+      shape to prefer if it is ever worth carrying again, are in the
+      [ADR](decisions/2026-08-28-no-srt-fork-for-symlink-metadata.md).
     - **A `Socket` grant is path-scoped on macOS and unenforceable on Linux.** #335 gave a
       socket its own axis, and srt honours it as `network.allowUnixSockets` — a list of paths
       the Seatbelt profile turns into `network-outbound` rules. On Linux srt filters unix
@@ -246,70 +218,15 @@ first's.
       (`SandboxDegraded`, plan increment 5) does not exist yet, so doing it now would widen
       confinement silently. The other is srt gaining a path-scoped mechanism on Linux, which
       seccomp cannot give it. Recorded rather than guessed at.
-    - **`dotnet` cannot run a build in an srt sandbox on macOS, and no resource fixes it.**
-      .NET's named mutexes `stat("/tmp/")` — hardcoded, so redirecting `TMPDIR` does not
-      reach it — and the SDK takes one on first use, from `NuGet.Common.Migrations`. `/tmp`
-      is a symlink, so it is denied for the reason above, and `check` inside a sandbox dies
-      before it compiles anything:
-
-          System.IO.IOException: ... 'NuGet-Migrations'. One or more system calls failed:
-          stat("/tmp/", ...) == -1; errno == EPERM
-
-      An operator cannot grant it. Declaring `/tmp` is refused as non-canonical (#330);
-      declaring `/private/tmp` is accepted and leaves `stat("/tmp/")` refused, measured.
-      `DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1` does not skip it either — set and verified
-      present in the sandbox's env, same failure.
-
-      **What was tried, so it is not tried again.** The deny is `["/"]`, and srt denies that
-      subpath literally on macOS, which is what catches the link. Three variants, each
-      measured in a real sandbox:
-
-      - **Deny `/`'s non-symlink children instead.** `stat("/tmp/")` succeeds — and
-        `/etc/passwd` becomes readable. Seatbelt matches the path as WRITTEN, not
-        canonicalised, so a `/private` deny does not cover `/etc/...`. A confinement
-        regression, not a fix.
-      - **…plus deny `<link>/**` for each.** `/etc/passwd` denied again, and `stat("/tmp/")`
-        refused again: `globToRegex` turns `**` into `.*`, which matches the empty string, so
-        the trailing slash lands back inside the deny.
-      - **…plus deny `<link>/?**`** (`^/etc/[^/].*$`, at least one character past the link).
-        `stat("/tmp/")` succeeds and BOTH `/etc/passwd` and `/tmp` are readable again — the
-        glob deny stops applying, for a reason not visible from outside Seatbelt.
-
-      Reverted rather than shipped on the third reading, because two of the three states are
-      a leak and the difference between them is not understood.
-
-      **Solved, and not by widening anything.** The mutex is only taken when NuGet's
-      migration marker is absent, so the whole path is avoidable — and the marker is not a
-      grant, it is a file in the private home this session already makes for the sandbox.
-      A repo writes it with `files:` (#358), which `Sandboxes.SessionLayout.prepareHome`
-      seeds before anything runs and `HomePath` refuses to let escape that home:
-
-          files:
-            ".local/share/NuGet/Migrations/1": ""
-
-      `MigrationRunner.GetMigrationsDirectory` resolves `$HOME/.local/share` absent an
-      `XDG_DATA_HOME`, and `Run` checks the marker BEFORE constructing the mutex — so
-      nothing of the operator's is named or mounted. Two env settings are separate from the
-      mutex and still wanted: `CLAUDE_CODE_TMPDIR` on the Session Process, or MSBuild writes
-      its response file to the shared `/tmp/claude` that srt bakes in by default and the
-      compiler then cannot find it (`FSC error FS3194`); and `NUGET_PACKAGES` at an
-      operator's cache, or the sandbox's private HOME means every sandbox re-downloads.
-
-      With those, `dotnet --info`, `restore`, `build` and `fsi` all exit 0 and
-      `/tmp/.dotnet` is never touched.
-
-      The marker is not a lie on a fresh HOME. `Migration1` deletes legacy `v3-cache` /
-      `plugins-cache` and fixes permissions on EXISTING NuGet directories; a home nothing
-      has used has none of that to do.
-
-      Two things worth knowing before trying to grant your way out of it instead. The path
-      is `mkdtemp("/tmp/.dotnet.XXXXXX")`, so it wants write on `/tmp` ITSELF unless
-      `/tmp/.dotnet` already exists — not a grant anyone should write. And the shared-memory
-      location is a CoreCLR PAL constant: `TMPDIR` pointed elsewhere is ignored, measured.
-
-      The real fix belongs to NuGet, which wraps the migration work in `catch { }` but
-      constructs the mutex outside every catch — it tolerates a migration that fails and not
-      a mutex it cannot create. One `try` there would fix every sandboxed .NET on macOS.
+    - **`dotnet`'s named mutexes reach a path no sandbox can grant.** They `stat("/tmp/")`
+      — hardcoded, so `TMPDIR` does not reach it — and the SDK takes one on first use, from
+      `NuGet.Common.Migrations`; `/tmp` is a symlink, so it is denied for the reason above
+      and a sandboxed `check` dies before compiling anything. No grant fixes it: `/tmp` is
+      refused as non-canonical (#330) and `/private/tmp` leaves `stat("/tmp/")` refused.
+      What fixes it is seeding NuGet's migration marker into the sandbox's own home, so the
+      mutex is never taken — the three deny variants that were measured and rejected first,
+      and why the marker is not a lie, are in the
+      [ADR](decisions/2026-08-29-sandboxed-dotnet-seeds-the-nuget-marker.md).
     - **A granted executable that cannot RUN is invisible to the start-up checks.** Measured:
       the `nix` an operator would name on nix-darwin (`/run/current-system/sw/bin/nix`,
       canonically `…-nix-2.34.6+1/bin/nix`) aborts under Seatbelt — `Abort trap: 6`, exit 134
