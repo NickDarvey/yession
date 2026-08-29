@@ -10,6 +10,7 @@ open Yession.Domain.Link
 open Yession.Domain.Repos
 open Yession.Domain.Prs
 open Yession.Domain.Chat
+open Yession.Domain.Hooks
 
 let private expect =
     function
@@ -1309,6 +1310,59 @@ let private sandboxRequestTests =
             Expect.isFalse (said.Contains "hunter2") "and not what is in it"
     ]
 
+let private deliveryFilterTests =
+    let path raw = FieldPath.create raw |> expect
+    /// A delivery as the relay presents one: whatever the caller asks for, by path.
+    let delivery (fields: (string * string) list) =
+        fun p -> fields |> List.tryFind (fun (k, _) -> k = FieldPath.render p) |> Option.map snd
+
+    testList "Delivery filters (the hook relay)" [
+        testCase "a path is dotted segments, lowercased so a header's case cannot matter" <| fun () ->
+            Expect.equal
+                (FieldPath.render (path "Body.Repository.Full_Name"))
+                "body.repository.full_name"
+                "the rendering is what travels, and it is one canonical form"
+
+        testCase "a path with an empty segment is not a path" <| fun () ->
+            Expect.isError (FieldPath.create "body..name") "an empty segment addresses nothing"
+
+        testCase "a blank path is not a path" <| fun () ->
+            Expect.isError (FieldPath.create "   ") "there is nothing to address"
+
+        testCase "every constraint must hold" <| fun () ->
+            let filter =
+                { Where =
+                    [ path "body.repository.full_name", "trinketworks/yession"
+                      path "headers.x-github-event", "pull_request" ] }
+            let matching =
+                delivery
+                    [ "body.repository.full_name", "trinketworks/yession"
+                      "headers.x-github-event", "pull_request" ]
+            Expect.isTrue (DeliveryFilter.matches filter matching) "both hold, so it matches"
+
+        testCase "one constraint that does not hold is enough to refuse" <| fun () ->
+            let filter =
+                { Where =
+                    [ path "body.repository.full_name", "trinketworks/yession"
+                      path "headers.x-github-event", "pull_request" ] }
+            let other =
+                delivery
+                    [ "body.repository.full_name", "trinketworks/yession"
+                      "headers.x-github-event", "issues" ]
+            Expect.isFalse (DeliveryFilter.matches filter other) "a conjunction is refused by any one of its parts"
+
+        testCase "a path the delivery does not carry fails its constraint" <| fun () ->
+            // The direction that matters: an absent field must never match by accident,
+            // because that is how one session would start receiving another's deliveries.
+            let filter = { Where = [ path "body.repository.full_name", "trinketworks/yession" ] }
+            Expect.isFalse (DeliveryFilter.matches filter (delivery [])) "absent is not equal"
+
+        testCase "a filter with no constraints accepts everything on its endpoint" <| fun () ->
+            Expect.isTrue
+                (DeliveryFilter.matches DeliveryFilter.everything (delivery []))
+                "no constraints is not a special case, it is an empty conjunction"
+    ]
+
 let tests =
     testList "Domain" [
         identityTests
@@ -1321,6 +1375,7 @@ let tests =
         conversationProjectionTests
         repoTests
         prWatchTests
+        deliveryFilterTests
         shellProfileTests
         frameSerializationTests
     ]
