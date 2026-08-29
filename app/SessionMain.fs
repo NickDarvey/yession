@@ -438,6 +438,24 @@ let mutable private prWatchers : GitHubPrs.PrWatchers = GitHubPrs.PrWatchers.non
 /// The watch verbs over that poller, built once the log exists.
 let mutable private prWatchService : GitHubPrs.PrWatchService option = None
 
+/// What this session asks the Manager to forward: one hook subscription per watched repo.
+/// Only where there is a control channel to declare it over — without one, polling is the
+/// whole mechanism and always was.
+let private prHooks : GitHubPrs.PrHooks =
+    match controlChannel with
+    | Some (url, secret) ->
+        GitHubPrs.hooks
+            (fun filter -> ControlClient.subscribeHook url secret filter)
+            (fun id -> ControlClient.unsubscribeHook url secret id)
+    | None -> GitHubPrs.PrHooks.none
+
+/// Reconcile BOTH halves from the same fold. The poller and the subscriptions answer to one
+/// source — the log's watches — so they cannot drift into a session that polls a repo it
+/// never subscribed to, or holds a subscription for a watch it stopped.
+let private reconcileWatches (watches: PrWatch list) =
+    prWatchers.Apply watches
+    prHooks.Apply (watches |> List.map (fun watch -> watch.Pr.Repo) |> List.distinct)
+
 // The session's named WorkSandboxes (Plan 15, stage 2). Built by the Host (it owns the
 // log the registry appends to), so this cell is filled once `startFull` resolves — before
 // which no turn can run, because nothing is listening.
@@ -799,7 +817,7 @@ Async.StartImmediate (
                         watchesNow
                         (GitHubPrs.fetchOver (Interop.envOr "YESSION_GITHUB_API_URL" "https://api.github.com"))
                         resolveGitHubToken
-                        prWatchers.Apply)
+                        reconcileWatches)
         // The query registry (Plan 15): every read-only view this session declares, in
         // one place. A capability that could not start declares nothing rather than
         // declaring a query that always errors — an empty settings surface says "this
@@ -986,21 +1004,41 @@ Async.StartImmediate (
                     page.Events
                     |> List.map (fun e -> e.Event)
                     |> List.fold PrWatchesProjection.applyEvent PrWatchesProjection.empty
-                prWatchers.Apply projection.Watches
+                reconcileWatches projection.Watches
                 queryRegistry.Invalidate GitHubPrs.queryName
             })
-        // ...and keep asking. Nothing pushes a pull request's state at a session that no
-        // provider can reach, so asking is the whole mechanism (see `GitHubPrs`).
+        // What a look that moved something owes — whichever driver ran it. A transition
+        // recorded here landed behind no block and no turn, so nothing else would notice
+        // it; the debt is in the log regardless, and this is promptness. Lifted out of the
+        // timer so a PUSHED transition and a polled one are indistinguishable downstream by
+        // construction rather than by two callers remembering to agree.
+        let settle (moved: bool) =
+            if moved then
+                queryRegistry.Invalidate GitHubPrs.queryName
+                host.Wake ()
+        // A delivery the Manager forwarded says LOOK, and says it about a repo this session
+        // reads off its own subscription record rather than out of the body. The poll is
+        // still what produces every fact.
+        host.SetNotificationHandler (fun notification ->
+            match notification with
+            | WebhookDelivered (subscription, _, _, _) ->
+                match prHooks.RepoOf subscription with
+                | Some repo ->
+                    Async.StartImmediate (
+                        async {
+                            let! moved = prWatchers.Poke repo
+                            settle moved
+                        })
+                // A subscription this session does not hold: it was dropped between the
+                // Manager matching and the delivery arriving. Nothing to look at.
+                | None -> ())
+        // ...and keep asking, because a delivery is an accelerator and not a guarantee:
+        // where no hook is configured, or one is missed, the interval is the whole answer.
         Interop.setInterval GitHubPrs.TickIntervalMs (fun () ->
             Async.StartImmediate (
                 async {
                     let! moved = prWatchers.Poll ()
-                    if moved then
-                        queryRegistry.Invalidate GitHubPrs.queryName
-                        // A transition the poll just recorded is owed work nothing else
-                        // will notice: it landed on a timer rather than behind a block or
-                        // a turn. The debt is in the log regardless — this is promptness.
-                        host.Wake ()
+                    settle moved
                 }))
         |> ignore
         // Register this launch's OAuth client with the Manager — HERE, after listen

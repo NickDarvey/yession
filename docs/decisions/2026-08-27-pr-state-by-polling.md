@@ -21,7 +21,8 @@ implementation rather than a design.
 
 ## Why not webhooks?
 
-Three separate reasons, any one of which is enough:
+Three separate reasons. The third has since been answered — see below — and the first two
+still stand, which is why polling remains the mechanism rather than the fallback.
 
 - **A repo webhook needs admin on that repo.** The ordinary case is contributing to a
   repository you do not administer, where `POST /repos/{o}/{r}/hooks` is simply refused.
@@ -33,6 +34,14 @@ Three separate reasons, any one of which is enough:
 - **It would have put GitHub in the Manager.** Only the Manager has a stable public
   origin, so ingress would have landed there — and the Manager is the one component that
   has never learned which provider it brokers.
+
+  **Answered, 2026-08-29.** The Manager now relays hooks it cannot read
+  ([ADR](2026-08-29-the-manager-relays-hooks-it-cannot-read.md)): a session declares a
+  filter — data, a conjunction of equalities over paths — and the Manager verifies a
+  signature and matches without knowing what any of it means. The string
+  `body.repository.full_name` lives in `GitHubPrs.fs`, on its way past. What the Manager
+  gained is one header name, one HMAC and a JSON walk, bounded to one file, and a GitHub App
+  has exactly one webhook so ingress had to land somewhere stable regardless.
 
 The GitHub **Events** API is not the fallback it looks like: it omits `check_run`,
 `check_suite` and `status`, which is most of what a watcher is waiting for.
@@ -105,12 +114,12 @@ rule being bent for it.
 - **The dispatching service existing.** Then `FetchPr` gains a second implementation, and
   polling becomes the fallback for deployments that do not use it — not deleted, because
   a self-hosted operator with no relay still needs it.
-- **Session-direct ingress under the fronted shape.** A fronted session is publicly
-  addressable already, so a hook could POST straight at a `/hooks/<token>` route the
-  session serves and verifies itself — no Manager involvement at all. The
-  admin-permission problem does not move, so App-level delivery would still be the
-  mechanism; the shape that would have needed the Manager to relay
-  ([ADR](2026-08-28-deployment-fronts-everything-or-nothing.md)) no longer exists.
+- **Session-direct ingress.** An earlier version of this bullet proposed it, reasoning that
+  a fronted session is publicly addressable so a hook could POST straight at it. That is
+  wrong on the facts: a GitHub App has exactly ONE webhook, auto-created and not deletable,
+  so it can never point at a session. Only a repository or organization hook can, and
+  creating one needs admin on the repo — which is the first reason above. It is still the
+  route for repos you administer, and it is not built.
 - **GitHub streaming PR state.** If the provider offered a subscription a client could hold
   open, this becomes the reconnect path rather than the mechanism.
 - **A watcher that needs seconds, not fifteen.** Lowering the pending interval again

@@ -61,6 +61,11 @@ type SessionHost =
       /// carried out (Plan 27). Set once, from SessionMain, for the same reason the dispatch
       /// table is: the fold that knows what a repo asks for is composed a layer above this.
       SetApproveCapabilities : (ActorRef -> RepoRef -> string list -> Async<Result<unit, string>>) -> unit
+      /// What to do with a Manager→Session notification. A SETTER for the reason the
+      /// command dispatch is one: the subscription is opened here, at start, and what
+      /// should happen to a notification is composed later — out of the services the entry
+      /// module builds after the Host is up. Until it is set, a notification is logged.
+      SetNotificationHandler : NotificationHandler -> unit
       /// Ask the scheduler to look for owed work now (Plan 20). Exposed for the one
       /// producer that appends outside every path that already wakes: the pull-request
       /// poller, whose transitions land on a timer rather than behind a block or a turn.
@@ -668,20 +673,23 @@ let startFull
         // a notification into a durable `SessionEvent` (via `log.Append`), or re-draining,
         // is left to whatever handler a later composition wants. A notification is a signal
         // the session MAY act on, never a fact it is obliged to persist.
+        let notificationHandler : NotificationHandler option ref = ref None
         let mutable notifications : Subscription option = None
         match subscribeNotifications with
         | Some subscribe ->
             let handle (notification: SessionNotification) : unit =
-                match notification with
-                | WebhookDelivered (subscription, endpoint, _, _) ->
-                    // Nothing in this session claims a delivery yet, so the default handler
-                    // says one arrived and drops it. Naming the subscription is what makes a
-                    // filter that matches more than its author expected visible at all.
-                    eprintfn
-                        "[session %s] hook delivery on %s for subscription %s, unhandled"
-                        (SessionId.value sessionId)
-                        endpoint
-                        subscription
+                match notificationHandler.Value with
+                | Some handle -> handle notification
+                | None ->
+                    // Before a composition claims them. Naming the subscription is what
+                    // makes a filter that matches more than its author expected visible.
+                    match notification with
+                    | WebhookDelivered (subscription, endpoint, _, _) ->
+                        eprintfn
+                            "[session %s] hook delivery on %s for subscription %s, unhandled"
+                            (SessionId.value sessionId)
+                            endpoint
+                            subscription
             notifications <- Some (subscribe handle)
         | None -> ()
 
@@ -895,6 +903,7 @@ let startFull
               Terminals = terminals
               SetCommandDispatch = fun table -> commandDispatch.Value <- table
               SetApproveCapabilities = fun approve -> approveCapabilitiesRef.Value <- approve
+              SetNotificationHandler = fun handle -> notificationHandler.Value <- Some handle
               Wake = scheduler.Wake
               RunGated = commandGate.Run
               TerminalCommands = terminalCommands
