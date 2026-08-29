@@ -64,24 +64,72 @@ type QueryShape =
     /// Zero or more rows over the same columns: repos, sandboxes, leases.
     | Rows of QueryColumn list
 
+/// What a datum MEANS, when it means anything — so that one renderer can draw a settled
+/// failure differently from a settled success without knowing what either is about.
+///
+/// Four, and not a palette: these are the distinctions the app's own status vocabulary
+/// already makes (`Style.statusOk`/`statusRun`/`statusErr`/`statusFaint`), so a query
+/// naming one is asking for a rendering that exists rather than inventing a colour. A
+/// fifth would need a token, a contrast proof on every surface, and a reason.
+///
+/// Presentational, and ONLY presentational. The text is what the datum says; the tone is
+/// how loudly. That is what keeps colour from being the only signal — a reader who cannot
+/// see it still reads the word — and it is why `describe` ignores it entirely, so the
+/// agent's reading of a query is byte-identical whether a tone is set or not.
+type QueryTone =
+    /// Settled, and it went well.
+    | ToneOk
+    /// In flight — something is happening and the answer is not in yet.
+    | ToneBusy
+    /// Settled, and it went wrong. The one a reader is scanning for.
+    | ToneBad
+    /// Present but unremarkable; recedes rather than competing.
+    | ToneMuted
+
+module QueryTone =
+
+    /// One word, and the SAME word everywhere it is spelled: on the wire, and in the
+    /// `data-query-tone` hook the rendered table carries. Two spellings of one tone would
+    /// be two things to keep in step, and the one that drifts is the one nothing reads.
+    let name (tone: QueryTone) : string =
+        match tone with
+        | ToneOk -> "ok"
+        | ToneBusy -> "busy"
+        | ToneBad -> "bad"
+        | ToneMuted -> "muted"
+
+    let parse (raw: string) : QueryTone option =
+        match raw with
+        | "ok" -> Some ToneOk
+        | "busy" -> Some ToneBusy
+        | "bad" -> Some ToneBad
+        | "muted" -> Some ToneMuted
+        | _ -> None
+
 /// One datum inside a query's answer. Text and flags are separated because a flag RENDERS
 /// differently (a human reads "yes"/"no"; the agent reads `true`) and because a client
 /// that had only strings would have to guess which "false" was a boolean.
 type QueryCell =
     | CellText of string
     | CellFlag of bool
+    /// Text that carries a verdict about itself: `red`, `merged`, `rate limited`. The same
+    /// string a `CellText` would have held, plus what it means — so a table of them can be
+    /// scanned instead of read.
+    | CellStatus of string * QueryTone
     /// The column exists for this query but this row has nothing for it — distinct from
     /// the empty string, which is a value someone chose.
     | CellAbsent
 
 module QueryCell =
 
-    /// The human rendering, also what the agent's text form prints.
+    /// The human rendering, also what the agent's text form prints. A tone contributes
+    /// nothing here on purpose: it is how a browser draws the value, never part of it.
     let describe (cell: QueryCell) : string =
         match cell with
         | CellText text -> text
         | CellFlag true -> "yes"
         | CellFlag false -> "no"
+        | CellStatus (text, _) -> text
         | CellAbsent -> "—"
 
 /// A query's answer, in its declared shape. Constructed by the capability that owns the

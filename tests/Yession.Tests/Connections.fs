@@ -14,6 +14,7 @@ open Yession.Domain.Access
 open Yession.Domain.Chat
 open Yession.Domain.Hooks
 open Yession.Domain.Prs
+open Yession.Domain.Tools
 open Yession.Manager
 
 #if FABLE_COMPILER
@@ -2059,6 +2060,45 @@ let private prPollTests =
                 let! moved = poller.Poke other
                 Expect.equal script.Calls.Count 0 "nothing on that repo is watched here"
                 Expect.isFalse moved "so nothing moved"
+            }
+
+        testCaseAsync "a red suite is marked as one, so the table can be scanned instead of read" <|
+            async {
+                // The whole point of toning these cells: the row somebody is looking for is
+                // the failing one, and finding it should not mean reading every row.
+                let script = scriptedFetch [ GitHubPrs.PrChanged (snapshotOf PrOpen ChecksRed, GitHubPrs.PrEtags.none) ]
+                let poller = pollerOver fixedNow script.Fetch (RecordedTransitions ()) (ResizeArray ())
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
+                let! _ = poller.Poll ()
+                match! (GitHubPrs.query (fun () -> poller)).Read () with
+                | Ok (RowsOf [ row ]) ->
+                    Expect.equal
+                        (row |> List.tryFind (fun (key, _) -> key = "checks") |> Option.map snd)
+                        (Some (CellStatus ("checks red", ToneBad)))
+                        "the failing suite carries the tone a reader is scanning for"
+                    // The word is unchanged, because the tone is how loudly it is said and
+                    // never what it says — which is also what the agent reads.
+                    Expect.equal
+                        (row |> List.tryFind (fun (key, _) -> key = "state") |> Option.map (snd >> QueryCell.describe))
+                        (Some "open")
+                        "and an ordinary state still reads as its own word"
+                | other -> failwithf "expected one row, got %A" other
+            }
+
+        testCaseAsync "a watch that stopped moving marks its status, not its checks" <|
+            async {
+                // A credential that died is a problem with the WATCH; whatever its checks
+                // last said is not suddenly wrong. Two facts, two cells.
+                let script = scriptedFetch [ GitHubPrs.PrFetchFailed GitHubPrs.PrUnauthorized ]
+                let poller = pollerOver fixedNow script.Fetch (RecordedTransitions ()) (ResizeArray ())
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
+                let! _ = poller.Poll ()
+                match! (GitHubPrs.query (fun () -> poller)).Read () with
+                | Ok (RowsOf [ row ]) ->
+                    match row |> List.tryFind (fun (key, _) -> key = "status") |> Option.map snd with
+                    | Some (CellStatus (_, tone)) -> Expect.equal tone ToneBad "the row says it is broken"
+                    | other -> failwithf "expected a toned status, got %A" other
+                | other -> failwithf "expected one row, got %A" other
             }
 
         testCaseAsync "a watch a delivery has reached says so, so a wired-up hook is visible" <|

@@ -190,6 +190,7 @@ let private representativeModel : ClientModel =
                   Rows
                       [ QueryColumn.create "repo" "repo"
                         QueryColumn.create "branch" "branch"
+                        QueryColumn.create "checks" "checks"
                         QueryColumn.create "dirty" "uncommitted changes" ] }
               { Name = QueryName.create "work_environment" |> expect
                 Title = "work environment"
@@ -208,9 +209,12 @@ let private representativeModel : ClientModel =
                   RowsOf
                       [ [ "repo", CellText "octo/hello"
                           "branch", CellText "main"
+                          // A cell that carries a verdict about itself, so the render
+                          // exercises the toned path as well as the plain one.
+                          "checks", CellStatus ("checks red", ToneBad)
                           "dirty", CellFlag true ] ]
                   "work_environment",
-                  FieldsOf [ "backend", CellText "srt"; "state", CellText "running" ] ] } }
+                  FieldsOf [ "backend", CellText "srt"; "state", CellStatus ("running", ToneBusy) ] ] } }
 
 /// The composer when a PEER is the one writing: their draft is what you are in, yours (if any)
 /// is a summary you can open, and "new message" is the way out of collaborating.
@@ -927,6 +931,19 @@ let private uiChecklistTests =
             Expect.isTrue (html.Contains ">yes<") "a flag cell renders as a word"
             Expect.isFalse (html.Contains ">true<") "the wire's boolean does not reach the page"
             Expect.isTrue (html.Contains "data-query-pending") "an unanswered query says so rather than rendering nothing"
+
+        // A tone is how loudly a value is said, never what it says. What is pinned is the
+        // HOOK and the word — not the ink, which is how the surface is built and what a
+        // redesign is allowed to change.
+        testCase "a cell that carries a verdict says so, and still says the word" <| fun () ->
+            let html = Support.render representativeModel
+            Expect.isTrue (html.Contains "data-query-tone=\"bad\"") "a row's toned cell reports its tone"
+            Expect.isTrue (html.Contains "data-query-tone=\"busy\"") "and so does a field's"
+            // Colour is never the only signal: a reader who cannot see it reads the value.
+            Expect.isTrue (html.Contains "checks red") "the word is still on the page"
+            Expect.isTrue (html.Contains ">running<") "and so is the field's"
+            // The hook means something only if an ordinary cell does not claim one.
+            Expect.isTrue (html.Contains "data-query-tone=\"\"") "an ordinary cell claims no tone, so the hook means something"
 
         // The one approval card, at both mount points (Plan 15, stage 3c). What is worth
         // pinning is that the CHAT column carries the terminal's pending commands too: the

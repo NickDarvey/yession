@@ -592,7 +592,29 @@ module Style =
     /// below the 24px/19px-bold threshold where 3:1 would do, so they need the 4.5:1 ratio
     /// against `surface` that `ink-dim` gives (CLAUDE.md, UI baseline).
     let queryHeadCell = caps + " text-ink-dim text-left font-normal pr-4 pb-1 whitespace-nowrap"
-    let queryCell = "font-light text-small leading-5 text-ink-dim pr-4 py-0.5 whitespace-nowrap"
+
+    /// The four inks a `QueryTone` asks for, named by what they mean so a query never
+    /// spells a Tailwind class. Text only — never filled, never boxed, the rule the
+    /// Statuses block above sets — so a tone emphasises the word rather than wrapping it,
+    /// and a reader who cannot see the colour still reads the value. All four already
+    /// clear 4.5:1 on every surface; the theme-contrast suite is what says so.
+    let toneOk = "text-green"
+    let toneBusy = "text-blue"
+    let toneBad = "text-err"
+    let toneMuted = "text-ink-faint"
+
+    /// The cell, with no colour of its own. A base that carried one could not be recoloured
+    /// by appending: two Tailwind text utilities on one element resolve by stylesheet order
+    /// rather than by the order they are written here, so the colour is always the last
+    /// thing added and never the second.
+    let private queryCellShape = "font-light text-small leading-5 pr-4 py-0.5 whitespace-nowrap"
+
+    let queryCell = queryCellShape + " text-ink-dim"
+    /// The same cell, in the ink its value's tone asked for.
+    let queryCellIn (tone: string) = queryCellShape + " " + tone
+    /// A single value or a labelled field, toned the same way — `small` is the untoned
+    /// form, so this drops its `ink-faint` rather than fighting it.
+    let queryTextIn (tone: string) = "font-light text-small " + tone
 
     /// On a phone this column sits under the fixed degradation bar, so it pays for it in
     /// padding — but only while the bar is there (`degradedShell`).
