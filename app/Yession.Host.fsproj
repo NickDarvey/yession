@@ -69,6 +69,11 @@
     <!-- Per-session retained broadcast (Plan 17): what a session's MCP server SET rides.
          Beside the other two hubs because it is the third shape of the same idea. -->
     <Compile Include="KeyedRetainedHub.fs" />
+    <!-- The hook relay: the Manager's public hook endpoints, and the filters sessions
+         declared against them. Beside the hubs because it is the same kind of thing — a
+         registry of live subscribers keyed by the per-launch control secret — and before
+         Control.fs, which is where a session subscribes. -->
+    <Compile Include="WebhookRelay.fs" />
     <Compile Include="ManagerOidc.fs" />
     <Compile Include="Control.fs" />
     <Compile Include="ControlClient.fs" />

@@ -673,8 +673,15 @@ let startFull
         | Some subscribe ->
             let handle (notification: SessionNotification) : unit =
                 match notification with
-                | EnvironmentChanged () ->
-                    eprintfn "[session %s] notification: environment changed" (SessionId.value sessionId)
+                | WebhookDelivered (subscription, endpoint, _, _) ->
+                    // Nothing in this session claims a delivery yet, so the default handler
+                    // says one arrived and drops it. Naming the subscription is what makes a
+                    // filter that matches more than its author expected visible at all.
+                    eprintfn
+                        "[session %s] hook delivery on %s for subscription %s, unhandled"
+                        (SessionId.value sessionId)
+                        endpoint
+                        subscription
             notifications <- Some (subscribe handle)
         | None -> ()
 

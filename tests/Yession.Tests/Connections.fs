@@ -1055,6 +1055,8 @@ let private startConnectionsServer (callers: (string * Control.ControlCaller) li
                         None
                         (Some api)
                         hub.Register
+                        (fun _ _ -> "")
+                        (fun _ _ -> false)
                         ignore
                         req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore

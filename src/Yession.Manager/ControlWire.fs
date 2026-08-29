@@ -4,6 +4,7 @@ open System
 open Yession.Domain
 open Yession.Domain.Sandboxes
 open Yession.Domain.Access
+open Yession.Domain.Hooks
 
 #if FABLE_COMPILER
 open Thoth.Json
@@ -47,16 +48,90 @@ module ControlWire =
     /// A Manager→Session notification (the reverse leg, Manager-pushed): the payload of the
     /// `/control/notifications` SSE stream. Tagged by `kind` like every other control shape,
     /// so new cases extend it without breaking older decoders. See `SessionNotification`.
+    let private headerPairs : Codec<(string * string) list> =
+        { Encode = List.map (fun (k, v) -> k, Encode.string v) >> Encode.object
+          Decode = Decode.keyValuePairs Decode.string }
+
     let sessionNotification : Codec<SessionNotification> =
         { Encode =
             (fun n ->
                 match n with
-                | EnvironmentChanged () -> Encode.object [ "kind", Encode.string "environmentChanged" ])
+                | WebhookDelivered (subscription, endpoint, headers, body) ->
+                    Encode.object
+                        [ "kind", Encode.string "webhookDelivered"
+                          "subscription", Encode.string subscription
+                          "endpoint", Encode.string endpoint
+                          "headers", headerPairs.Encode headers
+                          "body", Encode.string body ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
-                | "environmentChanged" -> Decode.succeed (EnvironmentChanged ())
+                | "webhookDelivered" ->
+                    Decode.map4
+                        (fun subscription endpoint headers body ->
+                            WebhookDelivered (subscription, endpoint, headers, body))
+                        (Decode.field "subscription" Decode.string)
+                        (Decode.field "endpoint" Decode.string)
+                        (Decode.field "headers" headerPairs.Decode)
+                        (Decode.field "body" Decode.string)
                 | other -> Decode.fail (sprintf "Unknown notification: %s" other)) }
+
+    // --- hook subscriptions (the hook relay) ------------------------------------------
+    // A session declares WHAT it wants forwarded and the Manager keeps the declaration,
+    // never reading a delivery itself. The filter is data all the way down — see
+    // `Yession.Domain.Hooks` for why it is not code.
+
+    type SubscribeHookRequest = { Filter : DeliveryFilter }
+
+    // Both of these carry a lone `Id`, so a bare `{ Id = … }` would build whichever was
+    // declared last. Qualified, and the `Record shapes` suite is what says so.
+    [<RequireQualifiedAccess>]
+    type SubscribeHookResponse = { Id : string }
+
+    [<RequireQualifiedAccess>]
+    type UnsubscribeHookRequest = { Id : string }
+
+    type UnsubscribeHookResponse = { Dropped : bool }
+
+    let private fieldPath : Codec<FieldPath> =
+        { Encode = FieldPath.render >> Encode.string
+          Decode =
+            Decode.string
+            |> Decode.andThen (fun raw ->
+                match FieldPath.create raw with
+                | Ok path -> Decode.succeed path
+                | Error e -> Decode.fail e) }
+
+    let private deliveryFilter : Codec<DeliveryFilter> =
+        { Encode =
+            fun filter ->
+                filter.Where
+                |> List.map (fun (path, expected) ->
+                    Encode.object [ "path", fieldPath.Encode path; "equals", Encode.string expected ])
+                |> Encode.list
+          Decode =
+            Decode.list (
+                Decode.map2
+                    (fun path expected -> path, expected)
+                    (Decode.field "path" fieldPath.Decode)
+                    (Decode.field "equals" Decode.string))
+            |> Decode.map (fun where -> { Where = where }) }
+
+    let subscribeHookRequest : Codec<SubscribeHookRequest> =
+        { Encode = fun r -> Encode.object [ "filter", deliveryFilter.Encode r.Filter ]
+          Decode = Decode.field "filter" deliveryFilter.Decode |> Decode.map (fun f -> { Filter = f }) }
+
+    let subscribeHookResponse : Codec<SubscribeHookResponse> =
+        { Encode = fun (r: SubscribeHookResponse) -> Encode.object [ "id", Encode.string r.Id ]
+          Decode = Decode.field "id" Decode.string |> Decode.map (fun id -> { SubscribeHookResponse.Id = id }) }
+
+    let unsubscribeHookRequest : Codec<UnsubscribeHookRequest> =
+        { Encode = fun (r: UnsubscribeHookRequest) -> Encode.object [ "id", Encode.string r.Id ]
+          Decode = Decode.field "id" Decode.string |> Decode.map (fun id -> { UnsubscribeHookRequest.Id = id }) }
+
+    let unsubscribeHookResponse : Codec<UnsubscribeHookResponse> =
+        { Encode = fun r -> Encode.object [ "dropped", Encode.bool r.Dropped ]
+          Decode = Decode.field "dropped" Decode.bool |> Decode.map (fun d -> { Dropped = d }) }
 
     // --- secrets (Plan 06; resolve reworked with session-owned sandboxes) -----------------
     // Requests carry an explicit scope: the wire is self-describing and deny paths are

@@ -36,6 +36,11 @@ module Yession.Host.Control
 //   POST /control/connections/resolve    { target }             -> { kind, value }
 //        (the ONE value-returning route (Plan 08): an agent turn needs the token
 //         in-process; policy gates it to targets whose scope the caller is bound to)
+//   POST /control/hooks/subscribe    { filter }     -> { id }
+//   POST /control/hooks/unsubscribe  { id }         -> { dropped }
+//        (the hook relay: what this session wants forwarded from the Manager's hook
+//         endpoints. A filter is DATA — a conjunction of equalities over paths — because
+//         code would make the Manager a version ceiling on the sessions it supervises.)
 //   GET  /control/connections                       -> text/event-stream (a third reverse leg:
 //        the caller's readable connection statuses on subscribe, then a fresh list on every
 //        change — metadata frames of `ControlWire.connectionStatusList`, never values)
@@ -47,6 +52,7 @@ open Fable.Core.JsInterop
 open Yession.Domain
 open Yession.Domain.Tools
 open Yession.Domain.Access
+open Yession.Domain.Hooks
 open Yession.Manager
 open Yession.Oidc
 open Yession.Host.Interop
@@ -128,6 +134,12 @@ let tryHandle
     (secretsApi: SecretsApi option)
     (connectionsApi: ConnectionsApi option)
     (subscribeConnections: string -> Subscribe<ConnectionStatusList>)
+    // The hook relay: a session declares a filter over the deliveries it wants forwarded
+    // from the Manager's hook endpoints, keyed by its launch secret so the declaration dies
+    // with the launch. The Manager verifies a delivery's signature and matches these
+    // filters; it never reads one — see `WebhookRelay`.
+    (subscribeHook: string -> DeliveryFilter -> string)
+    (unsubscribeHook: string -> string -> bool)
     // Audit hook (Plan 06 telemetry): called with the request path whenever a control
     // secret fails to resolve — the one place the path and the failure meet.
     (onUnauthorized: string -> unit)
@@ -170,6 +182,22 @@ let tryHandle
                             | Ok () -> respond res 200 "ok"
                             | Error e -> respond res 400 e
                         }))
+            | "POST", "/control/hooks/subscribe" ->
+                // A filter, not a predicate: the Manager stores what the session said and
+                // compares, never interprets. Taking the session's word here is deliberate —
+                // it is a child this Manager spawned, calling over the authenticated
+                // channel, and it already holds whatever credential it would act on.
+                decodeAnd (ControlWire.fromString ControlWire.subscribeHookRequest) (fun request ->
+                    let id = subscribeHook (Option.defaultValue "" secret) request.Filter
+                    respondJson
+                        res
+                        (ControlWire.toString ControlWire.subscribeHookResponse { ControlWire.SubscribeHookResponse.Id = id }))
+            | "POST", "/control/hooks/unsubscribe" ->
+                decodeAnd (ControlWire.fromString ControlWire.unsubscribeHookRequest) (fun request ->
+                    let dropped = unsubscribeHook (Option.defaultValue "" secret) request.Id
+                    respondJson
+                        res
+                        (ControlWire.toString ControlWire.unsubscribeHookResponse { Dropped = dropped }))
             | "POST", "/control/register-client" ->
                 // Dynamic client registration (the OIDC RP side of this launch). The
                 // secret names the registering session; the redirect URI arrives here —

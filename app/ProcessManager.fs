@@ -118,6 +118,11 @@ type ProcessManager =
       /// reads it to render each session's open link, so the address a human clicks and
       /// the redirect URI that session registered come from one declaration.
       Public : PublicAccess
+      /// The hook endpoints this deployment serves, with the secrets each accepts. The
+      /// management page is where an operator reads them — the Manager generates a
+      /// signing secret rather than being told one, so there has to be somewhere to see
+      /// it before pasting it into a provider. Empty when none are declared.
+      HookEndpoints : WebhookRelay.HookEndpoint list
       /// Stop every running child and the Manager endpoint (Manager shutdown).
       StopAll : unit -> Async<unit> }
 
@@ -713,6 +718,26 @@ let createWithUi
                 | Error e -> return failwithf "secrets store (ephemeral): %s" (SecretStore.OpenError.describe e)
         }
 
+    // The hook relay: the Manager's own hook endpoints, and the filters sessions declared
+    // against them. Composed after the secret store because its signing secrets are derived
+    // from the same KEK — which the store has by now either loaded or minted.
+    let! hookRelay =
+        async {
+            match!
+                WebhookRelay.compose
+                    (Interop.envOr "YESSION_WEBHOOK_ENDPOINTS" "")
+                    (fun name -> Interop.envOr (sprintf "YESSION_WEBHOOK_SIGNATURE_%s" (name.ToUpperInvariant ())) "")
+                    (fun () ->
+                        match options.Secrets with
+                        | Some (DurableSecrets keyStore) -> keyStore.Get ()
+                        | _ -> async { return Ok None })
+                    notifications.NotifySecret
+                    Interop.randomSecret
+                with
+            | Ok relay -> return relay
+            | Error e -> return failwithf "webhook endpoints: %s" e
+        }
+
     // Last-seen verified claims per user (memory-only): what the strategy asserted at
     // the most recent token issuance. Display and audit material — never policy input.
     let mutable userClaims : Map<UserId, UserClaims> = Map.empty
@@ -892,7 +917,8 @@ let createWithUi
         async {
             let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
                 let handled =
-                    Control.tryHandle resolveCaller reportName reportActivity notifications.Register mcp.Register provider.RegisterClient secretsApi connectionsApi connectionsHub.Register (fun path -> audit (SecretStore.Audit.controlUnauthorized path)) req res
+                    WebhookRelay.tryHandle hookRelay req res
+                    || Control.tryHandle resolveCaller reportName reportActivity notifications.Register mcp.Register provider.RegisterClient secretsApi connectionsApi connectionsHub.Register hookRelay.Subscribe hookRelay.Unsubscribe (fun path -> audit (SecretStore.Audit.controlUnauthorized path)) req res
                     || handleConnectionsCallback req res
                     || provider.TryHandle req res
                     || (match ui, self with
@@ -1002,6 +1028,9 @@ let createWithUi
                          notifications.Drop secret
                          mcp.Drop secret
                          connectionsHub.Drop secret
+                         // A subscription is keyed by the launch secret for exactly this
+                         // reason: what a dead launch asked to be forwarded goes with it.
+                         hookRelay.Drop secret
                          provider.RevokeByControlSecret secret
                          launchUsers <- Map.remove secret launchUsers
                          launchPeers <- Map.remove secret launchPeers
@@ -1186,6 +1215,7 @@ let createWithUi
           LocalOf = localOf
           EndpointPort = controlServer |> Option.map Interop.serverPort
           Public = options.Public
+          HookEndpoints = hookRelay.Endpoints
           StopAll =
             fun () ->
                 async {

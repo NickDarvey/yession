@@ -457,6 +457,61 @@ let private mcpTemplate (views: ProcessManager.SessionView list) (declarations: 
           </form>
         </section>"""
 
+/// The hook endpoints this deployment serves, and the secret each one accepts.
+///
+/// READ-ONLY, and there is no form beside it: endpoints are deployment configuration, which
+/// is where the rest of this deployment's topology already lives. What this section exists
+/// for is the one thing configuration cannot do — show the operator a secret the Manager
+/// GENERATED, so they can paste it into the provider they are already registering.
+///
+/// The secret is on the page rather than behind a reveal. This page is the operator's own,
+/// behind whatever the deployment's authentication strategy is, and a secret you have to
+/// click to see is one you copy wrong.
+let private hooksTemplate (access: PublicAccess) (endpoints: WebhookRelay.HookEndpoint list) : TemplateResult =
+    let origin =
+        match PublicAccess.managerUrl access with
+        | Some url -> url
+        // Loopback: honest about it rather than printing an address and letting the
+        // operator discover that github.com cannot reach 127.0.0.1.
+        | None -> "http://127.0.0.1 (not reachable from outside this machine)"
+    let rows =
+        endpoints
+        |> List.map (fun endpoint ->
+            let secrets =
+                endpoint.Secrets
+                |> List.mapi (fun index secret ->
+                    let label = if index = 0 then "current" else "previous"
+                    html $"""
+                        <div class="flex items-baseline gap-2.5">
+                          <span class="{Style.label}">{label}</span>
+                          <code class="font-terminal text-code text-ink-faint break-all">{secret}</code>
+                        </div>""")
+            html $"""
+                <tr class="border-b border-hair" data-hook-endpoint="{endpoint.Name}">
+                  <td class="py-3 pr-4 align-top {Style.body}">{endpoint.Name}</td>
+                  <td class="py-3 pr-4 align-top font-terminal text-code text-ink-faint break-all">{origin}/hooks/{endpoint.Name}</td>
+                  <td class="py-3 pr-4 align-top {Style.small}">{endpoint.Signature.Header}</td>
+                  <td class="py-3 pl-4 align-top">{secrets}</td>
+                </tr>""")
+    html $"""
+        <section class="flex flex-col gap-3" data-hooks>
+          <div class="flex items-baseline gap-2.5">
+            <span class="{Style.label}">hook endpoints</span>
+            <span class="font-semibold text-[11px] leading-4 tracking-[0.18em] text-ink-faint tabular-nums">{List.length endpoints}</span>
+          </div>
+          <table class="{Col.table}">
+            <thead>
+              <tr class="border-b border-hair">
+                <th scope="col" class="py-2 pr-4 {Style.label}">name</th>
+                <th scope="col" class="py-2 pr-4 {Style.label}">deliver to</th>
+                <th scope="col" class="py-2 pr-4 {Style.label} {Col.status}">signed in</th>
+                <th scope="col" class="py-2 pl-4 {Style.label}">secret</th>
+              </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+          </table>
+        </section>"""
+
 /// The MCP section, rendered as an action's answer.
 let mcpSection (views: ProcessManager.SessionView list) (declarations: McpDeclaration list) : string =
     Ssr.render (mcpTemplate views declarations)
@@ -470,7 +525,11 @@ let private bodyTemplate
     (query: SessionQuery)
     (views: ProcessManager.SessionView list)
     (declarations: McpDeclaration list)
+    (hooks: WebhookRelay.HookEndpoint list)
     : TemplateResult =
+    let hooksSection =
+        if List.isEmpty hooks then html $""
+        else html $"""<div class="pb-10">{hooksTemplate access hooks}</div>"""
     html $"""
         <main class="flex-1 min-w-0 overflow-y-auto">
           <!-- The registry's measure, not a reading column's. `name` is the only elastic
@@ -508,6 +567,9 @@ let private bodyTemplate
             </form>
             <div class="pb-10">{tableTemplate access query views}</div>
             <div class="pb-10">{mcpTemplate views declarations}</div>
+            <!-- Only when there are any: a deployment that declared no hook endpoints has
+                 nothing to say here, and an empty table would imply a thing to fill in. -->
+            {hooksSection}
           </div>
         </main>"""
 
@@ -519,6 +581,7 @@ let page
     (query: SessionQuery)
     (views: ProcessManager.SessionView list)
     (declarations: McpDeclaration list)
+    (hooks: WebhookRelay.HookEndpoint list)
     : string =
     String.concat "" [
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
@@ -527,7 +590,7 @@ let page
         Style.headTags styleSheetUrl
         WebApp.managerHeadTags (SessionRoute.relative Icon)
         sprintf "</head><body class=\"%s\">" Style.app
-        Ssr.render (bodyTemplate access query views declarations)
+        Ssr.render (bodyTemplate access query views declarations hooks)
         sprintf "<script>%s</script>" script
         "</body></html>"
     ]
@@ -737,7 +800,7 @@ let tryHandle
     let route : (unit -> unit) option =
         match req.``method``, path with
         | "GET", "/" ->
-            Some (fun () -> html res (page cssUrl pm.Public query (pm.Sessions ()) (pm.McpServers ())))
+            Some (fun () -> html res (page cssUrl pm.Public query (pm.Sessions ()) (pm.McpServers ()) pm.HookEndpoints))
         | "GET", path when path.StartsWith ("/" + SessionRoute.assetsPrefix) ->
             // Everything static this build ships, served by path and by nothing else — the
             // same service the Session Process runs, over this process's own set. The Manager

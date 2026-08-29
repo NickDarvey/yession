@@ -165,6 +165,16 @@ let private sha256B64u (cryptoModule: obj) (input: string) : string = jsNative
 
 let sha256Base64Url (input: string) : string = sha256B64u nodeCrypto input
 
+/// HMAC-SHA256 of the UTF-8 input under a secret, digested in `encoding` (`hex`,
+/// `base64`, `base64url`). Beside the hash above because it is the same kind of thing and
+/// the same imported module; the hook relay verifies signed deliveries with it, over the
+/// bytes exactly as they arrived.
+[<Emit("$0.createHmac('sha256', $1).update($2, 'utf8').digest($3)")>]
+let private hmacSha256In (cryptoModule: obj) (secret: string) (input: string) (encoding: string) : string = jsNative
+
+let hmacSha256 (secret: string) (input: string) (encoding: string) : string =
+    hmacSha256In nodeCrypto secret input encoding
+
 /// A short content address: enough of the SHA-256 that a different build is a different
 /// string, which is what lets bytes be served under an immutable cache policy — and short
 /// enough to read in a network panel. 72 bits; a collision needs two builds whose hashes agree
