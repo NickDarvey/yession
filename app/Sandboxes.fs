@@ -107,6 +107,26 @@ module SessionLayout =
         if sandbox = SandboxRef.defaultRef then sprintf "%s/home" dataDir
         else sprintf "%s/sandboxes/%s/home" dataDir (SandboxRef.slug sandbox)
 
+    /// Make a sandbox's home, and put in it whatever the sandbox asked to find there.
+    ///
+    /// ONE verb, because a caller that made the directory and forgot the seeding would
+    /// leave a sandbox whose toolchain fails on first use in a way nothing here explains —
+    /// which is the whole failure this exists to prevent. `prepareTmpDir` above is the same
+    /// shape for the same reason.
+    ///
+    /// Seeds are written only where nothing is already there. A home outlives a sandbox
+    /// restart, so a tool that has since written its own version of one of these files owns
+    /// it: overwriting on every start would silently undo work the sandbox did, and a seed
+    /// is a starting point rather than a policy.
+    ///
+    /// `HomePath` has already refused anything that could land outside the home, so there
+    /// is no second check here — one rule, in the type, reachable by the cheap tier.
+    let prepareHome (home: string) (files: Map<HomePath, string>) : unit =
+        Fs.ensureDir home
+        for KeyValue (path, content) in files do
+            let target = sprintf "%s/%s" (home.TrimEnd '/') (HomePath.value path)
+            if not (Fs.exists target) then Fs.writeTextAtomic target content
+
     /// The session's repos directory, INSIDE the workspace a terminal opens in. One
     /// directory for the whole session — the git verbs clone into it, every work sandbox
     /// reads and builds it — so a NAMED sandbox reaches it at this same absolute path,

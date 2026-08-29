@@ -534,6 +534,29 @@ let private sandboxPolicyTests =
             Expect.isTrue (List.contains prepared config.AllowRead)
                 (sprintf "and readable, since a temp dir that cannot be statted is no temp dir, allowed: %A" config.AllowRead)
 
+        // A sandbox finds what it declared it needs, before anything runs in it. The case
+        // this exists for is a toolchain whose FIRST use does something a sandbox cannot —
+        // .NET taking a named mutex under /tmp, which NuGet only does when its migration
+        // marker is missing (docs/GAPS.md).
+        testCase "a sandbox's home is made holding what it asked to find there" <| fun () ->
+            let home = tempDir () + "/home"
+            let path = HomePath.create ".local/share/NuGet/Migrations/1" |> expect
+            Sandboxes.SessionLayout.prepareHome home (Map.ofList [ path, "" ])
+            Expect.isTrue
+                (Fs.exists (home + "/.local/share/NuGet/Migrations/1"))
+                "the file is there, parents and all"
+
+        // A home outlives a restart, so a seed is a starting point rather than a policy:
+        // overwriting on every start would silently undo whatever the sandbox has since
+        // done with the file.
+        testCase "a seed does not overwrite what the sandbox has since written" <| fun () ->
+            let home = tempDir () + "/home"
+            let path = HomePath.create "tool/state" |> expect
+            Sandboxes.SessionLayout.prepareHome home (Map.ofList [ path, "seeded" ])
+            Fs.writeTextAtomic (home + "/tool/state") "the sandbox wrote this"
+            Sandboxes.SessionLayout.prepareHome home (Map.ofList [ path, "seeded" ])
+            Expect.equal (Fs.readText (home + "/tool/state")) "the sandbox wrote this" "the later start left it alone"
+
         // Canonical, for the reason `OperatorResources` refuses a path that is not: srt
         // canonicalises an allow-list entry and the OS denies the symlink nodes an access
         // traverses, so a temp dir reached through one is granted under a name nothing uses.

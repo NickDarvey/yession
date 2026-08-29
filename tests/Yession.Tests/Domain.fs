@@ -820,7 +820,7 @@ let private configTests =
                           "workdir": "./app",
                           "env": { "NODE_ENV": "development" },
                           "uses": [ "npm" ],
-                          "uses": [ "npm" ],
+                          "files": { ".config/tool/first-run": "" },
                           "forward": [ "github" ] } } }"""
                 |> expect
             let dev = file.Sandboxes |> Map.find (sandboxName "dev")
@@ -842,6 +842,36 @@ let private configTests =
             Expect.isTrue ((refusal "/etc").Contains "absolute") "an absolute path names another machine's tree"
             Expect.isTrue ((refusal "../elsewhere").Contains "climbs out") "and a relative one can mean the same thing"
             Expect.isTrue ((refusal "app/../../elsewhere").Contains "climbs out") "wherever the segment sits"
+
+        // A seeded file is the one thing a repo writes that is not a name, and it is safe
+        // ONLY while it cannot leave the home this session made for that sandbox. So
+        // leaving is what is refused, in every spelling that means it.
+        testCase "a seeded file that leaves the sandbox's home is refused, in every spelling" <| fun () ->
+            let refusal path =
+                match ConfigFile.parse (sprintf """{ "version": 2, "sandboxes": { "dev": { "files": { "%s": "x" } } } }""" path) with
+                | Ok _ -> failwithf "expected a refusal for '%s'" path
+                | Error e -> e
+            Expect.isTrue ((refusal "/etc/passwd").Contains "absolute") "an absolute path is another tree"
+            Expect.isTrue ((refusal "../escape").Contains "outside") "and so is climbing out"
+            Expect.isTrue ((refusal "a/../../escape").Contains "outside") "wherever the segment sits"
+            Expect.isTrue ((refusal "a//b").Contains "empty") "an empty segment could mean either"
+            Expect.isTrue ((refusal "dir/").Contains "file name") "and a directory is not a file"
+
+        // The other half: what a repo legitimately asks for survives to the spec that
+        // materialises it. Without this the refusals above could pass with the feature
+        // decoding to nothing at all.
+        testCase "a seeded file reaches the spec the sandbox is built from" <| fun () ->
+            let file =
+                ConfigFile.parse """
+                    { "version": 2,
+                      "sandboxes": { "dev": { "files": { ".local/share/NuGet/Migrations/1": "" } } } }"""
+                |> expect
+            let decl = file.Sandboxes |> Map.find (sandboxName "dev")
+            let request = SandboxDecl.toRequest (Some "/repos/octo/hello") decl |> expect
+            Expect.equal
+                (request.Spec.Files |> Map.toList |> List.map (fun (path, content) -> HomePath.value path, content))
+                [ ".local/share/NuGet/Migrations/1", "" ]
+                "the path and its content, as written"
 
         // `HostPath` exists and the SESSION uses it — that is how the repos directory reaches
         // a container. A source a repo could name is arbitrary access to the machine running

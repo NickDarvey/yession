@@ -47,6 +47,22 @@ sandboxes:
     env:
       NIX_CONFIG: "experimental-features = nix-command flakes"
 
+    # NuGet's first run takes a named mutex, and on macOS .NET puts named-mutex shared
+    # memory under /tmp — a hardcoded path, so TMPDIR does not reach it, and one no
+    # sandbox can be given without granting write to /tmp itself. It only takes the
+    # mutex when this marker is absent, so the marker is the whole fix: no build here
+    # starts without it.
+    #
+    # Not a grant, which is why it is in this file rather than an operator's profile.
+    # It is a file in the private home this session makes for this sandbox, which that
+    # sandbox already owns entirely and which reaches nothing of the host's.
+    #
+    # Nothing is skipped by writing it. `Migration1` deletes NuGet's legacy v3-cache
+    # and plugins-cache and fixes permissions on directories that already exist; a home
+    # nothing has ever used has none of that to do.
+    files:
+      ".local/share/NuGet/Migrations/1": ""
+
 
   # `verify` is minutes long. A second sandbox on the same configuration means the gate runs
   # beside interactive work instead of holding the shell — which is the example Plan 15 stage 2
@@ -59,6 +75,9 @@ sandboxes:
     uses: [ nix, dotnet, node, ca ]
     forward: [ github ]
 
-    # The same reason as `dev`; `like:` does not exist yet, so it is written twice.
+    # The same reasons as `dev`; `like:` does not exist yet, so both are written twice.
     env:
       NIX_CONFIG: "experimental-features = nix-command flakes"
+
+    files:
+      ".local/share/NuGet/Migrations/1": ""
