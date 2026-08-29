@@ -1346,11 +1346,19 @@ let private solutionProjects () =
 let private analyzerOutput =
     Path.Combine (repoRoot, "analyzers", "Yession.Analyzers", "bin", "Release", "net10.0")
 
-let private fixtureProject =
-    Path.Combine ("analyzers", "fixtures", "TemplateHoleFixture", "TemplateHoleFixture.fsproj")
+/// Every rule, with the fixture that keeps it honest: a source file whose every case is
+/// marked with the rule's code or deliberately left unmarked, and which must be reported
+/// exactly that way. One entry per rule, because a fixture answers for one rule's eyesight
+/// and a shared one would let a blind rule hide behind a sighted one's verdicts.
+let private fixtures =
+    [ "YES001", "TemplateHoleFixture", "Holes.fs"
+      "YES002", "EmitMacroFixture", "Emits.fs" ]
 
-let private fixtureSource =
-    Path.Combine (repoRoot, "analyzers", "fixtures", "TemplateHoleFixture", "Holes.fs")
+let private fixtureProject name =
+    Path.Combine ("analyzers", "fixtures", name, name + ".fsproj")
+
+let private fixtureSource name file =
+    Path.Combine (repoRoot, "analyzers", "fixtures", name, file)
 
 /// The CLI answers by EXITING non-zero, and it does that for two different reasons: it
 /// reported something, or it fell over. Those must not read the same. It reads a project by
@@ -1371,61 +1379,71 @@ let private analyze (projects: string list) =
 
     if output.Contains "critical: Unhandled exception" then
         printfn "%s" output
-        failwith "lint: the analyzer died reading these projects, so it has judged no template hole either way"
+        failwith "lint: an analyzer died reading these projects, so it has judged their source neither way"
 
     code, output
 
-/// The lines a diagnostic was reported on, whatever else it said. Enough to compare against
-/// the fixture's markers and nothing more: pinning the message text would make every reword
-/// of it a failure of the rule.
-let private reportedLines (output: string) =
-    [ for m in Text.RegularExpressions.Regex.Matches (output, @"Holes\.fs\((\d+),") -> int m.Groups.[1].Value ]
+/// The lines a diagnostic was reported on in one fixture, whatever else it said. Enough to
+/// compare against that fixture's markers and nothing more: pinning the message text would
+/// make every reword of it a failure of the rule.
+let private reportedLines (source: string) (output: string) =
+    let at = Text.RegularExpressions.Regex.Escape source + @"\((\d+),"
+
+    [ for m in Text.RegularExpressions.Regex.Matches (output, at) -> int m.Groups.[1].Value ]
     |> List.distinct
     |> List.sort
 
-// `analyzers/Yession.Analyzers` reads the typed tree for the one thing the compiler will not
-// say: what a Lit template hole renders (see TemplateHoles.fs for why it cannot). It is run
-// here rather than in `check` because it is the same shape of check as actionlint — source
-// judged without running it — and because the PR gate runs `lint` first, where a rule this
-// cheap belongs.
+// `analyzers/Yession.Analyzers` reads the typed tree for the things the compiler will not
+// say: what a Lit template hole renders, and whether an `[<Emit>]` macro names the arguments
+// its binding takes (each rule's own source says why the compiler cannot). They are run here
+// rather than in `check` because they are the same shape of check as actionlint — source
+// judged without running it — and because the PR gate runs `lint` first, where rules this
+// cheap belong.
 //
-// Two runs, and the second is the one that keeps the first honest. The product must be clean;
-// the FIXTURE must report exactly the holes it marks `// YES001`. Without that second run a
-// rule that had stopped seeing anything — a loader that no longer matches the assembly name, a
-// typed-tree shape moved by a compiler upgrade, a project that failed to restore — would
-// report a clean product and pass.
+// One run over the product, then one per fixture, and the fixtures are what keep the product
+// run honest. The product must be clean; each FIXTURE must report exactly the lines it marks
+// with its rule's code. Without them a rule that had stopped seeing anything — a loader that
+// no longer matches the assembly name, a typed-tree shape moved by a compiler upgrade, a
+// project that failed to restore — would report a clean product and pass.
 let private analyzers () =
     restore ()
     exec "dotnet" [ "build"; "analyzers/Yession.Analyzers/Yession.Analyzers.fsproj"; "-c"; "Release" ]
-    // Both restores are load-bearing, and the solution one is easy to think redundant on a
+    // Every restore here is load-bearing, and the solution one is easy to think redundant on a
     // machine that has built before. It is not: `lint` runs FIRST in the PR gate, on a fresh
     // checkout where nothing has restored anything, and a project whose references have not
     // resolved compiles only through error recovery — which is the one thing the typed-tree
-    // API cannot be asked about. The fixture is not in the solution, so it needs its own.
+    // API cannot be asked about. The fixtures are not in the solution, so each needs its own.
     exec "dotnet" [ "restore"; "Yession.slnx" ]
-    exec "dotnet" [ "restore"; fixtureProject ]
+
+    for _, name, _ in fixtures do
+        exec "dotnet" [ "restore"; fixtureProject name ]
 
     let code, output = analyze (solutionProjects ())
     if code <> 0 then
         printfn "%s" output
-        failwith "lint: a template hole renders something Lit cannot be trusted to render"
+        failwith "lint: an analyzer rejected something in the product — see above for which rule and where"
 
-    let expected =
-        File.ReadAllLines fixtureSource
-        |> Array.indexed
-        |> Array.filter (fun (_, line) -> line.EndsWith "// YES001")
-        |> Array.map (fun (i, _) -> i + 1)
-        |> List.ofArray
+    for code, name, file in fixtures do
+        let source = fixtureSource name file
 
-    let _, fixtureOutput = analyze [ fixtureProject ]
-    let actual = reportedLines fixtureOutput
+        let expected =
+            File.ReadAllLines source
+            |> Array.indexed
+            |> Array.filter (fun (_, line) -> line.EndsWith ("// " + code))
+            |> Array.map (fun (i, _) -> i + 1)
+            |> List.ofArray
 
-    if actual <> expected then
-        printfn "%s" fixtureOutput
-        failwithf
-            "lint: the template-hole rule is not seeing what it should. Holes.fs marks lines %A; the analyzer reported %A"
-            expected
-            actual
+        let _, fixtureOutput = analyze [ fixtureProject name ]
+        let actual = reportedLines file fixtureOutput
+
+        if actual <> expected then
+            printfn "%s" fixtureOutput
+            failwithf
+                "lint: %s is not seeing what it should. %s marks lines %A; the analyzer reported %A"
+                code
+                file
+                expected
+                actual
 
 // A workflow file is only validated by GitHub when it RUNS. release.yml runs on master — after a
 // PR has merged — so a syntax error in it is invisible to PR CI and lands already broken: a

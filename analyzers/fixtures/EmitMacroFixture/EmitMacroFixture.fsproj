@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Not a product project and deliberately not in Yession.slnx, for the same reason
+    TemplateHoleFixture is not: every binding below is there to be judged, and half of
+    them are meant to fail. `lint` analyzes it on its own and checks the verdicts against
+    the `// YES002` markers in the source.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Emits.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fable.Core" />
+  </ItemGroup>
+
+</Project>

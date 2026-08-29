@@ -308,9 +308,23 @@ boxed before Lit sees it, so a record or a union in one renders whatever it happ
 stringify — no test of the model can see it and no compiler warning covers it (FS3579 fires on
 every hole and its only remedy, `%s`, is FS3376-illegal in a `FormattableString`). The typed
 tree still knows, so `analyzers/Yession.Analyzers` asks it: the reasoning is in
-`TemplateHoles.fs`, and the rule's own eyesight is checked every run against
-`analyzers/fixtures/TemplateHoleFixture`, whose holes say in the source which of them must be
-reported.
+`TemplateHoles.fs`.
+
+The second rule there reads an `[<Emit>]` macro against the binding it sits on
+(`EmitMacro.fs`). The string and the signature are two lines nothing checks together: name a
+`$N` past the last argument and the emitted JavaScript reads `undefined`; leave an argument
+unnamed and its expression is never emitted, so whatever it was going to do does not happen.
+F# type-checks the signature and treats the string as a literal, the JavaScript that comes out
+is valid either way, and an interop binding usually has one call site — so a test catches it
+only by running that exact binding on the platform it targets. A parameter kept for a reason
+other than being emitted says so with a leading underscore, which is the whole suppression
+story and deliberately the language's own convention rather than one this rule invents.
+
+Every rule carries a fixture — `analyzers/fixtures/<Rule>Fixture` — whose source says in
+`// YES00n` markers which of its cases must be reported, and `lint` checks the verdicts
+against them in both directions on every run. That is what stops a rule going silently blind:
+a loader that no longer matches the assembly name, a typed-tree shape moved by a compiler
+upgrade, a project that failed to restore — each of those reports a clean product and passes.
 
 **Adding a renderable type is deliberate.** The allow-list is closed — string, `TemplateResult`,
 a sequence of them, a listener, `int`, `bool` — so a hole holding anything else is an error
