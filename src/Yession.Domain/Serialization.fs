@@ -1926,21 +1926,44 @@ module Codec =
                 | "rows" -> Decode.field "columns" (Decode.list queryColumn.Decode) |> Decode.map Rows
                 | other -> Decode.fail (sprintf "Unknown query shape: %s" other)) }
 
+    /// A tone as one word. Spelled out rather than numbered so the stream stays readable
+    /// to anything consuming it without this codec, which is the same reason a cell rides
+    /// as its native JSON type below.
+    let private queryTone : Codec<QueryTone> =
+        { Encode = QueryTone.name >> Encode.string
+          Decode =
+            Decode.string
+            |> Decode.andThen (fun raw ->
+                match QueryTone.parse raw with
+                | Some tone -> Decode.succeed tone
+                | None -> Decode.fail (sprintf "Unknown query tone: %s" raw)) }
+
     /// A cell rides as its NATIVE JSON type — a string, a bool, or null — rather than as a
-    /// tagged object. That keeps the payload readable to anything that consumes the stream
-    /// without this codec, and the three JSON types are exactly the three cases.
+    /// tagged object, which keeps the payload readable to anything that consumes the stream
+    /// without this codec.
+    ///
+    /// A toned cell is the one that cannot: it carries two facts, so it takes an object.
+    /// It is tried LAST, after the three native forms, because `oneOf` takes the first
+    /// decoder that succeeds and a bare string must stay a `CellText` — the object form is
+    /// the only shape none of the others can claim.
     let private queryCell : Codec<QueryCell> =
         { Encode =
             (fun cell ->
                 match cell with
                 | CellText text -> Encode.string text
                 | CellFlag flag -> Encode.bool flag
+                | CellStatus (text, tone) ->
+                    Encode.object [ "text", Encode.string text; "tone", queryTone.Encode tone ]
                 | CellAbsent -> Encode.nil)
           Decode =
             Decode.oneOf
                 [ Decode.string |> Decode.map CellText
                   Decode.bool |> Decode.map CellFlag
-                  Decode.nil CellAbsent ] }
+                  Decode.nil CellAbsent
+                  Decode.map2
+                      (fun text tone -> CellStatus (text, tone))
+                      (Decode.field "text" Decode.string)
+                      (Decode.field "tone" queryTone.Decode) ] }
 
     let private queryRow : Codec<(string * QueryCell) list> =
         { Encode = fun row -> Encode.object (row |> List.map (fun (key, cell) -> key, queryCell.Encode cell))

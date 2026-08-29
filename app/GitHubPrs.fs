@@ -704,23 +704,45 @@ let query (current: unit -> PrWatchers) : Queries.QueryRegistration =
                               (match row.Snapshot with
                                | Some s when s.Title <> "" -> CellText s.Title
                                | _ -> CellAbsent)
+                              // Toned, because a table of watches is SCANNED rather than
+                              // read: the one a person is looking for is the red suite, and
+                              // it should not take reading six rows to find it. The word is
+                              // still the word — the tone only says how loudly.
                               "state",
                               (match row.Snapshot with
-                               | Some s -> CellText (PrState.describe s.State)
+                               | Some s ->
+                                   CellStatus (
+                                       PrState.describe s.State,
+                                       match s.State with
+                                       // Merged is the outcome somebody was waiting for.
+                                       // Open is the ordinary state and earns no colour —
+                                       // colouring every row would be colouring none.
+                                       | PrMerged -> ToneOk
+                                       | PrClosed -> ToneMuted
+                                       | PrOpen -> ToneMuted)
                                // Watched, but not yet looked at — which is a different
                                // thing from a state, and says so rather than guessing one.
                                | None -> CellAbsent)
                               "checks",
                               (match row.Snapshot with
-                               | Some s -> CellText (ChecksRollup.describe s.Checks)
+                               | Some s ->
+                                   CellStatus (
+                                       ChecksRollup.describe s.Checks,
+                                       match s.Checks with
+                                       | ChecksGreen -> ToneOk
+                                       | ChecksRed -> ToneBad
+                                       | ChecksPending -> ToneBusy
+                                       // No checks is not a verdict about anything.
+                                       | ChecksNone -> ToneMuted)
                                | None -> CellAbsent)
                               "watcher", CellText (ActorRef.token row.Watcher)
                               "status",
-                              CellText (
-                                  match row.Health, row.Pushed with
-                                  | Some health, _ -> health
-                                  // The difference between a hook that is wired up and one
-                                  // that is not, which is otherwise only visible as latency.
-                                  | None, true -> "ok (push)"
-                                  | None, false -> "ok") ])))
+                              (match row.Health, row.Pushed with
+                               // A watch that has stopped moving, and why. The one cell in
+                               // the row that is a problem rather than a state.
+                               | Some health, _ -> CellStatus (health, ToneBad)
+                               // The difference between a hook that is wired up and one
+                               // that is not, which is otherwise only visible as latency.
+                               | None, true -> CellStatus ("ok (push)", ToneOk)
+                               | None, false -> CellStatus ("ok", ToneMuted)) ])))
             } }

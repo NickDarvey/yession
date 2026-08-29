@@ -272,6 +272,27 @@ let private codecTests =
             Expect.isTrue (json.Contains "\"dirty\":true") "a flag is a boolean"
             Expect.isTrue (json.Contains "\"note\":null") "an absent cell is null"
 
+        testCase "a toned cell round-trips, and a bare string is still text" <| fun () ->
+            // The toned form is an object because it carries two facts, and it is decoded
+            // LAST — `oneOf` takes the first decoder that succeeds, so a bare string must
+            // not be claimable by anything but `CellText`.
+            let frame =
+                QueryValued (
+                    name "repos",
+                    RowsOf [ [ "repo", CellText "octo/hello"; "dirty", CellStatus ("checks red", ToneBad) ] ])
+            let json = Codec.toString Codec.queryFrame frame
+            Expect.equal (Codec.fromString Codec.queryFrame json) (Ok frame) "the tone survives the wire"
+            Expect.isTrue (json.Contains "\"tone\":\"bad\"") "spelled as a word, so the stream stays readable"
+
+        testCase "a tone the client does not know is an error, never a silent default" <| fun () ->
+            // A tone it drew as "whatever the fall-through was" would be a wrong verdict
+            // rendered confidently, which is worse than a frame that failed to decode.
+            Expect.isError
+                (Codec.fromString
+                    Codec.queryFrame
+                    """{"kind":"valued","name":"repos","value":{"rows":[{"dirty":{"text":"x","tone":"lilac"}}]}}""")
+                "an unknown tone is refused"
+
         testCase "an unknown frame tag decodes to an error, never a crash" <| fun () ->
             Expect.isTrue
                 (Result.isError (Codec.fromString Codec.queryFrame """{"tag":"whatever"}"""))

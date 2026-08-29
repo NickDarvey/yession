@@ -806,24 +806,48 @@ module View =
     /// makes the accessibility floor cheap to hold, because it is held once, here, for
     /// every query that will ever exist.
     let private queryValueView (shape: QueryShape) (value: QueryValue option) : TemplateResult =
-        let cellText (row: (string * QueryCell) list) (column: QueryColumn) =
+        let cellAt (row: (string * QueryCell) list) (column: QueryColumn) =
             row
             |> List.tryFind (fun (key, _) -> key = column.Key)
             |> Option.map snd
             |> Option.defaultValue CellAbsent
-            |> QueryCell.describe
+        // The one place a tone becomes an ink. Exhaustive on purpose: a fifth tone fails
+        // the build HERE, where somebody has to choose a colour and prove its contrast,
+        // rather than rendering as whatever the fall-through happened to be.
+        let ink (tone: QueryTone) =
+            match tone with
+            | ToneOk -> Style.toneOk
+            | ToneBusy -> Style.toneBusy
+            | ToneBad -> Style.toneBad
+            | ToneMuted -> Style.toneMuted
+        // A toned cell carries its tone as a data hook as well as an ink, because the ink
+        // is the thing a test must not assert on — a class name is how the surface is
+        // BUILT, and the hook is what it PROMISES.
+        let toneHook (cell: QueryCell) =
+            match cell with
+            | CellStatus (_, tone) -> QueryTone.name tone
+            | _ -> ""
         match shape, value with
         | _, None -> html $"""<span class="{Style.small}" data-query-pending>…</span>"""
         | Value, Some (ValueOf cellValue) ->
-            html $"""<span class="{Style.small}" data-query-value>{QueryCell.describe cellValue}</span>"""
+            let face =
+                match cellValue with
+                | CellStatus (_, tone) -> Style.queryTextIn (ink tone)
+                | _ -> Style.small
+            html $"""<span class="{face}" data-query-value data-query-tone="{toneHook cellValue}">{QueryCell.describe cellValue}</span>"""
         | Fields columns, Some (FieldsOf fields) ->
             let rows =
                 columns
                 |> List.map (fun column ->
+                    let cell = cellAt fields column
+                    let face =
+                        match cell with
+                        | CellStatus (_, tone) -> Style.queryTextIn (ink tone)
+                        | _ -> Style.small
                     html $"""
                         <div class="{Style.sideRow}" data-query-field="{column.Key}">
                           <span class="{Style.statusFaint}">{column.Label}</span>
-                          <span class="{Style.small}">{cellText fields column}</span>
+                          <span class="{face}" data-query-tone="{toneHook cell}">{QueryCell.describe cell}</span>
                         </div>""")
             html $"""<div class="flex flex-col gap-1">{rows}</div>"""
         | Rows _, Some (RowsOf []) ->
@@ -842,7 +866,12 @@ module View =
                     let cells =
                         columns
                         |> List.map (fun column ->
-                            html $"""<td class="{Style.queryCell}" data-query-cell="{column.Key}">{cellText row column}</td>""")
+                            let cell = cellAt row column
+                            let face =
+                                match cell with
+                                | CellStatus (_, tone) -> Style.queryCellIn (ink tone)
+                                | _ -> Style.queryCell
+                            html $"""<td class="{face}" data-query-cell="{column.Key}" data-query-tone="{toneHook cell}">{QueryCell.describe cell}</td>""")
                     html $"""<tr>{cells}</tr>""")
             html $"""
                 <div class="{Style.queryTable}">
