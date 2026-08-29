@@ -248,7 +248,9 @@ let private makeSandboxes
                     | HostBackend
                     | SrtBackend -> Some (Sandboxes.SessionLayout.homeFor dataDir sandbox)
                     | DockerBackend -> None
-                home |> Option.iter Fs.ensureDir
+                // Made AND seeded in one call: whatever this sandbox declared it needs to
+                // find in its own home is there before anything runs in it.
+                home |> Option.iter (fun path -> Sandboxes.SessionLayout.prepareHome path workSpec.Files)
                 let prepare =
                     Sandboxes.preparePolicy
                         workBackend

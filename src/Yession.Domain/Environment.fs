@@ -105,6 +105,41 @@ module SandboxRuntime =
             | Some command -> sprintf "%s running '%s'" what command
             | None -> what
 
+/// Where a seeded file goes: a path inside the sandbox's OWN home, and nowhere else.
+///
+/// Private, so the refusals below are the only way to hold one. A sandbox's home is a
+/// directory this session makes and that sandbox alone writes, which is why seeding one
+/// needs no operator's permission — it reaches nothing of the host's. That is only true
+/// while the path cannot LEAVE the home, so leaving is what has no representation:
+/// absolute paths, `..`, and empty segments are refused rather than normalised, because a
+/// path that means something other than what was written is how the check gets bypassed
+/// later by somebody spelling it differently.
+type HomePath = private HomePath of string
+
+module HomePath =
+
+    /// The one way to make one. Refuses in the writer's words, naming what to write
+    /// instead — this is read from a repo's `yession.yaml`, so the person to tell is
+    /// whoever wrote that file.
+    let create (raw: string) : Result<HomePath, string> =
+        let path = raw.Trim ()
+        if path = "" then Error "a seeded file needs a path inside the sandbox's home"
+        elif path.StartsWith "/" then
+            Error (sprintf "'%s' is an absolute path; a seeded file is written inside the sandbox's own home, so name it relative to that" path)
+        elif path.Contains "\\" then
+            Error (sprintf "'%s' uses a backslash; paths here are separated by '/' on every platform" path)
+        elif path.EndsWith "/" then
+            Error (sprintf "'%s' names a directory; a seeded file needs a file name" path)
+        else
+            let segments = path.Split '/' |> Array.toList
+            match segments |> List.tryFind (fun segment -> segment = "" || segment = "." || segment = "..") with
+            | Some "" -> Error (sprintf "'%s' has an empty path segment" path)
+            | Some segment ->
+                Error (sprintf "'%s' contains a '%s' segment; a seeded file cannot reach outside the sandbox's home" path segment)
+            | None -> Ok (HomePath path)
+
+    let value (HomePath path) : string = path
+
 /// What the session's WorkSandbox looks like. The working directory and the environment
 /// (with `SecretRef`s resolved at sandbox spawn) apply to every runtime; everything that is
 /// a container's alone lives in `Container`.
@@ -123,6 +158,24 @@ type EnvironmentSpec =
       /// ceiling and an unconditional grant — so a repo's `read:` could never obtain
       /// anything, and an operator could not offer a path without forcing it on everything.
       Uses : ResourceName list
+      /// Files written into the sandbox's own home before anything runs in it, by path
+      /// and content.
+      ///
+      /// NOT a grant, which is what makes this the repo's to write rather than the
+      /// operator's: every other thing a sandbox holds reaches outward — a mount, a socket,
+      /// an endpoint, an executable — and needs the operator to have offered it first. A
+      /// file in a home this session made and that sandbox alone writes reaches nothing, so
+      /// there is no ceiling for it to exceed.
+      ///
+      /// A SEED and not a guarantee: the sandbox may overwrite or delete any of it, because
+      /// the home is its own. What this buys is a tool finding what it expects on first run
+      /// — the case it exists for is a toolchain whose first use does something a sandbox
+      /// cannot (see docs/GAPS.md on NuGet's migration marker).
+      ///
+      /// Inert content only. There is no `SecretRef` here and there should not be: a
+      /// secret's whole handling is that it is resolved at spawn and never written down,
+      /// and a file on disk in the session's data directory is written down.
+      Files : Map<HomePath, string>
       Runtime : SandboxRuntime }
 
 module EnvironmentSpec =
@@ -132,6 +185,7 @@ module EnvironmentSpec =
         { WorkingDirectory = None
           EnvironmentVariables = Map.empty
           Uses = []
+          Files = Map.empty
           Runtime = Confinement }
 
     /// The same, as a container — what the docker backend starts from when nothing asked for

@@ -53,6 +53,17 @@ type SandboxDecl =
       /// never obtain anything, and an operator could not offer a path without forcing it on
       /// every sandbox.
       Uses : ResourceName list
+      /// Files to write into the sandbox's own home before anything runs in it.
+      ///
+      /// The one thing here a repo may write freely that is not a name, and it is not an
+      /// exception to the rule above — it is the rule's other side. A path, a hostname and
+      /// an executable all reach out of the sandbox and so must be the operator's to offer.
+      /// A file in a home this session made for this sandbox reaches nothing, so there is
+      /// nothing for an operator to bound and no reason to make somebody else write it.
+      ///
+      /// `HomePath` is what keeps that true: it cannot be absolute and cannot contain `..`,
+      /// so nothing declared here lands outside the home.
+      Files : Map<HomePath, string>
       /// Credential NAMES to forward. Resolved for a human at spawn; a value never appears
       /// in a file, and could not: the type is a name.
       Forward : string list }
@@ -64,6 +75,7 @@ module SandboxDecl =
           WorkingDirectory = None
           EnvironmentVariables = Map.empty
           Uses = []
+          Files = Map.empty
           Forward = [] }
 
     /// One declaration, written back as the file would have written it.
@@ -123,6 +135,12 @@ module SandboxDecl =
                   if decl.WorkingDirectory.IsSome then "workdir", Encode.string decl.WorkingDirectory.Value
                   if not (Map.isEmpty decl.EnvironmentVariables) then "env", Encode.object env
                   if not (List.isEmpty decl.Uses) then "uses", strings (decl.Uses |> List.map ResourceName.value)
+                  if not (Map.isEmpty decl.Files) then
+                    "files",
+                    Encode.object (
+                        decl.Files
+                        |> Map.toList
+                        |> List.map (fun (path, content) -> HomePath.value path, Encode.string content))
                   if not (List.isEmpty decl.Forward) then "forward", strings decl.Forward ])
 
     /// What a declaration ASKS the session for, given where this repo's checkout is.
@@ -180,6 +198,7 @@ module SandboxDecl =
                 { WorkingDirectory = workingDirectory
                   EnvironmentVariables = decl.EnvironmentVariables
                   Uses = decl.Uses
+                  Files = decl.Files
                   Runtime =
                     match decl.Container with
                     | Some container -> Container container
@@ -353,7 +372,24 @@ module ConfigFile =
                   Mounts = get.Optional.Field "volumes" (Decode.list mount) |> Option.defaultValue []
                   Command = get.Optional.Field "cmd" Decode.string }))
 
-    let private sandboxKeys = [ "container"; "workdir"; "env"; "uses"; "forward" ]
+    let private sandboxKeys = [ "container"; "workdir"; "env"; "uses"; "files"; "forward" ]
+
+    /// `files:` — a path inside the sandbox's home to the content written there.
+    ///
+    /// The path is decoded through `HomePath`, so a file that would land outside the home
+    /// is refused HERE, naming the path and what is wrong with it, rather than being
+    /// normalised into something the writer did not ask for.
+    let private seededFiles : Decoder<Map<HomePath, string>> =
+        Decode.keyValuePairs Decode.string
+        |> Decode.andThen (fun pairs ->
+            let rec fold acc remaining =
+                match remaining with
+                | [] -> Decode.succeed (Map.ofList (List.rev acc))
+                | (raw, content) :: rest ->
+                    match HomePath.create raw with
+                    | Ok path -> fold ((path, content) :: acc) rest
+                    | Error reason -> Decode.fail reason
+            fold [] pairs)
 
     let private sandbox : Decoder<SandboxDecl> =
         noUnknownKeys sandboxKeys
@@ -364,6 +400,7 @@ module ConfigFile =
                   EnvironmentVariables =
                     get.Optional.Field "env" environment |> Option.defaultValue Map.empty
                   Uses = get.Optional.Field "uses" resourceNames |> Option.defaultValue []
+                  Files = get.Optional.Field "files" seededFiles |> Option.defaultValue Map.empty
                   Forward = get.Optional.Field "forward" stringList |> Option.defaultValue [] }))
 
     /// Sandbox names, refusing a clash INSIDE one file.
