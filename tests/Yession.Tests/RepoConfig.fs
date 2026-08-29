@@ -175,6 +175,13 @@ let tests =
             Expect.isTrue
                 (dev.Uses |> List.map ResourceName.value |> List.contains "pin")
                 "and the sandbox a person works in can"
+            // Which experimental features this repo's build needs is a fact about this
+            // repo, so it is written here rather than in an operator's profile — and a
+            // sandbox without it cannot run `nix develop`, which is the whole job.
+            for name, decl in [ "dev", dev; "gate", gate ] do
+                Expect.isTrue
+                    (decl.EnvironmentVariables |> Map.containsKey "NIX_CONFIG")
+                    (sprintf "%s carries the nix settings its build needs" name)
 
         testCase "a repo with no file asks for nothing, and that is not an error" <| fun () ->
             // The ordinary case. Most repos will never carry one.
