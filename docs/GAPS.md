@@ -449,9 +449,6 @@ first's.
   authenticated control channel from a child it spawned), which is the stated posture rather
   than an oversight ([ADR](decisions/2026-08-29-the-manager-relays-hooks-it-cannot-read.md)).
   What follows, all accepted:
-  - **A session may declare any filter**, so on a Manager shared between people one user's
-    session could ask for another's deliveries. Nothing structural prevents it. The exit is
-    to bind a subscription to what the subscriber's credential can see — named, not built.
   - **Only HMAC over the raw body is verifiable.** Schemes that sign a constructed string
     carrying a timestamp (Stripe, Slack) are not, and configuring one is refused at boot
     rather than failing at the first delivery. The relay forwards a delivery's headers, so a
