@@ -258,23 +258,38 @@ first's.
     made about itself said otherwise. #364 made it one reader; making that reader say `srt`
     turned the release gate's live turn red, stalling its whole 90s having streamed
     nothing.
-    - **What is NOT the cause**, since each was checked: every `Srt` suite passes,
-      including the one pinning that the agent's own sandbox keeps the runtime that starts
-      the CLI, and the one driving the async spawn seam end to end. The read scope reaches
-      the SDK's vendored binary under devenv, because `process.execPath` allows `/nix/store`
-      back. So the fault is something only a real turn reaches, which is exactly the tier
-      no pull request runs.
-    - **The suspicion, untested.** srt filters egress through a proxy of its own, and the
-      spawner hands the SDK the POLICY env verbatim (`options.env` IS that map, by
-      construction). Anything srt's wrap would add to a child's environment for its own
-      proxy — a CA bundle, a proxy address — is therefore not obviously surviving into the
-      CLI, and a CLI that cannot verify the interception hangs rather than failing loudly,
-      which is the symptom. Settling it needs the live tier and nothing else:
-      `gh workflow run verify.yml --ref <branch> -f capabilities="LiveAgent Ports Native
-      Srt" -f only="add_repo"`, with `YESSION_SESSION_AGENT_BACKEND=srt`.
-    - Until then the agent CLI is confined only by its env allowlist and its scratch HOME —
-      the same standing as `host` everywhere else, and stated here rather than implied by a
-      default nobody could have run.
+    - **The cause, now confirmed by the live tier** (`verify.yml` dispatched with
+      `YESSION_SESSION_AGENT_BACKEND=srt`, the spawn boundary instrumented to tee the CLI's
+      stdio and dump its `DEBUG=1` log). The CLI comes up FULLY — MCP server connected,
+      tools listed, credential accepted, an `init` message emitted — and then every request
+      to `api.anthropic.com` fails in ~3ms with a transport-level `Connection error.` (no
+      HTTP status), so Claude Code retries with exponential backoff until the 90s deadline
+      kills it; from outside that reads as a silent stall. srt's own proxy logs ZERO
+      connections for those attempts. The `claude` binary is a **Bun** executable, and
+      Claude Code's proxy support routes through undici's
+      `setGlobalDispatcher(EnvHttpProxyAgent)` — which Bun's native `fetch` does not
+      consult. So the CLI's API egress never touches `HTTP_PROXY` and goes DIRECT, which
+      srt's `--unshare-net` makes unreachable. srt is built to sandbox the COMMANDS Claude
+      Code runs (the WorkSandbox's git/node honour the proxy and are fine — every `Srt`
+      suite is green), never Claude Code ITSELF, so confining the `claude` process behind
+      srt's egress proxy is a use it was not designed for.
+    - **What was NOT the cause**, each checked: the async spawn seam (the `Srt` suite drives
+      it end to end), the read scope (`process.execPath` allows `/nix/store` back, so the
+      Bun binary is readable), and — contrary to the earlier suspicion — the policy env. The
+      proxy env DOES reach the CLI regardless of what the spawner passes as `options.env`
+      (srt bakes it into the wrapped argv: bwrap `--setenv` on Linux, an `env VAR=…` prefix
+      on macOS), and there is no TLS interception to fail — srt runs a plain authenticated
+      CONNECT proxy by default, no MITM CA — so a missing CA bundle was never it.
+    - **Why it stays `host`, and is not a small fix.** Two things would each have to change.
+      srt's `SandboxManager` is process-wide (next bullet), so the agent CLI and the
+      WorkSandbox in one Session Process share one egress policy — dropping the agent's
+      network isolation to let its direct connection through would drop the WorkSandbox's
+      too, unless the agent runs in its own process. And only the Bun binary is shipped (the
+      SDK's per-platform optional deps; no Node-runnable CLI), so "run it on Node, where
+      undici's global dispatcher governs `fetch` and the proxy is honoured" means adding a
+      large dependency and packaging it under Nix. Until one of those is done the agent CLI
+      is confined by its env allowlist and scratch HOME only — the same standing as `host`
+      everywhere else — and `host` is the honest default.
   - The SDK's spawn seam is SYNCHRONOUS and srt's wrap is not, so the srt tier hands the
     SDK a stand-in process whose streams are live immediately and joins the real child to
     them when the wrap resolves. It is plumbing, not policy, and the `Srt` suite drives it
