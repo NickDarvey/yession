@@ -44,7 +44,7 @@ type CommandServices =
       /// The terminal manager, which owns the shell profile (Plan 25).
       Terminals : unit -> SessionTerminals.SessionTerminals
       /// Watching pull requests, absent when the session could not start the poller.
-      Prs : unit -> GitHubPrs.PrWatchService option
+      Prs : unit -> PrWatches.PrWatchService option
       /// Say a query's answer changed. A command is the only thing that can change one, so
       /// a command is the only thing that has to say so — nothing polls.
       Invalidate : QueryName -> unit
@@ -270,7 +270,7 @@ let dispatch (services: CommandServices) : CommandDispatch =
                         | Error e -> return Error e
                         | Ok pr ->
                             return!
-                                andPublish services GitHubPrs.queryName (
+                                andPublish services PrWatches.queryName (
                                     service.Watch
                                         (Authority.author invocation.Authority)
                                         (Authority.effective invocation.Authority)
@@ -293,7 +293,7 @@ let dispatch (services: CommandServices) : CommandDispatch =
                         | Error e -> return Error e
                         | Ok pr ->
                             return!
-                                andPublish services GitHubPrs.queryName (
+                                andPublish services PrWatches.queryName (
                                     service.Unwatch (Authority.author invocation.Authority) pr)
                 | Some _, other ->
                     return Error (sprintf "unwatch_pr takes a repo and a number, got %d arguments" (List.length other))

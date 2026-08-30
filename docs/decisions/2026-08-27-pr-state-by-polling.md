@@ -1,7 +1,8 @@
 # A session learns about its pull requests by asking GitHub, not by being told
 
 > Decided 2026-08-27 · Supersedes nothing · Related:
-> [app/GitHubPrs.fs](../../app/GitHubPrs.fs) — the two endpoints and the poll,
+> [app/PrWatches.fs](../../app/PrWatches.fs) — the poll, the verbs and the query,
+> [app/GitHubPrs.fs](../../app/GitHubPrs.fs) — the two endpoints behind them,
 > [src/Yession.Domain/PrFacts.fs](../../src/Yession.Domain/PrFacts.fs) — the vocabulary,
 > [src/Yession.Domain/PrWatches.fs](../../src/Yession.Domain/PrWatches.fs) — the durable
 > baseline, [deployment.md](../deployment.md) §GitHub — how an operator registers the App
@@ -12,7 +13,7 @@ A session watches a pull request by **polling GitHub for it**, with two conditio
 (the pull request, then its head commit's check runs), spending the credential of whoever
 started the watch. Every 15 seconds while its checks are pending, every 60 otherwise. Transitions — merged, closed, reopened, checks
 green, checks red — are appended to the session's own log and read back on the timeline;
-current state is the `github_prs` query.
+current state is the `pull_requests` query.
 
 We do **not** register webhooks, and the Manager gains nothing: it brokers a credential it
 still cannot name, and its Session-notification channel stays the producerless transport it
