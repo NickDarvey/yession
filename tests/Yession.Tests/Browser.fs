@@ -598,29 +598,35 @@ let tests =
         // nine sat past a horizontal scroll with a scrollbar over the last row. Which is what
         // they did, for as long as a row was a table row.
         //
+        // The long value is ARRANGED, not waited for. A live session's sandbox says `srt` and
+        // `not started`, and nothing that short overflows anything — the first version of this
+        // case asserted on whatever the session happened to answer, and stayed green with the
+        // old non-wrapping cell put back. What has to hold is that a value LONGER than the
+        // lane stays inside it, so the test writes one and then measures the real layout.
+        //
         // Measured against each PANEL's own box rather than the pane's, so the settings face's
         // slide-in (`Style.settingsLane1` translates the section 24px) cannot read as an
         // overflow while it is still arriving.
-        //
-        // Not vacuous, and deliberately not: a session always has its default work sandbox, so
-        // `work_sandboxes` always answers with a row — and at nine columns it is the widest
-        // answer the product declares, which makes it the one that fails first.
-        testCaseAsync "a query's answer fits the lane it renders into" <|
+        testCaseAsync "a value longer than the lane stays inside it" <|
             async {
                 do! awaitU (pageA.ClickAsync "[data-settings-toggle='open']")
+                // A session always has its default work sandbox, so this panel always has a
+                // record to write into — the arrangement cannot silently find nothing.
                 let! _ = await (pageA.WaitForSelectorAsync "[data-query-panel='work_sandboxes'] [data-query-row]")
                 let! overflowing =
-                    await (pageA.EvaluateAsync<string[]> ("""() =>
-                        [...document.querySelectorAll('[data-query-panel]')].flatMap(panel => {
-                            const edge = panel.getBoundingClientRect().right
-                            return [...panel.querySelectorAll('*')]
-                                .filter(el => el.scrollWidth > el.clientWidth + 1
-                                           || el.getBoundingClientRect().right > edge + 1)
-                                .map(el => `${panel.getAttribute('data-query-panel')}: ${el.textContent.trim().slice(0, 40)}`)
-                        })"""))
+                    await (pageA.EvaluateAsync<string[]> ("""() => {
+                        const panel = document.querySelector('[data-query-panel="work_sandboxes"]')
+                        const long = 'a value far longer than two hundred and eighty pixels of column'
+                        panel.querySelectorAll('[data-query-cell]').forEach(el => { el.textContent = long })
+                        const edge = panel.getBoundingClientRect().right
+                        return [...panel.querySelectorAll('*')]
+                            .filter(el => el.scrollWidth > el.clientWidth + 1
+                                       || el.getBoundingClientRect().right > edge + 1)
+                            .map(el => `${el.tagName}: ${el.textContent.trim().slice(0, 40)}`)
+                    }"""))
                 Expect.isEmpty
                     overflowing
-                    (sprintf "every part of an answer must be inside its panel, these are not: %s"
+                    (sprintf "every part of an answer must stay inside its panel, these do not: %s"
                         (String.Join (" | ", overflowing)))
                 do! awaitU (pageA.ClickAsync "[data-settings-toggle='close']")
             }
