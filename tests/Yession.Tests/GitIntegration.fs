@@ -7,12 +7,12 @@ module Yession.Tests.GitIntegration
 // that repo-controlled execution stays OFF: a hook and an fsmonitor planted in the
 // checkout (exactly what the WorkSandbox could write) must not fire through the verbs.
 //
-// What is still MISSING is the one thing neither tier can be: "somebody asked for a repo and
-// got it". Both halves that failed in the session this came from are substituted here — a real
-// model choosing the verb, and github.com over https — so every layer can be green while the
-// errand a person actually types is the thing that does not work. A live suite for it was
-// written and withdrawn (see docs/GAPS.md): it never passed, and the only tier that runs a
-// live agent is the release gate, so every iteration on it costs a red master.
+// Those tiers substitute the two things a person's request actually carries: a model choosing
+// the verb, and github.com over https. The [LiveAgent] suite at the bottom is that same path
+// with neither substituted — a real model choosing `add_repo`, a real checkout landing — and
+// it runs on the release gate and passes on the default `host` agent backend. Under
+// `YESSION_SESSION_AGENT_BACKEND=srt` it stalls, for a reason that is the Bun CLI's and not
+// this verb's (docs/GAPS.md); srt is not the default, so the gate stays green.
 
 open System
 open Fable.Core
@@ -841,19 +841,17 @@ let private compositionTests =
 // person uses: a real model, a real turn, `add_repo` chosen by the agent rather than called by
 // the test, and a real checkout from GitHub landing on disk.
 //
-// It took four attempts to get here, and each failure is why a piece of this looks the way it
-// does. The first died on `Runner.WaitFor`'s 30s hang detector (sized for sub-9s tests), so
-// this case owns its deadline. The second set that deadline to 180s and blew the Node suite's
-// shared 240s budget, killing every suite before a word was printed — hence 90s, which is more
-// than ten times the 6.9s a passing run takes. The third reported "no checkout" with an empty
-// conversation, and the report below is the only reason that was diagnosable: `Phase2` was
-// deleting `ANTHROPIC_API_KEY` from the process env on its way out, so this session started
-// with no credential and therefore no agent at all. `Support.withEnv` is what stopped that.
+// It owns its deadline (`cloneDeadlineMs`) because `Runner.WaitFor`'s 30s hang detector is
+// sized for sub-9s tests, and keeps that deadline under the Node suite's shared 240s budget so
+// a slow turn reports here rather than killing every suite at once. The report is printed on
+// green as well as red — the only window a CI reader has into what the live session did — and
+// it earns that by having once turned an empty conversation into a diagnosis: `Phase2` was
+// deleting `ANTHROPIC_API_KEY` on its way out, so the session ran with no credential and no
+// agent (`Support.withEnv` fixed it).
 //
-// So the report stays, printed on green as well as red. A red here means the clone path is
-// broken, and the report is what says which way: no turn ran at all (no agent item), a turn ran
-// and the clone was refused (the agent's words carry git's), or the clone hung (a turn in
-// flight, nothing on disk).
+// A red here means the clone path is broken, and the report says which way: no turn ran at all
+// (no agent item), a turn ran and the clone was refused (the agent's words carry git's), or the
+// turn ran and produced no checkout (a turn in flight, nothing on disk).
 
 [<Emit("(() => { try { return $0.readdirSync($1).join(', ') || '<empty>' } catch (e) { return '<' + (e.code || e.message) + '>' } })()")>]
 let private listDir (fs: obj) (path: string) : string = jsNative
