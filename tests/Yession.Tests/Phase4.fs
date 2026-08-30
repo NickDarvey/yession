@@ -1440,9 +1440,15 @@ let private startPackagedManager (env: (string * string) list) : Async<PackagedM
                                     killBinary child) }
                 | _ -> ()))
 
+/// Which port the launched child answers on, read off the row's OPEN LINK.
+///
+/// It used to be scraped from `port 8199 · pid 42`, which was a diagnostic line and is gone
+/// (the summary has that column now). The link is the better source and always was: it is
+/// the row's actual promise — press it and you reach this session — so a row whose href
+/// named the wrong port would be broken for a person, not just for this test.
 let private portOfRow (row: string) : int =
-    let m = System.Text.RegularExpressions.Regex.Match (row, "port (\\d+)")
-    if m.Success then int m.Groups.[1].Value else failwithf "no port in row: %s" row
+    let m = System.Text.RegularExpressions.Regex.Match (row, "href=\"http://127\\.0\\.0\\.1:(\\d+)/\"")
+    if m.Success then int m.Groups.[1].Value else failwithf "no open link in row: %s" row
 
 let private compositionTests =
     testList "Executable composition (Step 27/28)" [
