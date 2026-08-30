@@ -101,7 +101,17 @@ type SandboxPolicy =
       /// not talk to it: "could not connect to any lix socket".
       Sockets : string list
       Env : Map<string, string>
-      /// Default working directory for spawns that do not name one.
+      /// Where this sandbox stands: an ABSOLUTE directory, and the two things that
+      /// depend on it are why it has to be.
+      ///
+      /// It is the directory a spawn naming none runs in, and it is the root every
+      /// spawn that DOES name one is resolved against (`SandboxPath.resolvedFrom`, in
+      /// each backend). A relative value breaks both — the backend creates it against
+      /// its own process's cwd rather than the session's, and every per-spawn
+      /// resolution stays relative on top of it.
+      ///
+      /// So the outside vocabulary stops at `policyFor`, which holds the root to
+      /// resolve against. Nothing downstream re-resolves this, and nothing should.
       WorkingDirectory : string option
       /// Whether the paths above are enforced at all. `Confined` everywhere except the
       /// clone sandbox — see `FilesystemConfinement`.
