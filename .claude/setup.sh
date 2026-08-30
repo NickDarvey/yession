@@ -89,6 +89,19 @@ if ! [ -e "$nix_sh" ]; then
 fi
 . "$nix_sh"
 
+# The yession cachix cache, so a store path this container lost is SUBSTITUTED instead of
+# rebuilt — above all the ~800MB yession-npm-deps FOD, whose rebuild fetches the srt git
+# dependency from codeload.github.com, a host the sandbox proxy blocks; without this line
+# one garbage collection strands the container. CI pushes every closure it builds there
+# (cachix-action in the workflows) and the cache is public, so this only names what already
+# exists. extra-*, so cache.nixos.org stays. Here in the shared section rather than the
+# install block so the SessionStart hook repairs a container set up before this existed.
+mkdir -p "$HOME/.config/nix"
+grep -q 'yession.cachix.org' "$HOME/.config/nix/nix.conf" 2>/dev/null || {
+  echo 'extra-substituters = https://yession.cachix.org' >> "$HOME/.config/nix/nix.conf"
+  echo 'extra-trusted-public-keys = yession.cachix.org-1:Dj6jHWpEaqcGyrEEC3/qy/D3UQN8sZW1RXUOCRJ41oI=' >> "$HOME/.config/nix/nix.conf"
+}
+
 # devenv.local.yaml repoints the devenv input at devenv's OWN source substituted from
 # cache.nixos.org, because the sandbox proxy blocks the github:cachix/devenv fetch the
 # generated flake would otherwise make. Gitignored; laptop/CI use the committed devenv.yaml.
