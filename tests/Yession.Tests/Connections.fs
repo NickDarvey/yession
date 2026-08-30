@@ -1051,6 +1051,7 @@ let private startConnectionsServer (callers: (string * Control.ControlCaller) li
                         (fun secret -> Map.tryFind secret table)
                         (fun _ _ -> async { return Ok () })
                         (fun _ _ -> async { return Ok () })
+                        (fun _ _ -> async { return Ok () })
                         (fun _ _ -> Subscription.none)
                         (fun _ _ _ -> Subscription.none)
                         dummyRegister
@@ -2118,6 +2119,37 @@ let private prPollTests =
                         (Some (CellStatus ("stalled", ToneBad)))
                         "nobody is driving it"
                 | other -> failwithf "expected one row, got %A" other
+            }
+
+        testCaseAsync "the line a session says about itself is made of the rows it can see" <|
+            async {
+                let script = scriptedFetch [ PrWatches.PrChanged (snapshotWith PrOpen ChecksGreen true, PrWatches.PrEtags.none) ]
+                let poller = pollerOver fixedNow script.Fetch (RecordedTransitions ()) (ResizeArray ())
+                Expect.equal (PrWatches.summaryOf (poller.Rows ())) "" "a session watching nothing says nothing"
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending; Queue = NotQueued } ]
+                Expect.equal
+                    (PrWatches.summaryOf (poller.Rows ()))
+                    ""
+                    "nor does one whose watch has not been looked at yet"
+                let! _ = poller.Poll ()
+                Expect.equal (PrWatches.summaryOf (poller.Rows ())) "#12 queued" "and then it says where it stands"
+            }
+
+        testCaseAsync "a watch the session cannot read says so, over whatever it last said" <|
+            async {
+                // A dead credential means nobody is driving this one, which is worse news
+                // than any state it is stuck in — so it outranks the word, rather than
+                // leaving the summary quoting a state nothing is refreshing.
+                let script =
+                    scriptedFetch
+                        [ PrWatches.PrChanged (snapshotWith PrOpen ChecksGreen true, PrWatches.PrEtags.none)
+                          PrWatches.PrFetchFailed PrWatches.PrUnauthorized ]
+                let poller = pollerOver fixedNow script.Fetch (RecordedTransitions ()) (ResizeArray ())
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksPending; Queue = NotQueued } ]
+                let! _ = poller.Poll ()
+                Expect.equal (PrWatches.summaryOf (poller.Rows ())) "#12 queued" "read once"
+                let! _ = poller.Poke prOne.Repo
+                Expect.equal (PrWatches.summaryOf (poller.Rows ())) "#12 unreachable" "and then not readable at all"
             }
 
         testCaseAsync "since reports when the watch last moved, not when it was last looked at" <|

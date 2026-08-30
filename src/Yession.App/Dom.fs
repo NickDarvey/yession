@@ -507,6 +507,11 @@ module Dom =
         /// needs to tell which is which.
         let build = "data-session-build"
         let managerBuild = "data-manager-build"
+        /// The one line a session says about ITSELF, rendered beside its status word. The
+        /// Manager stores and shows the string without learning what it means, so this hook
+        /// marks the place rather than the content — a test asserts that what the session
+        /// said is what the row shows, never what a session ought to say.
+        let summary = "data-session-summary"
         /// A filter or sort control. Carries a STABLE name (`show-archived`, `sort`) rather
         /// than the query it links to, so a swap can put focus back on the control that was
         /// pressed even though its href just changed.

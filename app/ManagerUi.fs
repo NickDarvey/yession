@@ -82,8 +82,23 @@ let private statusView (view: ProcessManager.SessionView) : TemplateResult =
             match build with
             | Some build -> sprintf "port %d · pid %d · %s" port pid build
             | None -> sprintf "port %d · pid %d" port pid
+        // What the session says about ITSELF, between the word and the plumbing: it is the
+        // reason a reader scans this column at all — which of six sessions wants me — so it
+        // reads louder than port and pid and quieter than the status word.
+        //
+        // Rendered opaquely and NOT toned. The Manager stores a line it was told and never
+        // learns what it is made of, so any colour it chose would be a colour it guessed;
+        // only the session knows whether its own sentence is good news. It exists in this
+        // arm alone because a summary is launch-scoped — a session that is not running has
+        // no work in flight to describe.
+        let summary =
+            match view.Summary with
+            | Some line ->
+                html
+                    $"""<span class="text-code-sm text-ink ml-2.5 max-md:hidden" data-session-summary>{line}</span>"""
+            | None -> html $""""""
         html
-            $"""<span class="{Style.statusOk}" data-status="{Dom.Manager.statusRunning}"><span class="{Style.statusDotPulse}"></span>running</span><span class="font-terminal text-code-sm text-ink-faint tabular-nums ml-2.5 max-xl:hidden" data-session-build>{plumbing}</span>"""
+            $"""<span class="{Style.statusOk}" data-status="{Dom.Manager.statusRunning}"><span class="{Style.statusDotPulse}"></span>running</span>{summary}<span class="font-terminal text-code-sm text-ink-faint tabular-nums ml-2.5 max-xl:hidden" data-session-build>{plumbing}</span>"""
     | None, ProcessManager.Exited code ->
         let reason = code |> Option.map string |> Option.defaultValue "signal"
         html $"""<span class="{Style.statusErr}" data-status="{Dom.Manager.statusExited}">exited ({reason})</span>"""

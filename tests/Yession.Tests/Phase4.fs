@@ -535,7 +535,7 @@ let private startControlServerOver
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
             if not (
                 WebhookRelay.tryHandle relay req res
-                || Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register registerClient None None (fun _ _ -> Subscription.none) relay.Subscribe relay.Unsubscribe ignore req res) then
+                || Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) (fun _ _ -> async { return Ok () }) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register registerClient None None (fun _ _ -> Subscription.none) relay.Subscribe relay.Unsubscribe ignore req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "not found"
         let server = Interop.createServer handler
@@ -615,14 +615,14 @@ let private uiRecord : SessionRecord =
 let private uiRenderTests =
     testList "Management UI rendering (Step 25)" [
         testCase "a stopped session's row offers Launch; a running one offers Stop and the open link" <| fun () ->
-            let stopped = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.NotRunning }
+            let stopped = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.NotRunning; Summary = None }
             Expect.isTrue (stopped.Contains (Dom.attr Dom.Manager.launch "ui-render")) "stopped rows can launch (button carries the session id)"
             Expect.isTrue (stopped.Contains "UI &lt;Render&gt;") "display names are escaped"
-            let running = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.Running (8199, 42, Some "1.2.3-beta.4") }
+            let running = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.Running (8199, 42, Some "1.2.3-beta.4"); Summary = None }
             Expect.isTrue (running.Contains (Dom.attr Dom.Manager.stop "ui-render")) "running rows can stop"
             Expect.isTrue (running.Contains "href=\"http://127.0.0.1:8199/\"") "the open link is a plain URL to the child's port (no token — access is the OIDC bounce)"
             Expect.isTrue (running.Contains (Dom.attr Dom.Manager.session "ui-render")) "the row is a poll unit keyed by session id"
-            let crashed = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.Exited (Some 1) }
+            let crashed = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.Exited (Some 1); Summary = None }
             Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusExited)) "a crash is visible"
             Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.launch "ui-render")) "a crashed session can relaunch"
 
@@ -636,9 +636,35 @@ let private uiRenderTests =
             let running =
                 ManagerUi.sessionRow
                     PublicAccess.Loopback
-                    { Record = uiRecord; Status = ProcessManager.Running (8199, 42, Some "0.0.0-gf1ce52b") }
+                    { Record = uiRecord; Status = ProcessManager.Running (8199, 42, Some "0.0.0-gf1ce52b"); Summary = None }
             Expect.isTrue (running.Contains Dom.Manager.build) "the row carries the hook that marks it"
             Expect.isTrue (running.Contains "0.0.0-gf1ce52b") "wearing the build the launch reported"
+
+        // Which of six sessions wants me is the roster's whole job, and until a session could
+        // say something about itself the answer was always "open them and see".
+        testCase "a running session's row shows the line it said about itself" <| fun () ->
+            let running =
+                ManagerUi.sessionRow
+                    PublicAccess.Loopback
+                    { Record = uiRecord
+                      Status = ProcessManager.Running (8199, 42, None)
+                      Summary = Some "3 PRs · 1 stalled" }
+            Expect.isTrue (running.Contains Dom.Manager.summary) "the row carries the hook that marks it"
+            Expect.isTrue (running.Contains "3 PRs · 1 stalled") "wearing the line the session reported"
+
+        // A summary describes work in FLIGHT. A row that went on showing one after its
+        // session stopped would be claiming something no process is doing.
+        testCase "a session with nothing to say carries no summary at all" <| fun () ->
+            let quiet =
+                ManagerUi.sessionRow
+                    PublicAccess.Loopback
+                    { Record = uiRecord; Status = ProcessManager.Running (8199, 42, None); Summary = None }
+            Expect.isFalse (quiet.Contains Dom.Manager.summary) "no line, no element standing in for one"
+            let stopped =
+                ManagerUi.sessionRow
+                    PublicAccess.Loopback
+                    { Record = uiRecord; Status = ProcessManager.NotRunning; Summary = Some "3 PRs · 1 stalled" }
+            Expect.isFalse (stopped.Contains Dom.Manager.summary) "and a stopped session claims nothing"
 
         // The other half, and the one that keeps the first honest: an older bundle reports no
         // version, and a placeholder there would read as an answer. AGENTS.md's version rule
@@ -646,7 +672,7 @@ let private uiRenderTests =
         // one.
         testCase "a launch that reported no build has none invented for it" <| fun () ->
             let running =
-                ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.Running (8199, 42, None) }
+                ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.Running (8199, 42, None); Summary = None }
             Expect.isTrue (running.Contains "port 8199 · pid 42") "what is known is still said"
             Expect.isFalse (running.Contains "pid 42 · ") "and nothing stands in for what is not"
 
@@ -659,7 +685,7 @@ let private uiRenderTests =
                     "app.css"
                     PublicAccess.Loopback
                     SessionQuery.defaults
-                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning; Summary = None } ]
                     []
                     []
             Expect.isTrue (html.Contains Dom.Manager.managerBuild) "the header carries its own hook, distinct from a row's"
@@ -679,7 +705,7 @@ let private uiRenderTests =
                     "app.css"
                     (PublicAccess.create "https://yession.example.com" "https://{id}.example.com" |> expect)
                     SessionQuery.defaults
-                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning; Summary = None } ]
                     []
                     endpoints
             Expect.isTrue (html.Contains secret) "the secret is readable, not hidden behind a reveal"
@@ -693,7 +719,7 @@ let private uiRenderTests =
                     "app.css"
                     PublicAccess.Loopback
                     SessionQuery.defaults
-                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning; Summary = None } ]
                     []
                     []
             Expect.isFalse (html.Contains "data-hooks") "an empty table would imply there is something to fill in"
@@ -704,7 +730,7 @@ let private uiRenderTests =
                     "app.css"
                     PublicAccess.Loopback
                     SessionQuery.defaults
-                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning; Summary = None } ]
                     []
                     []
             Expect.isTrue (html.Contains "<script>") "an inline script drives the UI (no bundle)"
@@ -719,7 +745,7 @@ let private uiRenderTests =
             let archived =
                 ManagerUi.sessionRow
                     PublicAccess.Loopback
-                    { Record = { uiRecord with ArchivedAt = Some archivedAt }; Status = ProcessManager.NotRunning }
+                    { Record = { uiRecord with ArchivedAt = Some archivedAt }; Status = ProcessManager.NotRunning; Summary = None }
             Expect.isTrue (archived.Contains (Dom.attr Dom.Manager.unarchive "ui-render")) "the way back is offered"
             Expect.isFalse
                 (archived.Contains (Dom.attr Dom.Manager.launch "ui-render"))
@@ -729,7 +755,7 @@ let private uiRenderTests =
             let archived =
                 ManagerUi.sessionRow
                     PublicAccess.Loopback
-                    { Record = { uiRecord with ArchivedAt = Some archivedAt }; Status = ProcessManager.NotRunning }
+                    { Record = { uiRecord with ArchivedAt = Some archivedAt }; Status = ProcessManager.NotRunning; Summary = None }
             Expect.isTrue
                 (archived.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusArchived))
                 "the cell answers the question a reader is actually asking"
@@ -743,14 +769,14 @@ let private uiRenderTests =
                 ManagerUi.sessionRow
                     PublicAccess.Loopback
                     { Record = { uiRecord with ArchivedAt = Some archivedAt }
-                      Status = ProcessManager.Running (8199, 42, Some "1.2.3-beta.4") }
+                      Status = ProcessManager.Running (8199, 42, Some "1.2.3-beta.4"); Summary = None }
             // The address is the discriminating assertion: the case above pins that a RUNNING
             // row carries exactly this href, so its absence here cannot pass vacuously.
             Expect.isFalse (both.Contains "http://127.0.0.1:8199/") "no address to reach it at"
             Expect.isFalse (both.Contains Dom.Manager.openLink) "and nothing marked as the way in"
 
         testCase "an active session can be archived, by a control with a name" <| fun () ->
-            let active = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.NotRunning }
+            let active = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.NotRunning; Summary = None }
             Expect.isTrue (active.Contains (Dom.attr Dom.Manager.archive "ui-render")) "the row can be archived"
             // WCAG: an icon-only control carries an accessible name, and it names WHICH
             // session — a column of "Archive" says nothing about which row you are on.
@@ -761,7 +787,7 @@ let private uiRenderTests =
                 ManagerUi.sessionsTable
                     PublicAccess.Loopback
                     SessionQuery.defaults
-                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning; Summary = None } ]
             Expect.isTrue (table.Contains (Dom.attr Dom.Manager.filter "show-active")) "the active filter is a control"
             Expect.isTrue (table.Contains (Dom.attr Dom.Manager.filter "show-archived")) "so is the archived one"
             Expect.isTrue (table.Contains "aria-current=\"true\"") "and the shown one says it is shown"
@@ -774,14 +800,14 @@ let private uiRenderTests =
                 ManagerUi.sessionsTable
                     PublicAccess.Loopback
                     SessionQuery.defaults
-                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning; Summary = None } ]
             Expect.isTrue (newest.Contains "aria-sort=\"descending\"") "the header states the sort"
             Expect.isTrue (newest.Contains "sort=created-asc") "and links to the other direction"
             let oldest =
                 ManagerUi.sessionsTable
                     PublicAccess.Loopback
                     { SessionQuery.defaults with Order = OldestFirst }
-                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning; Summary = None } ]
             Expect.isTrue (oldest.Contains "aria-sort=\"ascending\"") "and the other way round"
 
         // Saying "no sessions yet" over a registry that has three would send somebody
@@ -791,7 +817,7 @@ let private uiRenderTests =
                 ManagerUi.sessionsTable
                     PublicAccess.Loopback
                     { SessionQuery.defaults with Show = Set.singleton Archived }
-                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning; Summary = None } ]
             Expect.isFalse (hidden.Contains "no sessions yet") "the registry is not empty"
             Expect.isTrue (hidden.Contains "1 hidden") "it says what it is hiding"
             let empty = ManagerUi.sessionsTable PublicAccess.Loopback SessionQuery.defaults []
@@ -800,7 +826,10 @@ let private uiRenderTests =
         // Plan 17. Declaring is the ONE act that names a url, and the only management
         // action that can be refused for a reason a human has to read.
         testCase "the MCP section renders its declarations, and the form that adds one" <| fun () ->
-            let views = [ { ProcessManager.Record = uiRecord; ProcessManager.Status = ProcessManager.NotRunning } ]
+            let views =
+                [ { ProcessManager.Record = uiRecord
+                    ProcessManager.Status = ProcessManager.NotRunning
+                    ProcessManager.Summary = None } ]
             let empty = ManagerUi.mcpSection views []
             Expect.isTrue (empty.Contains "no MCP servers") "an empty registry says so rather than showing a bare table"
             Expect.isTrue (empty.Contains "data-declare-mcp") "and still offers the form"
@@ -2131,9 +2160,9 @@ let private registryTests =
         // retained-hub mechanics it rides on are pinned once, with the MCP list.
         testCase "the registry frame is the Running sessions only, with the port and pid to reach them" <| fun () ->
             let views : ProcessManager.SessionView list =
-                [ { Record = record "alpha" "Alpha work"; Status = ProcessManager.Running (54321, 4242, Some "1.2.3-beta.4") }
-                  { Record = record "beta" "Beta work"; Status = ProcessManager.NotRunning }
-                  { Record = record "gamma" "Gamma work"; Status = ProcessManager.Exited (Some 1) } ]
+                [ { Record = record "alpha" "Alpha work"; Status = ProcessManager.Running (54321, 4242, Some "1.2.3-beta.4"); Summary = None }
+                  { Record = record "beta" "Beta work"; Status = ProcessManager.NotRunning; Summary = None }
+                  { Record = record "gamma" "Gamma work"; Status = ProcessManager.Exited (Some 1); Summary = None } ]
             Expect.equal
                 (ProcessManager.registryFrameOf views)
                 { Sessions = [ registryEntry "alpha" "Alpha work" 54321 4242 ] }
@@ -2148,8 +2177,8 @@ let private registryTests =
         // running" is a question asked by scripts as much as by people.
         testCase "the registry announces each running session's build" <| fun () ->
             let views : ProcessManager.SessionView list =
-                [ { Record = record "alpha" "Alpha work"; Status = ProcessManager.Running (54321, 4242, Some "0.0.0-gf1ce52b") }
-                  { Record = record "beta" "Beta work"; Status = ProcessManager.Running (54322, 4243, None) } ]
+                [ { Record = record "alpha" "Alpha work"; Status = ProcessManager.Running (54321, 4242, Some "0.0.0-gf1ce52b"); Summary = None }
+                  { Record = record "beta" "Beta work"; Status = ProcessManager.Running (54322, 4243, None); Summary = None } ]
             Expect.equal
                 (ProcessManager.registryFrameOf views |> fun f -> f.Sessions |> List.map (fun e -> e.Build))
                 [ Some "0.0.0-gf1ce52b"; None ]
@@ -2171,7 +2200,7 @@ let private registryTests =
 
         testCase "a running row's open link carries the configured public address" <| fun () ->
             let access = PublicAccess.create "https://home.example.ts.net" "http://home.example.ts.net:{port}" |> expect
-            let running = ManagerUi.sessionRow access { Record = uiRecord; Status = ProcessManager.Running (8199, 42, Some "1.2.3-beta.4") }
+            let running = ManagerUi.sessionRow access { Record = uiRecord; Status = ProcessManager.Running (8199, 42, Some "1.2.3-beta.4"); Summary = None }
             Expect.isTrue (running.Contains "href=\"http://home.example.ts.net:8199/\"") "the open link is followable from a remote browser"
     ]
 

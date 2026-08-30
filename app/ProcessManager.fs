@@ -33,7 +33,12 @@ type SessionStatus =
 
 type SessionView =
     { Record : SessionRecord
-      Status : SessionStatus }
+      Status : SessionStatus
+      /// One line the session last said about itself, for a roster reader deciding which of
+      /// six sessions wants them. Opaque here — the Manager stores what it was told and
+      /// never learns what the line is made of — and launch-scoped, so a stopped session
+      /// never shows a claim about work it is no longer doing.
+      Summary : string option }
 
 /// The session registry's wire view: the RUNNING sessions only, each with the
 /// port and pid a serving binding needs to reach it. A pure projection of the published views, so
@@ -485,6 +490,10 @@ let createWithUi
     // has no idle clock, and a relaunch starts a fresh one rather than inheriting the
     // staleness of the launch before it.
     let mutable activity : Map<string, LaunchActivity> = Map.empty
+    // What each RUNNING launch last said about itself, for the roster. Runtime-only and
+    // launch-scoped like `activity`, and for the same reason: a summary describes work in
+    // flight, so a session that has stopped must not go on claiming it.
+    let mutable summaries : Map<string, string> = Map.empty
     // Reaps in flight, so the exit that follows can say why it happened. Cleared on that
     // exit, and cleared again if the stop fails — a reason must never outlive its attempt
     // and mislabel the next ordinary stop.
@@ -535,8 +544,15 @@ let createWithUi
             | Some code -> Exited code
             | None -> NotRunning
 
-    let viewsNow () : SessionView list =
-        state.Sessions |> List.map (fun r -> { Record = r; Status = statusOf r })
+    /// One record as the roster sees it. ONE assembler, because a view built in two places
+    /// is a view that eventually disagrees with itself — which is how a lookup and a listing
+    /// come to show the same session differently.
+    let viewOf (record: SessionRecord) : SessionView =
+        { Record = record
+          Status = statusOf record
+          Summary = Map.tryFind (SessionId.value record.SessionId) summaries }
+
+    let viewsNow () : SessionView list = state.Sessions |> List.map viewOf
 
     /// Publish the current session list. Call AFTER the runtime bookkeeping a change implies
     /// (`children`, `lastExit`): the value is computed here, so what a subscriber renders is
@@ -656,6 +672,27 @@ let createWithUi
                 // request) is not an error worth failing: the launch it described is gone,
                 // and there is nothing left to reap.
                 | None -> ()
+                return Ok ()
+            | None -> return Error "invalid control secret"
+        }
+
+    // The control channel's summary report: the secret identifies the reporting session,
+    // exactly like the two above. Published only when the line CHANGED — a session repeats
+    // itself on every poll tick, and a roster that re-rendered every fifteen seconds per
+    // session would be a stream of frames saying nothing.
+    let reportSummary (secret: string) (summary: string) : Async<Result<unit, string>> =
+        async {
+            match Map.tryFind secret secretSessions with
+            | Some sessionId ->
+                let key = SessionId.value sessionId
+                let trimmed = summary.Trim ()
+                let next = if trimmed = "" then None else Some trimmed
+                if Map.tryFind key summaries <> next then
+                    summaries <-
+                        match next with
+                        | Some line -> Map.add key line summaries
+                        | None -> Map.remove key summaries
+                    publishSessions ()
                 return Ok ()
             | None -> return Error "invalid control secret"
         }
@@ -918,7 +955,7 @@ let createWithUi
             let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
                 let handled =
                     WebhookRelay.tryHandle hookRelay req res
-                    || Control.tryHandle resolveCaller reportName reportActivity notifications.Register mcp.Register provider.RegisterClient secretsApi connectionsApi connectionsHub.Register hookRelay.Subscribe hookRelay.Unsubscribe (fun path -> audit (SecretStore.Audit.controlUnauthorized path)) req res
+                    || Control.tryHandle resolveCaller reportName reportActivity reportSummary notifications.Register mcp.Register provider.RegisterClient secretsApi connectionsApi connectionsHub.Register hookRelay.Subscribe hookRelay.Unsubscribe (fun path -> audit (SecretStore.Audit.controlUnauthorized path)) req res
                     || handleConnectionsCallback req res
                     || provider.TryHandle req res
                     || (match ui, self with
@@ -1057,6 +1094,7 @@ let createWithUi
                 | Error reason ->
                     revokeSecret ()
                     activity <- Map.remove key activity
+                    summaries <- Map.remove key summaries
                     return Error reason
                 | Ok launched ->
                     let child, port = launched.Child, launched.Port
@@ -1069,6 +1107,8 @@ let createWithUi
                     child.OnExit (fun code ->
                         children <- Map.remove key children
                         activity <- Map.remove key activity
+                        // A summary describes work in flight; this launch has none left.
+                        summaries <- Map.remove key summaries
                         // The launch's authority dies with it.
                         revokeSecret ()
                         // A stop's exit is the expected outcome, not a crash to report.
@@ -1203,8 +1243,7 @@ let createWithUi
                     Async.FromContinuations (fun (cont, _, _) -> child.OnExit (fun _ -> cont ()))
           TryFind =
             fun sessionId ->
-                ManagerState.tryFind sessionId state
-                |> Option.map (fun r -> { Record = r; Status = statusOf r })
+                ManagerState.tryFind sessionId state |> Option.map viewOf
           Notify = notify
           DeclareMcpServer = declareMcpServer
           WithdrawMcpServer = withdrawMcpServer

@@ -640,6 +640,29 @@ let private prWatchTests =
             Expect.equal (PrStatus.worse "merged" "open") "open" "an open PR is still owed; a merged one is not"
             Expect.equal (PrStatus.worse "merged" "a word from the future") "merged" "an unknown word does not shout"
 
+        testCase "a summary of no live pull requests says nothing at all" <| fun () ->
+            // Silence is the feature. A roster line that is THERE is worth reading only
+            // because a session with nothing owed does not print one.
+            let merged n = PrRef.create repo n |> expect, "merged"
+            Expect.equal (PrStatus.summarize []) "" "nothing watched"
+            Expect.equal (PrStatus.summarize [ merged 1; merged 2 ]) "" "and nothing still owed"
+
+        testCase "a summary names a lone pull request and counts a crowd, worst first" <| fun () ->
+            let at n word = PrRef.create repo n |> expect, word
+            Expect.equal (PrStatus.summarize [ at 377 "queued" ]) "#377 queued" "one is named"
+            Expect.equal
+                (PrStatus.summarize [ at 1 "queued"; at 2 "stalled"; at 3 "queued" ])
+                "3 PRs · 1 stalled"
+                "several are counted, and the count that follows is of the worst"
+            Expect.equal
+                (PrStatus.summarize [ at 1 "queued"; at 2 "merged"; at 3 "open" ])
+                "2 PRs · 1 open"
+                "a merged one is history and is not among them"
+            Expect.equal
+                (PrStatus.summarize [ at 1 "stalled"; at 2 PrStatus.unreachable ])
+                "2 PRs · 1 unreachable"
+                "a watch that cannot be read is worse news than one that stalled"
+
         testCase "the watches projection folds start, re-watch, transition and stop" <| fun () ->
             let folded = fold [ at 0 (started PrOpen ChecksPending) ]
             Expect.equal

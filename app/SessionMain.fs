@@ -162,6 +162,12 @@ let private reportName =
 let private reportActivity =
     controlChannel |> Option.map (fun (url, secret) -> ControlClient.activityReporter url secret)
 
+// ...and the one line this session says about itself, so the Manager's roster can answer
+// "which of six sessions wants me" without opening any of them. Absent without a control
+// channel, like the two above: there is nobody to tell.
+let private reportSummary =
+    controlChannel |> Option.map (fun (url, secret) -> ControlClient.summaryReporter url secret)
+
 // Secrets (Plan 06): the session's write/list/delete surface over the same channel,
 // pre-bound to this session's own scope. Built after the session id parses (below).
 let private secretsCapabilitiesFor (sessionId: SessionId) =
@@ -452,9 +458,20 @@ let private prHooks : GitHubPrs.PrHooks =
 /// Reconcile BOTH halves from the same fold. The poller and the subscriptions answer to one
 /// source — the log's watches — so they cannot drift into a session that polls a repo it
 /// never subscribed to, or holds a subscription for a watch it stopped.
+/// Tell the Manager what this session's pull requests amount to, in the one line its roster
+/// has room for. Sent only where something MOVED — a watch started or stopped, or a look
+/// found news — so an unchanged line is not re-posted every fifteen seconds, and the
+/// Manager's own "publish only when it changed" stays the one de-duplication rather than
+/// the second of two.
+let private publishSummary () =
+    match reportSummary with
+    | Some report -> Async.StartImmediate (report (PrWatches.summaryOf (prWatchers.Rows ())))
+    | None -> ()
+
 let private reconcileWatches (watches: PrWatch list) =
     prWatchers.Apply watches
     prHooks.Apply (watches |> List.map (fun watch -> watch.Pr.Repo) |> List.distinct)
+    publishSummary ()
 
 // The session's named WorkSandboxes (Plan 15, stage 2). Built by the Host (it owns the
 // log the registry appends to), so this cell is filled once `startFull` resolves — before
@@ -1015,6 +1032,7 @@ Async.StartImmediate (
         let settle (moved: bool) =
             if moved then
                 queryRegistry.Invalidate PrWatches.queryName
+                publishSummary ()
                 host.Wake ()
         // A delivery the Manager forwarded says LOOK, and says it about a repo this session
         // reads off its own subscription record rather than out of the body. The poll is
