@@ -21,6 +21,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Unjudged.fs" />
     <Compile Include="TemplateHoles.fs" />
     <Compile Include="Emits.fs" />
     <Compile Include="EmitMacro.fs" />

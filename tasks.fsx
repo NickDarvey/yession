@@ -1350,8 +1350,18 @@ let private analyzerOutput =
 /// marked with the rule's code or deliberately left unmarked, and which must be reported
 /// exactly that way. One entry per rule, because a fixture answers for one rule's eyesight
 /// and a shared one would let a blind rule hide behind a sighted one's verdicts.
+/// The rule that answers for the others: source the compiler could not build is source no rule
+/// read, and `lint` must not report that as a clean product. It exits on its own code because
+/// the next step is a different verb — `build`, not a rule to go and fix.
+[<Literal>]
+let private unjudged = "YES000"
+
+[<Literal>]
+let private unjudgedExit = 2
+
 let private fixtures =
-    [ "YES001", "TemplateHoleFixture", "Holes.fs"
+    [ unjudged, "UnjudgedFixture", "Uncompilable.fs"
+      "YES001", "TemplateHoleFixture", "Holes.fs"
       "YES002", "EmitMacroFixture", "Emits.fs"
       "YES003", "EmitBodyFixture", "Bodies.fs" ]
 
@@ -1400,8 +1410,9 @@ let private reportedLines (code: string) (source: string) (output: string) =
     |> List.distinct
     |> List.sort
 
-// `analyzers/Yession.Analyzers` reads the typed tree for the things the compiler will not
-// say: what a Lit template hole renders, whether an `[<Emit>]` macro names the arguments its
+// `analyzers/Yession.Analyzers` reads the typed tree — first to check that there IS one worth
+// reading (a file the compiler could not build is a file no rule judged), then for the things
+// the compiler will not say: what a Lit template hole renders, whether an `[<Emit>]` macro names the arguments its
 // binding takes, and whether the JavaScript around those substitutions survives being pasted
 // into a caller's scope (each rule's own source says why the compiler cannot). They are run here
 // rather than in `check` because they are the same shape of check as actionlint — source
@@ -1427,8 +1438,25 @@ let private analyzers () =
         exec "dotnet" [ "restore"; fixtureProject name ]
 
     let code, output = analyze (solutionProjects ())
+
     if code <> 0 then
         printfn "%s" output
+
+        // Two different answers arrive on the same non-zero exit, and they call for opposite
+        // next steps. A rule rejecting source is a fault to fix right here. A file the compiler
+        // could not build is not a verdict at all: what it could not build is missing from the
+        // tree every rule reads, so the rules passed over it in silence and `lint` has judged
+        // nothing about it. Saying "rejected" there sends the reader hunting a rule violation
+        // that may not exist, and the run has to be repeated once the source compiles either
+        // way — so it exits on a code of its own, and says which verb gets there.
+        if output.Contains (unjudged + " :") then
+            eprintfn
+                "lint: %s"
+                ("source that does not compile cannot be judged — the rules read a tree missing "
+                 + "whatever the compiler dropped. Run `build`, fix the errors above, then lint again.")
+
+            exit unjudgedExit
+
         failwith "lint: an analyzer rejected something in the product — see above for which rule and where"
 
     for code, name, file in fixtures do
