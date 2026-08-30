@@ -581,17 +581,40 @@ module Style =
     let commandCard = "flex flex-col gap-1 px-3 py-2 bg-surface"
 
     /// The generated read surface (Plan 15). A query answers with rows, fields, or one
-    /// value, and these are the three renderings — defined ONCE here because they are
-    /// what every future query gets to look like, including the ones nobody has written.
+    /// value, and these are the renderings — defined ONCE here because they are what every
+    /// future query gets to look like, including the ones nobody has written.
     ///
-    /// The table scrolls inside itself (`overflow-x-auto`): a sidebar is narrow, a row can
-    /// be wide, and a column that overflows its container is how a settings pane starts
-    /// scrolling sideways as a whole.
-    let queryTable = "w-full overflow-x-auto"
-    /// Column headings carry `ink-dim`, not `ink-faint`: they are 11px caps, which is
-    /// below the 24px/19px-bold threshold where 3:1 would do, so they need the 4.5:1 ratio
+    /// **A row is a RECORD, not a table row.** The lane a query lands in is 280px wide at
+    /// every breakpoint — the settings face of a fixed column on desktop, that same column
+    /// as a drawer on a phone — and no table of more than two columns fits it. It was a
+    /// table, scrolling inside itself, and what that bought was a surface whose every
+    /// meaningful column sat past a horizontal scroll: four watched pull requests read as
+    /// four identifiers and a clipped title, with not one of the toned words a tone exists
+    /// to colour on the screen at rest. A record wraps where a table scrolls, so the answer
+    /// is READ rather than found.
+    ///
+    /// Which is also why `Fields` and `Rows` are drawn by one of these and not two: a
+    /// fields answer is one record, a rows answer is a list of them, and a second rendering
+    /// of the same thing is a second thing to keep in step.
+    let queryRecords = "flex flex-col gap-3"
+    /// One record: its name, then its fields.
+    let queryRecord = "flex flex-col gap-1"
+    /// Every record after the first, separated by the hairline the settings sections
+    /// already use — so a list of records keeps the pane's rhythm rather than inventing one.
+    let queryRecordAfter = queryRecord + " pt-3 " + Stroke.dividerTop
+    /// The record's name — its first column's value, at full `ink` and with no label of its
+    /// own, because a list of records is scanned by name exactly as a table was scanned by
+    /// its first column, and "pull request: octo/hello#1" says the word twice.
+    let queryRecordName = "font-light text-small leading-5 text-ink break-words"
+    /// The pairs, on a two-track grid: `auto` sizes the label track to the widest label in
+    /// THIS record so the values line up down it, and `minmax(0,1fr)` is what makes a long
+    /// value wrap instead of widening its track and pushing the whole pane sideways (a bare
+    /// `1fr` track floors at min-content and does exactly that).
+    let queryFields = "grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 items-baseline"
+    /// Field labels carry `ink-dim`, not `ink-faint`: they are 11px caps, which is below
+    /// the 24px/19px-bold threshold where 3:1 would do, so they need the 4.5:1 ratio
     /// against `surface` that `ink-dim` gives (CLAUDE.md, UI baseline).
-    let queryHeadCell = caps + " text-ink-dim text-left font-normal pr-4 pb-1 whitespace-nowrap"
+    let queryFieldLabel = caps + " text-ink-dim"
 
     /// The four inks a `QueryTone` asks for, named by what they mean so a query never
     /// spells a Tailwind class. Text only — never filled, never boxed, the rule the
@@ -603,18 +626,15 @@ module Style =
     let toneBad = "text-err"
     let toneMuted = "text-ink-faint"
 
-    /// The cell, with no colour of its own. A base that carried one could not be recoloured
+    /// A value, with no colour of its own. A base that carried one could not be recoloured
     /// by appending: two Tailwind text utilities on one element resolve by stylesheet order
     /// rather than by the order they are written here, so the colour is always the last
     /// thing added and never the second.
-    let private queryCellShape = "font-light text-small leading-5 pr-4 py-0.5 whitespace-nowrap"
+    let private queryValueShape = "font-light text-small leading-5 break-words"
 
-    let queryCell = queryCellShape + " text-ink-dim"
-    /// The same cell, in the ink its value's tone asked for.
-    let queryCellIn (tone: string) = queryCellShape + " " + tone
-    /// A single value or a labelled field, toned the same way — `small` is the untoned
-    /// form, so this drops its `ink-faint` rather than fighting it.
-    let queryTextIn (tone: string) = "font-light text-small " + tone
+    let queryValue = queryValueShape + " text-ink-dim"
+    /// The same value, in the ink its tone asked for.
+    let queryValueIn (tone: string) = queryValueShape + " " + tone
 
     /// On a phone this column sits under the fixed degradation bar, so it pays for it in
     /// padding — but only while the bar is there (`degradedShell`).

@@ -591,6 +591,40 @@ let tests =
                 Expect.isTrue (body.Contains sessionId) "and it knows the session whose shell pointed here"
             }
 
+        // The generated read surface (Plan 15) renders into a 280px lane — the settings face
+        // of a fixed column on desktop, that same column as a drawer on a phone. Whether an
+        // answer FITS that lane is a question no cheap test can ask: the markup carries every
+        // `data-query-cell` either way, and the tier that reads it cannot see that six of the
+        // nine sat past a horizontal scroll with a scrollbar over the last row. Which is what
+        // they did, for as long as a row was a table row.
+        //
+        // Measured against each PANEL's own box rather than the pane's, so the settings face's
+        // slide-in (`Style.settingsLane1` translates the section 24px) cannot read as an
+        // overflow while it is still arriving.
+        //
+        // Not vacuous, and deliberately not: a session always has its default work sandbox, so
+        // `work_sandboxes` always answers with a row — and at nine columns it is the widest
+        // answer the product declares, which makes it the one that fails first.
+        testCaseAsync "a query's answer fits the lane it renders into" <|
+            async {
+                do! awaitU (pageA.ClickAsync "[data-settings-toggle='open']")
+                let! _ = await (pageA.WaitForSelectorAsync "[data-query-panel='work_sandboxes'] [data-query-row]")
+                let! overflowing =
+                    await (pageA.EvaluateAsync<string[]> ("""() =>
+                        [...document.querySelectorAll('[data-query-panel]')].flatMap(panel => {
+                            const edge = panel.getBoundingClientRect().right
+                            return [...panel.querySelectorAll('*')]
+                                .filter(el => el.scrollWidth > el.clientWidth + 1
+                                           || el.getBoundingClientRect().right > edge + 1)
+                                .map(el => `${panel.getAttribute('data-query-panel')}: ${el.textContent.trim().slice(0, 40)}`)
+                        })"""))
+                Expect.isEmpty
+                    overflowing
+                    (sprintf "every part of an answer must be inside its panel, these are not: %s"
+                        (String.Join (" | ", overflowing)))
+                do! awaitU (pageA.ClickAsync "[data-settings-toggle='close']")
+            }
+
         testCaseAsync "the doc store is keyed by session" <|
             async {
                 // The store is keyed by SESSION (embedded in the served page), not by address.

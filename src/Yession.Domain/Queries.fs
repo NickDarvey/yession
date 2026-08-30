@@ -62,6 +62,12 @@ type QueryShape =
     /// A record — one subject, several named facts about it.
     | Fields of QueryColumn list
     /// Zero or more rows over the same columns: repos, sandboxes, leases.
+    ///
+    /// **The first column names the row.** Every renderer may rely on it, and the one that
+    /// exists does: a row is drawn as a record headed by that column's value with the rest
+    /// as labelled facts about it, so the first column is what a reader scans to find the
+    /// row they want. Declare the identifier first — the repo, the sandbox, the pull
+    /// request — and never a fact that several rows could share.
     | Rows of QueryColumn list
 
 /// What a datum MEANS, when it means anything — so that one renderer can draw a settled
