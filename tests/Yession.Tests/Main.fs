@@ -97,16 +97,10 @@ let all =
         // derivation for real; it is the only check of a contract every CI route is blind to
         // (they build flake source copies, which git already filtered).
         Tag.needs "Nix build source" [ Tag.Nix ] (fun () -> NixSource.tests)
-        // The other source contract, and this one needs nothing but the files: only Support.fs
-        // may write the process env, because a suite that writes it writes it for every suite
-        // after it in the same process. Cheap tier deliberately — the mutation happens there,
-        // and only its consequence needs a live tier.
-        // The source contract that guards a DEFAULT rather than a declaration: a confinement
-        // switch read in two places is read with two defaults, and the weaker one wins
-        // without anybody choosing it.
         // The source contract that guards a file no F# reads: what a checkout of devenv.lock
-        // gives a machine that is not this one. (This comment sat above `Namespace shadowing`
-        // for as long as that suite existed, describing neither it nor its neighbour.)
+        // gives a machine that is not this one. The two source contracts that used to sit
+        // beside it — who may write the process env, and who may read a confinement switch —
+        // are now `YES007` and `YES008`, read off the typed tree by `lint`.
         Tag.needs "Committed lock" [] (fun () -> LockSource.tests)
         // The rich editor rendering E2E stands alone: it needs a browser but NOT the native
         // WebRTC host, so it runs wherever Chromium exists ([Browser]). The full two-peer
