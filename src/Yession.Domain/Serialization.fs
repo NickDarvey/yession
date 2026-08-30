@@ -1012,6 +1012,7 @@ module Codec =
                       "title", Encode.string s.Title
                       "headSha", Encode.string s.HeadSha
                       "checks", checksRollup.Encode s.Checks
+                      "queued", Encode.bool s.Queued
                       "mergeable", Encode.option Encode.bool s.Mergeable ]
           Decode =
             Decode.object (fun get ->
@@ -1019,6 +1020,7 @@ module Codec =
                   PrSnapshot.Title = get.Required.Field "title" Decode.string
                   PrSnapshot.HeadSha = get.Required.Field "headSha" Decode.string
                   PrSnapshot.Checks = get.Required.Field "checks" checksRollup.Decode
+                  PrSnapshot.Queued = get.Required.Field "queued" Decode.bool
                   PrSnapshot.Mergeable = get.Required.Field "mergeable" (Decode.option Decode.bool) }) }
 
     let private prTransition : Codec<PrTransition> =
@@ -1029,7 +1031,9 @@ module Codec =
                 | PrTransition.Closed -> Encode.string "closed"
                 | PrTransition.Reopened -> Encode.string "reopened"
                 | PrTransition.ChecksPassed -> Encode.string "checksGreen"
-                | PrTransition.ChecksFailed -> Encode.string "checksRed")
+                | PrTransition.ChecksFailed -> Encode.string "checksRed"
+                | PrTransition.Queued -> Encode.string "queued"
+                | PrTransition.Stalled -> Encode.string "stalled")
           Decode =
             Decode.string
             |> Decode.andThen (function
@@ -1038,6 +1042,8 @@ module Codec =
                 | "reopened" -> Decode.succeed PrTransition.Reopened
                 | "checksGreen" -> Decode.succeed PrTransition.ChecksPassed
                 | "checksRed" -> Decode.succeed PrTransition.ChecksFailed
+                | "queued" -> Decode.succeed PrTransition.Queued
+                | "stalled" -> Decode.succeed PrTransition.Stalled
                 | other -> Decode.fail (sprintf "Unknown pull request transition: %s" other)) }
 
     let private prWatched : Codec<PrWatched> =

@@ -28,25 +28,39 @@ let provider = "github"
 
 // --- the provider's JSON, decoded ------------------------------------------------------
 
+/// Everything the pull request resource itself contributes to a snapshot — which is all
+/// of it but the checks rollup, whose endpoint is the other half of a look.
+type PrFields =
+    { State : PrState
+      Title : string
+      HeadSha : string
+      Queued : bool
+      Mergeable : bool option }
+
 /// What `GET /repos/{o}/{r}/pulls/{n}` says, reduced to what a snapshot carries.
 ///
 /// `merged` rather than `state` decides a merge: GitHub reports a merged pull request as
 /// `state: "closed"` with `merged: true`, so reading state alone would file every merge
 /// as a close — which is the one distinction the whole feature exists to draw.
-let prDecoder : Decoder<PrState * string * string * bool option> =
+let prDecoder : Decoder<PrFields> =
     Decode.object (fun get ->
         let merged = get.Optional.Field "merged" Decode.bool |> Option.defaultValue false
         let state = get.Required.Field "state" Decode.string
-        let resolved =
+        { State =
             if merged then PrMerged
             elif state = "closed" then PrClosed
             else PrOpen
-        resolved,
-        get.Optional.Field "title" Decode.string |> Option.defaultValue "",
-        get.Required.At [ "head"; "sha" ] Decode.string,
-        // Null until GitHub has computed it, which it does lazily. Carried for display
-        // and never for a transition — see `PrSnapshot.Mergeable`.
-        get.Optional.Field "mergeable" (Decode.option Decode.bool) |> Option.flatten)
+          Title = get.Optional.Field "title" Decode.string |> Option.defaultValue ""
+          HeadSha = get.Required.At [ "head"; "sha" ] Decode.string
+          // `auto_merge` is an OBJECT when auto merge is armed and null when it is not, so
+          // its presence is the whole fact and none of its contents are read. Decoded as
+          // a raw value for exactly that reason: what is inside it (who armed it, which
+          // method, what commit message) would date this decoder against a shape nobody
+          // here depends on.
+          Queued = get.Optional.Field "auto_merge" Decode.value |> Option.exists (fun v -> not (Decode.Helpers.isNullValue v))
+          // Null until GitHub has computed it, which it does lazily. Carried for display
+          // and never for a transition — see `PrSnapshot.Mergeable`.
+          Mergeable = get.Optional.Field "mergeable" (Decode.option Decode.bool) |> Option.flatten })
 
 /// `GET /repos/{o}/{r}/commits/{sha}/check-runs` — each run's status and conclusion.
 let checkRunsDecoder : Decoder<(string * string option) list> =
@@ -135,7 +149,14 @@ let fetchOver (apiBase: string) : FetchPr =
                     // Nothing to carry means nothing to say. Unreachable in practice — an
                     // ETag only exists because a body came back once — but total here
                     // rather than a guess.
-                    Ok (last |> Option.map (fun s -> s.State, s.Title, s.HeadSha, s.Mergeable))
+                    Ok (
+                        last
+                        |> Option.map (fun s ->
+                            { State = s.State
+                              Title = s.Title
+                              HeadSha = s.HeadSha
+                              Queued = s.Queued
+                              Mergeable = s.Mergeable }))
                 elif succeeded prReply then
                     Decode.fromString prDecoder prReply.body
                     |> Result.map Some
@@ -145,9 +166,13 @@ let fetchOver (apiBase: string) : FetchPr =
             | Error e -> return PrFetchFailed (PrUnreachable e)
             | Ok None when not (notModified prReply) -> return PrFetchFailed (failureOf prReply)
             | Ok None -> return PrUnchanged
-            | Ok (Some (state, title, headSha, mergeable)) ->
+            | Ok (Some fields) ->
                 let checksUrl =
-                    sprintf "%s/repos/%s/commits/%s/check-runs?per_page=100" (apiBase.TrimEnd '/') repo headSha
+                    sprintf
+                        "%s/repos/%s/commits/%s/check-runs?per_page=100"
+                        (apiBase.TrimEnd '/')
+                        repo
+                        fields.HeadSha
                 let! checksReply = getConditional checksUrl bearer etags.Checks |> Interop.awaitPromise
                 if notModified prReply && notModified checksReply then
                     // Both halves unchanged: there is nothing to fold and nothing to say.
@@ -162,7 +187,7 @@ let fetchOver (apiBase: string) : FetchPr =
                     // which would claim there are none.
                     let unread =
                         match last with
-                        | Some s when s.HeadSha = headSha -> s.Checks
+                        | Some s when s.HeadSha = fields.HeadSha -> s.Checks
                         | _ -> ChecksPending
                     let checks =
                         if succeeded checksReply then
@@ -171,7 +196,12 @@ let fetchOver (apiBase: string) : FetchPr =
                             | Error _ -> unread
                         else unread
                     let snapshot =
-                        { State = state; Title = title; HeadSha = headSha; Checks = checks; Mergeable = mergeable }
+                        { State = fields.State
+                          Title = fields.Title
+                          HeadSha = fields.HeadSha
+                          Checks = checks
+                          Queued = fields.Queued
+                          Mergeable = fields.Mergeable }
                     // An ETag is replaced only by a half that actually answered with one.
                     // A 304 carries back the ETag we sent, so keeping the old one says the
                     // same thing without depending on the provider echoing it.

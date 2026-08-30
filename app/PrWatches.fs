@@ -65,6 +65,10 @@ type PrWatchRow =
     { Pr : PrRef
       Watcher : ActorRef
       Snapshot : PrSnapshot option
+      /// The durable baseline. Carried because `stalled` is a fact about HISTORY — a
+      /// snapshot alone can only say whether a pull request is queued right now, never
+      /// whether it used to be.
+      Known : PrKnown
       /// Has a delivery ever reached this watch?
       Pushed : bool
       /// `None` while the last look worked; the reason otherwise, so a query reader
@@ -314,6 +318,7 @@ let create
                 { Pr = e.Pr
                   Watcher = e.Watcher
                   Snapshot = e.Snapshot
+                  Known = e.Known
                   Pushed = e.Pushed
                   Health = e.Health }) }
 
@@ -433,10 +438,12 @@ let private queryDef : QueryDef =
     { Name = queryName
       Title = "Pull requests"
       Description =
-        "The pull requests this session is watching, each with its state, the rollup of \
-         its checks, and whose credential the session reads it with. Transitions — a \
-         merge, a close, checks turning green or red — are announced on the timeline as \
-         they happen; this is the current state."
+        "The pull requests this session is watching, each with the last thing that \
+         happened to it — open, queued, stalled, merged or closed — the rollup of its \
+         checks, and whose credential the session reads it with. `queued` is auto merge \
+         armed; `stalled` is auto merge armed and no longer armed while it is still open, \
+         which is what a merge queue ejecting an entry looks like. Transitions are \
+         announced on the timeline as they happen; this is the current state."
       Shape =
         Rows
             [ QueryColumn.create "pr" "pull request"
@@ -470,15 +477,22 @@ let query (current: unit -> PrWatchers) : Queries.QueryRegistration =
                               "state",
                               (match row.Snapshot with
                                | Some s ->
+                                   // State from the look just taken; queue from the
+                                   // BASELINE, because stalled is a fact about history and
+                                   // a snapshot can only say what is true right now.
+                                   let word = PrStatus.word row.Known.Queue s.State
                                    CellStatus (
-                                       PrState.describe s.State,
-                                       match s.State with
-                                       // Merged is the outcome somebody was waiting for.
-                                       // Open is the ordinary state and earns no colour —
-                                       // colouring every row would be colouring none.
-                                       | PrMerged -> ToneOk
-                                       | PrClosed -> ToneMuted
-                                       | PrOpen -> ToneMuted)
+                                       word,
+                                       match word with
+                                       // Merged is the outcome somebody was waiting for;
+                                       // stalled is the one nobody is driving. Queued is
+                                       // in flight. Open and closed are the ordinary
+                                       // states and earn no colour — colouring every row
+                                       // would be colouring none.
+                                       | "merged" -> ToneOk
+                                       | "stalled" -> ToneBad
+                                       | "queued" -> ToneBusy
+                                       | _ -> ToneMuted)
                                // Watched, but not yet looked at — which is a different
                                // thing from a state, and says so rather than guessing one.
                                | None -> CellAbsent)

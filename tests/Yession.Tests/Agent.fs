@@ -589,7 +589,13 @@ let private prWatched =
     SessionEvent.PrWatched
         { MessageId = MessageId.create "w1" |> expect
           Pr = watchedPr
-          Initial = { State = PrOpen; Title = "Add feature"; HeadSha = "abc"; Checks = ChecksPending; Mergeable = None }
+          Initial =
+            { State = PrOpen
+              Title = "Add feature"
+              HeadSha = "abc"
+              Checks = ChecksPending
+              Queued = false
+              Mergeable = None }
           Actor = prWatcher }
 
 let private prTransitioned transition =

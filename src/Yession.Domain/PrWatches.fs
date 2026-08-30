@@ -9,12 +9,56 @@ open Yession.Domain
 /// re-folds the same log and re-announces nothing, while a change that happened during
 /// the downtime is still detected, because the log still says the state before it.
 
+/// Where a pull request stands with the thing that would merge it for us.
+///
+/// `Stalled` is not something a provider reports — it is `Queued` followed by not queued,
+/// on a pull request still open, which is what a merge queue ejecting an entry looks like
+/// from outside. So it can only be known from HISTORY, which is why it lives in the
+/// baseline rather than in the snapshot.
+type PrQueue =
+    | NotQueued
+    | Queued
+    | Stalled
+
 /// What the log has recorded about one pull request: the baseline the next detection
 /// compares against. Deliberately not the whole snapshot — title, head sha and
 /// mergeability are display facts whose movement is not news.
 type PrKnown =
     { State : PrState
-      Checks : ChecksRollup }
+      Checks : ChecksRollup
+      Queue : PrQueue }
+
+/// The one word for where a pull request stands, and how loudly to say it. ONE home,
+/// because the settings panel, the roster summary and the header strip must not each
+/// invent their own vocabulary for the same fact — they read it from here.
+module PrStatus =
+
+    /// The last thing that happened to this pull request, in a single past-tense word.
+    /// Queue first while it is open, because "queued" and "stalled" are the news; a
+    /// merged or closed pull request has stopped caring what any queue thought.
+    let word (queue: PrQueue) (state: PrState) : string =
+        match state with
+        | PrMerged -> "merged"
+        | PrClosed -> "closed"
+        | PrOpen ->
+            match queue with
+            | Queued -> "queued"
+            | Stalled -> "stalled"
+            | NotQueued -> "open"
+
+    /// Worst first. What "worst" means here is how much it wants a person: a stalled pull
+    /// request has nobody driving it, an open one is waiting on somebody, a queued one is
+    /// waiting on machines, and merged or closed is over.
+    let order : string list = [ "stalled"; "open"; "queued"; "merged"; "closed" ]
+
+    /// Which of two status words wants a person more. Unknown words rank last rather than
+    /// first: a surface should not shout about a word this module has never heard of.
+    let worse (left: string) (right: string) : string =
+        let rank word =
+            match order |> List.tryFindIndex (fun w -> w = word) with
+            | Some index -> index
+            | None -> List.length order
+        if rank left <= rank right then left else right
 
 type PrWatch =
     { Pr : PrRef
@@ -28,8 +72,14 @@ module PrTransitions =
 
     /// The baseline a watch starts from: its `Initial` snapshot, reduced to what
     /// transitions are detected on.
+    ///
+    /// A watch that begins on an already-ejected pull request reads `NotQueued`, not
+    /// `Stalled`, and that is honest: nobody watching saw it fall out, and claiming
+    /// otherwise would announce a stall that this session cannot know happened.
     let knownOf (snapshot: PrSnapshot) : PrKnown =
-        { State = snapshot.State; Checks = snapshot.Checks }
+        { State = snapshot.State
+          Checks = snapshot.Checks
+          Queue = (if snapshot.Queued then Queued else NotQueued) }
 
     /// Advance a baseline by one announced transition — the projection's fold, and the
     /// poller's, so the two cannot disagree about what has been said.
@@ -40,9 +90,12 @@ module PrTransitions =
         | PrTransition.Reopened -> { known with State = PrOpen }
         | PrTransition.ChecksPassed -> { known with Checks = ChecksGreen }
         | PrTransition.ChecksFailed -> { known with Checks = ChecksRed }
+        | PrTransition.Queued -> { known with Queue = Queued }
+        | PrTransition.Stalled -> { known with Queue = Stalled }
 
     /// What a fresh snapshot means against the last recorded baseline: at most one state
-    /// transition and at most one checks transition, state first.
+    /// transition, at most one checks transition and at most one queue transition, in
+    /// that order.
     ///
     /// Only ARRIVALS at green or red are checks news — a new push resetting checks to
     /// pending is the ordinary rhythm of work, not an announcement. And checks movement
@@ -70,7 +123,20 @@ module PrTransitions =
                 | _, ChecksRed -> [ PrTransition.ChecksFailed ]
                 | _ -> []
             | PrMerged | PrClosed -> []
-        state @ checks
+        // Queue news, on the same terms as checks news and for the same reason: a merged
+        // pull request left the queue by going through it, and saying "stalled" about that
+        // would be reporting the success as a failure. A re-arm after a stall announces
+        // `Queued` again, because it is again true that nobody is needed.
+        let queue =
+            match stateAfter.State with
+            | PrOpen ->
+                match known.Queue, fresh.Queued with
+                | Queued, true -> []
+                | _, true -> [ PrTransition.Queued ]
+                | Queued, false -> [ PrTransition.Stalled ]
+                | _, false -> []
+            | PrMerged | PrClosed -> []
+        state @ checks @ queue
 
 module PrWatchesProjection =
 
