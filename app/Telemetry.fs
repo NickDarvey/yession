@@ -81,9 +81,15 @@ let emitLogTo (logger: OpenTelemetry.Logger) (body: string) (attributes: (string
 
 // --- Resource identity (code default, overridable by the standard env vars) --------------
 
+/// The operator's own `OTEL_RESOURCE_ATTRIBUTES`, as written. Read HERE rather than wherever
+/// it happens to be wanted: this process overlays its own resource with it (below), and the
+/// Manager prepends it to the identity it gives a child (`ProcessManager`), so a second reader
+/// would be a second default for one value.
+let inheritedResourceAttributes () : string = Interop.envOr "OTEL_RESOURCE_ATTRIBUTES" ""
+
 /// Parse `OTEL_RESOURCE_ATTRIBUTES` (`k1=v1,k2=v2`) into pairs; malformed entries are skipped.
 let private envResourceAttributes () : (string * string) list =
-    match Interop.envOr "OTEL_RESOURCE_ATTRIBUTES" "" with
+    match inheritedResourceAttributes () with
     | "" -> []
     | s ->
         s.Split ','

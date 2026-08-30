@@ -75,6 +75,13 @@ let load (fallbackDir: string) : AssetSet =
     { Build = AssetBuild (digestEntries nodeCrypto (Map.toArray files))
       Files = files }
 
+/// The set this process serves: the build output, or wherever `YESSION_ASSETS` says an
+/// operator has put it. Read HERE, once, rather than by each server that wants one — a second
+/// reader is a second default, and a deployment that gave the two of them different answers
+/// would serve a stylesheet from one build beside the faces of another. One variable for the
+/// whole directory, for the same reason `load` addresses the set rather than each file.
+let configured () : AssetSet = load (envOr "YESSION_ASSETS" "app/out/public/assets")
+
 /// The URL a document should name for `file` in this set.
 let url (assets: AssetSet) (file: AssetFile) : string = AssetBuild.url assets.Build file
 

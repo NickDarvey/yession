@@ -603,15 +603,11 @@ let private pathnameOf (url: string) : string = Fable.Core.Util.jsNative
 [<Fable.Core.Emit("Object.fromEntries(new URLSearchParams($0))[$1] ?? ''")>]
 let private formField (body: string) (name: string) : string = Fable.Core.Util.jsNative
 
-/// Where the built asset set lives when this is not an installed package. One variable for
-/// the whole directory (`Assets`), which is also why this page can link a stylesheet whose
-/// faces this file has never heard of.
-let private assetsDir = envOr "YESSION_ASSETS" "app/out/public/assets"
-
 /// The same static asset service the Session Process runs, over this process's OWN set — read
 /// and addressed once at boot rather than per request, so every render of this page (it is
-/// rendered per request) names the same bytes.
-let private assets = Assets.load assetsDir
+/// rendered per request) names the same bytes. Where the set lives is `Assets`' own business,
+/// which is also why this page can link a stylesheet whose faces this file has never heard of.
+let private assets = Assets.configured ()
 
 let private cssUrl = Assets.url assets AssetFile.``app``
 
