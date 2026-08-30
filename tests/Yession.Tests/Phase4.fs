@@ -1938,7 +1938,7 @@ let private hookDeliveryStreamTests =
 // A tool with a real JSON-Schema input. The schema is written compact so the codec's
 // re-serialisation round-trips it byte-for-byte (Thoth renders with no spaces at indent 0).
 let private searchTool : McpTool =
-    { Name = "search"
+    { McpTool.Name = "search"
       Title = Some "Search"
       Description = Some "Full-text search"
       InputSchema = """{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}""" }
@@ -1950,7 +1950,9 @@ let private mcpTests =
             // (Plan 17). It no longer crosses the control leg, but the schema must survive
             // a round trip wherever it is carried.
             let original =
-                { Tools = [ searchTool; { Name = "noop"; Title = None; Description = None; InputSchema = "{}" } ] }
+                { Tools =
+                    [ searchTool
+                      { McpTool.Name = "noop"; Title = None; Description = None; InputSchema = "{}" } ] }
             let roundTripped =
                 ControlWire.toString Codec.mcpToolList original
                 |> ControlWire.fromString Codec.mcpToolList

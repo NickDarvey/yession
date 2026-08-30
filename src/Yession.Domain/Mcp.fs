@@ -7,6 +7,12 @@ open Yession.Domain
 /// session is the client, so this is a reply it receives, not a payload the Manager pushes.
 /// Pagination (`nextCursor`) is intentionally omitted — a device provider's tool list is
 /// short and static, and paging it would be machinery with no producer.
+///
+/// Qualified because these are MCP's own field names: anything else modelling the same spec
+/// carries the same four, and the serial example does — as any provider written against the
+/// spec would. The suite references that example, so both label sets reach one file, and a
+/// bare construction there would silently build whichever was declared last.
+[<RequireQualifiedAccess>]
 type McpTool =
     { /// The tool's unique name — the MCP call target (`Tool.name`).
       Name : string
