@@ -27,6 +27,11 @@ open SerialProvider.Interop
 /// One tool, as MCP declares it. `InputSchema` is raw JSON Schema text, passed through
 /// untouched — a schema is a document, and re-encoding it through a typed model would only
 /// create ways to lose parts of it.
+///
+/// Qualified because these are MCP's own field names, so anything else in scope that models
+/// the same spec carries them too, and a bare construction would resolve to whichever type
+/// was declared last with nothing said.
+[<RequireQualifiedAccess>]
 type Tool =
     { Name : string
       Title : string option

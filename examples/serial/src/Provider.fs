@@ -68,17 +68,17 @@ let Namespace = "serial"
 let private deviceArg = Mcp.Schema.required "device_id" "string" "the device_id list_devices returned"
 
 let tools : Mcp.Tool list =
-    [ { Name = "list_devices"
+    [ { Mcp.Tool.Name = "list_devices"
         Title = None
         Description =
             "Every serial device attached to this host that this provider recognises, with a stable device_id, its make and model, and whether it is free. Unrecognised ports are deliberately not listed — a serial port that is not a known device is usually the machine's own console. Call this again after somebody plugs something in; the list is read from the OS each time."
         InputSchema = Mcp.Schema.ofFields [] }
-      { Name = "acquire_device"
+      { Mcp.Tool.Name = "acquire_device"
         Title = Some "Acquire a serial device"
         Description =
             "Claim a device for exclusive use and get back a URL to open its byte stream on. One holder at a time, because the OS gives out one handle: if somebody else has it, this says who. Release it when you are done."
         InputSchema = Mcp.Schema.ofFields [ deviceArg ] }
-      { Name = "configure_device"
+      { Mcp.Tool.Name = "configure_device"
         Title = None
         Description =
             "Set the line parameters of a device you hold. Takes effect on the NEXT attach, so configure before you open the stream. Defaults are 115200 8N1, which is what most boards boot at."
@@ -89,7 +89,7 @@ let tools : Mcp.Tool list =
                   Mcp.Schema.optional "data_bits" "integer" "5, 6, 7 or 8 (default 8)"
                   Mcp.Schema.optional "stop_bits" "integer" "1 or 2 (default 1)"
                   Mcp.Schema.optional "parity" "string" "none, even or odd (default none)" ] }
-      { Name = "release_device"
+      { Mcp.Tool.Name = "release_device"
         Title = None
         Description =
             "Give a device back, closing its stream if one is open. Safe to call on a device you do not hold."
