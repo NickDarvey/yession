@@ -117,8 +117,8 @@ let private grantsFor (selection: ResourceName list) : Result<ResourceLeaf list,
 // the SDK's `spawnClaudeCodeProcess` seam with an allowlisted env and a scratch HOME
 // (Agent.fs); srt adds the OS-level confinement around it. Parsed HERE, at boot, so a bad
 // value fails the session at start rather than mid-turn. Fail closed, never a silent
-// fallback, and read in exactly one place — `SandboxBackends` (the suite) keeps it there,
-// because this variable had two readers with two defaults and the weaker one was winning.
+// fallback, and read in exactly one place — `YES008` keeps it there, because this variable
+// had two readers with two defaults and the weaker one was winning.
 //
 // The default is `host`, which is NOT the WorkSandbox's answer and is not what this ought
 // to be. It is what the srt agent path has actually been proven to do: #364 made this

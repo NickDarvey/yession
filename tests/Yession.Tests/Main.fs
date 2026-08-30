@@ -104,7 +104,6 @@ let all =
         // The source contract that guards a DEFAULT rather than a declaration: a confinement
         // switch read in two places is read with two defaults, and the weaker one wins
         // without anybody choosing it.
-        Tag.needs "Sandbox backends" [] (fun () -> SandboxBackends.tests)
         // The source contract that guards a file no F# reads: what a checkout of devenv.lock
         // gives a machine that is not this one. (This comment sat above `Namespace shadowing`
         // for as long as that suite existed, describing neither it nor its neighbour.)

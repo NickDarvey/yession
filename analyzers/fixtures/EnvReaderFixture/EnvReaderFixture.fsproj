@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Not a product project and deliberately not in Yession.slnx, for the same reason
+    EnvWriteFixture is not: every binding below is there to be judged, and some of them
+    are meant to fail. `lint` analyzes it on its own and checks the verdicts against the
+    `// YES008` markers in the source.
+
+    Three files, because the rule is about how many of them read one variable: one file
+    could not break it, so one file could not prove the rule still sees a break either.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Access.fs" />
+    <Compile Include="Boot.fs" />
+    <Compile Include="Elsewhere.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fable.Core" />
+  </ItemGroup>
+
+</Project>

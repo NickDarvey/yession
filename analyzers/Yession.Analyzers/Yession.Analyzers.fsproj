@@ -34,6 +34,7 @@
     <Compile Include="NamespaceShadowing.fs" />
     <Compile Include="DomainExports.fs" />
     <Compile Include="EnvWrites.fs" />
+    <Compile Include="EnvReaders.fs" />
   </ItemGroup>
 
   <ItemGroup>
