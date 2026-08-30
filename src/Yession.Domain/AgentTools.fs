@@ -697,7 +697,7 @@ module AgentTools =
                   })
           tool
               "watch_pr"
-              "Watch a pull request on GitHub. The session polls it and announces on the timeline when it merges, closes, reopens, or its checks turn green or red; the current state of every watched pull request is the pull_requests query. Reads it with the credential of whoever's turn this is, so a \"cannot see it\" on a pull request that exists means their GitHub credential cannot reach that repo. Watching one already watched reports its state and changes nothing."
+              "Watch a pull request on GitHub. The session polls it and announces on the timeline when it merges, closes, reopens, when its checks pass or fail, and when auto merge is armed (queued) or stops being armed while it is still open (stalled — what a merge queue ejecting an entry looks like, which nothing else reports); the current state of every watched pull request is the pull_requests query. Reads it with the credential of whoever's turn this is, so a \"cannot see it\" on a pull request that exists means their GitHub credential cannot reach that repo. Watching one already watched reports its state and changes nothing."
               [ ToolField.required "repo" "string" "owner/name"
                 ToolField.required "number" "integer" "the pull request number" ]
               (fun args ->

@@ -61,6 +61,10 @@ type PrSnapshot =
       Title : string
       HeadSha : string
       Checks : ChecksRollup
+      /// Is this pull request on its way in without anybody further being needed — auto
+      /// merge armed, the merge queue holding it? Unlike `Mergeable` this one IS a fact
+      /// the provider states outright rather than computes lazily, so it is announced.
+      Queued : bool
       Mergeable : bool option }
 
 /// A watched pull request's state changes — the vocabulary grows HERE, not inside
@@ -72,6 +76,14 @@ type PrTransition =
     | Reopened
     | ChecksPassed
     | ChecksFailed
+    /// Auto merge armed: from here it lands without anybody doing anything.
+    | Queued
+    /// Auto merge armed and no longer armed, on a pull request still open. What a merge
+    /// queue does when it ejects an entry, and the reason this case exists: the ejection
+    /// itself raises nothing anywhere — the state does not move, the checks do not move,
+    /// the pull request simply stops being on its way in. Somebody has to re-arm it, and
+    /// until this was said nobody was told.
+    | Stalled
 
 module PrTransition =
     let describe (transition: PrTransition) : string =
@@ -81,6 +93,8 @@ module PrTransition =
         | PrTransition.Reopened -> "reopened"
         | PrTransition.ChecksPassed -> "checks passed"
         | PrTransition.ChecksFailed -> "checks failed"
+        | PrTransition.Queued -> "queued"
+        | PrTransition.Stalled -> "stalled"
 
 // --- event payloads (the RepoFacts shape: MessageId + payload + attribution) -----------
 

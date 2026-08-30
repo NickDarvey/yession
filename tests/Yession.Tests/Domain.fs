@@ -283,12 +283,24 @@ let private frameSerializationTests =
                   PrWatched
                     { MessageId = messageId
                       Pr = { Repo = RepoRef.create "octo/hello" |> expect; Number = 12 }
-                      Initial = { State = PrOpen; Title = "Add feature"; HeadSha = "abc123"; Checks = ChecksPending; Mergeable = Some true }
+                      Initial =
+                        { State = PrOpen
+                          Title = "Add feature"
+                          HeadSha = "abc123"
+                          Checks = ChecksPending
+                          Queued = true
+                          Mergeable = Some true }
                       Actor = PeerRef peerId }
                   PrWatched
                     { MessageId = messageId
                       Pr = { Repo = RepoRef.create "octo/hello" |> expect; Number = 13 }
-                      Initial = { State = PrClosed; Title = "Old"; HeadSha = "def456"; Checks = ChecksNone; Mergeable = None }
+                      Initial =
+                        { State = PrClosed
+                          Title = "Old"
+                          HeadSha = "def456"
+                          Checks = ChecksNone
+                          Queued = false
+                          Mergeable = None }
                       Actor = ActorRef.Agent }
                   PrUnwatched
                     { MessageId = messageId
@@ -516,8 +528,13 @@ let private prWatchTests =
     let repo = RepoRef.create "octo/hello" |> expect
     let pr = PrRef.create repo 12 |> expect
     let ada = PeerId.create "ada" |> expect
-    let snapshot state checks : PrSnapshot =
-        { State = state; Title = "Add feature"; HeadSha = "abc123"; Checks = checks; Mergeable = None }
+    let snapshotOf state checks queued : PrSnapshot =
+        { State = state; Title = "Add feature"; HeadSha = "abc123"; Checks = checks; Queued = queued; Mergeable = None }
+    let snapshot state checks : PrSnapshot = snapshotOf state checks false
+    /// The baseline as a watch that has never seen a queue reads it.
+    let known state checks : PrKnown = { State = state; Checks = checks; Queue = NotQueued }
+    /// ...and as one that has: auto merge armed, the last thing anybody was told.
+    let queued state checks : PrKnown = { State = state; Checks = checks; Queue = Queued }
     let started state checks : SessionEvent =
         PrWatched { MessageId = msg "w1"; Pr = pr; Initial = snapshot state checks; Actor = PeerRef ada }
     let transitioned transition state checks : SessionEvent =
@@ -533,55 +550,96 @@ let private prWatchTests =
 
         testCase "a merge, a close and a reopen are each one transition" <| fun () ->
             Expect.equal
-                (PrTransitions.detect { State = PrOpen; Checks = ChecksGreen } (snapshot PrMerged ChecksGreen))
+                (PrTransitions.detect (known PrOpen ChecksGreen) (snapshot PrMerged ChecksGreen))
                 [ PrTransition.Merged ] "open to merged"
             Expect.equal
-                (PrTransitions.detect { State = PrOpen; Checks = ChecksNone } (snapshot PrClosed ChecksNone))
+                (PrTransitions.detect (known PrOpen ChecksNone) (snapshot PrClosed ChecksNone))
                 [ PrTransition.Closed ] "open to closed"
             Expect.equal
-                (PrTransitions.detect { State = PrClosed; Checks = ChecksNone } (snapshot PrOpen ChecksNone))
+                (PrTransitions.detect (known PrClosed ChecksNone) (snapshot PrOpen ChecksNone))
                 [ PrTransition.Reopened ] "closed to open"
             Expect.equal
-                (PrTransitions.detect { State = PrClosed; Checks = ChecksNone } (snapshot PrMerged ChecksNone))
+                (PrTransitions.detect (known PrClosed ChecksNone) (snapshot PrMerged ChecksNone))
                 [ PrTransition.Merged ] "a closed baseline learning of a merge is a merge"
 
         testCase "checks arriving at green or red are news; entering pending is not" <| fun () ->
             Expect.equal
-                (PrTransitions.detect { State = PrOpen; Checks = ChecksPending } (snapshot PrOpen ChecksGreen))
+                (PrTransitions.detect (known PrOpen ChecksPending) (snapshot PrOpen ChecksGreen))
                 [ PrTransition.ChecksPassed ] "pending to green"
             Expect.equal
-                (PrTransitions.detect { State = PrOpen; Checks = ChecksGreen } (snapshot PrOpen ChecksRed))
+                (PrTransitions.detect (known PrOpen ChecksGreen) (snapshot PrOpen ChecksRed))
                 [ PrTransition.ChecksFailed ] "green to red"
             Expect.equal
-                (PrTransitions.detect { State = PrOpen; Checks = ChecksGreen } (snapshot PrOpen ChecksPending))
+                (PrTransitions.detect (known PrOpen ChecksGreen) (snapshot PrOpen ChecksPending))
                 [] "a new push resetting checks is the rhythm of work, not news"
             Expect.equal
-                (PrTransitions.detect { State = PrOpen; Checks = ChecksGreen } (snapshot PrOpen ChecksGreen))
+                (PrTransitions.detect (known PrOpen ChecksGreen) (snapshot PrOpen ChecksGreen))
                 [] "no movement, no news"
 
         testCase "a merge and a green arriving together announce both, state first" <| fun () ->
             Expect.equal
-                (PrTransitions.detect { State = PrOpen; Checks = ChecksPending } (snapshot PrMerged ChecksGreen))
+                (PrTransitions.detect (known PrOpen ChecksPending) (snapshot PrMerged ChecksGreen))
                 [ PrTransition.Merged ] "checks on a PR that just left open are not announced"
             Expect.equal
-                (PrTransitions.detect { State = PrClosed; Checks = ChecksPending } (snapshot PrOpen ChecksGreen))
+                (PrTransitions.detect (known PrClosed ChecksPending) (snapshot PrOpen ChecksGreen))
                 [ PrTransition.Reopened; PrTransition.ChecksPassed ] "a reopen makes its checks news again, state first"
 
         testCase "checks movement on a merged baseline is suppressed" <| fun () ->
             Expect.equal
-                (PrTransitions.detect { State = PrMerged; Checks = ChecksGreen } (snapshot PrMerged ChecksRed))
+                (PrTransitions.detect (known PrMerged ChecksGreen) (snapshot PrMerged ChecksRed))
                 [] "CI going red on a merged PR is not actionable from here"
+
+        testCase "auto merge arming is announced once" <| fun () ->
+            Expect.equal
+                (PrTransitions.detect (known PrOpen ChecksGreen) (snapshotOf PrOpen ChecksGreen true))
+                [ PrTransition.Queued ] "it is on its way in with nobody needed"
+            Expect.equal
+                (PrTransitions.detect (queued PrOpen ChecksGreen) (snapshotOf PrOpen ChecksGreen true))
+                [] "and saying so again on every poll would be noise"
+
+        testCase "auto merge disarming on an open pull request is a stall" <| fun () ->
+            // What a merge queue ejecting an entry looks like from outside: the state does
+            // not move, the checks do not move, it just stops being on its way in.
+            Expect.equal
+                (PrTransitions.detect (queued PrOpen ChecksGreen) (snapshot PrOpen ChecksGreen))
+                [ PrTransition.Stalled ] "somebody has to re-arm it"
+            Expect.equal
+                (PrTransitions.detect (known PrOpen ChecksGreen) (snapshot PrOpen ChecksGreen))
+                [] "a pull request that was never queued has not stalled"
+
+        testCase "a re-armed pull request is queued again" <| fun () ->
+            let stalled = PrTransitions.advance (queued PrOpen ChecksGreen) PrTransition.Stalled
+            Expect.equal
+                (PrTransitions.detect stalled (snapshotOf PrOpen ChecksGreen true))
+                [ PrTransition.Queued ] "it is again true that nobody is needed"
+
+        testCase "a queued pull request that merges is not also reported stalled" <| fun () ->
+            // It left the queue by going through it. Reporting that as a stall would file
+            // the success as a failure.
+            Expect.equal
+                (PrTransitions.detect (queued PrOpen ChecksGreen) (snapshot PrMerged ChecksGreen))
+                [ PrTransition.Merged ] "the merge is the whole news"
+
+        testCase "a status word is the last thing that happened, worst first" <| fun () ->
+            Expect.equal (PrStatus.word Queued PrOpen) "queued" "armed and waiting on machines"
+            Expect.equal (PrStatus.word Stalled PrOpen) "stalled" "nobody driving"
+            Expect.equal (PrStatus.word NotQueued PrOpen) "open" "the ordinary state"
+            Expect.equal (PrStatus.word Queued PrMerged) "merged" "a merged PR has stopped caring what a queue thought"
+            Expect.equal (PrStatus.word Queued PrClosed) "closed" "and so has a closed one"
+            Expect.equal (PrStatus.worse "queued" "stalled") "stalled" "stalled wants a person more than queued"
+            Expect.equal (PrStatus.worse "merged" "open") "open" "an open PR is still owed; a merged one is not"
+            Expect.equal (PrStatus.worse "merged" "a word from the future") "merged" "an unknown word does not shout"
 
         testCase "the watches projection folds start, re-watch, transition and stop" <| fun () ->
             let folded = fold [ started PrOpen ChecksPending ]
             Expect.equal
                 folded.Watches
-                [ { Pr = pr; Watcher = PeerRef ada; Known = { State = PrOpen; Checks = ChecksPending } } ]
+                [ { Pr = pr; Watcher = PeerRef ada; Known = (known PrOpen ChecksPending) } ]
                 "a watch starts from its Initial baseline"
             let advanced = PrWatchesProjection.applyEvent folded (transitioned PrTransition.ChecksPassed PrOpen ChecksGreen)
             Expect.equal
                 (PrWatchesProjection.tryFind pr advanced |> Option.map (fun w -> w.Known))
-                (Some { State = PrOpen; Checks = ChecksGreen })
+                (Some (known PrOpen ChecksGreen))
                 "a recorded transition advances the baseline"
             let rewatched =
                 PrWatchesProjection.applyEvent
@@ -589,7 +647,7 @@ let private prWatchTests =
                     (PrWatched { MessageId = msg "w2"; Pr = pr; Initial = snapshot PrOpen ChecksNone; Actor = ActorRef.Agent })
             Expect.equal
                 rewatched.Watches
-                [ { Pr = pr; Watcher = ActorRef.Agent; Known = { State = PrOpen; Checks = ChecksNone } } ]
+                [ { Pr = pr; Watcher = ActorRef.Agent; Known = (known PrOpen ChecksNone) } ]
                 "re-watch replaces in place, newest baseline and watcher win"
             let stopped =
                 PrWatchesProjection.applyEvent rewatched (PrUnwatched { MessageId = msg "w3"; Pr = pr; Actor = PeerRef ada })
