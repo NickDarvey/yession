@@ -585,8 +585,8 @@ let private closedNow (id: TerminalId) =
 let private prWatcher = PeerRef (PeerId.create "ada" |> expect)
 let private watchedPr = PrRef.create (RepoRef.create "octo/hello" |> expect) 12 |> expect
 
-let private prWatchStarted =
-    SessionEvent.PrWatchStarted
+let private prWatched =
+    SessionEvent.PrWatched
         { MessageId = MessageId.create "w1" |> expect
           Pr = watchedPr
           Initial = { State = PrOpen; Title = "Add feature"; HeadSha = "abc"; Checks = ChecksPending; Mergeable = None }
@@ -601,8 +601,8 @@ let private prTransitioned transition =
           Checks = ChecksGreen
           Watcher = prWatcher }
 
-let private prWatchStopped =
-    SessionEvent.PrWatchStopped
+let private prUnwatched =
+    SessionEvent.PrUnwatched
         { MessageId = MessageId.create "w2" |> expect; Pr = watchedPr; Actor = prWatcher }
 
 let private prWakeTests =
@@ -613,14 +613,14 @@ let private prWakeTests =
             // watch was an attributed act, and the poll that noticed spent that actor's
             // own credential, so the turn runs as somebody who asked for exactly this.
             Expect.equal
-                (AgentWake.pendingReason [ turnStarted "1"; prWatchStarted; prTransitioned PrWasMerged ])
+                (AgentWake.pendingReason [ turnStarted "1"; prWatched; prTransitioned PrTransition.Merged ])
                 (Some (PrChanged watchedPr, prWatcher))
                 "owed to whoever is watching"
 
         testCase "a transition before the last turn started owes nothing" <| fun () ->
             // The turn that ran after it already carried the note in its context.
             Expect.equal
-                (AgentWake.pendingReason [ prWatchStarted; prTransitioned PrWasMerged; turnStarted "1" ])
+                (AgentWake.pendingReason [ prWatched; prTransitioned PrTransition.Merged; turnStarted "1" ])
                 None
                 "a new turn takes everything before it"
 
@@ -629,7 +629,7 @@ let private prWakeTests =
             // a moment later.
             Expect.equal
                 (AgentWake.pendingReason
-                    [ turnStarted "1"; prWatchStarted; prTransitioned PrWasMerged; prWatchStopped ])
+                    [ turnStarted "1"; prWatched; prTransitioned PrTransition.Merged; prUnwatched ])
                 None
                 "stopped means stopped"
 
@@ -639,8 +639,8 @@ let private prWakeTests =
             Expect.equal
                 (AgentWake.pendingReason
                     [ turnStarted "1"
-                      prWatchStarted
-                      prTransitioned PrWasMerged
+                      prWatched
+                      prTransitioned PrTransition.Merged
                       blockStartedIn terminalB "b1" true (Some (PeerRef bob))
                       blockCompleted "b1" ]
                  |> Option.map fst)
@@ -651,7 +651,7 @@ let private prWakeTests =
             // The restart property, from the wake's side: the debt is what the log records
             // AFTER the last turn start, so re-folding the same log once a turn has run
             // owes nothing however many times the process comes back.
-            let log = [ prWatchStarted; prTransitioned PrWasMerged; turnStarted "1" ]
+            let log = [ prWatched; prTransitioned PrTransition.Merged; turnStarted "1" ]
             Expect.equal (AgentWake.pendingReason log) None "already turned on it"
             Expect.equal (AgentWake.pendingReason log) None "and folding again changes nothing"
     ]

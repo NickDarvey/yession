@@ -1025,24 +1025,24 @@ module Codec =
         { Encode =
             (fun (t: PrTransition) ->
                 match t with
-                | PrWasMerged -> Encode.string "merged"
-                | PrWasClosed -> Encode.string "closed"
-                | PrWasReopened -> Encode.string "reopened"
-                | ChecksTurnedGreen -> Encode.string "checksGreen"
-                | ChecksTurnedRed -> Encode.string "checksRed")
+                | PrTransition.Merged -> Encode.string "merged"
+                | PrTransition.Closed -> Encode.string "closed"
+                | PrTransition.Reopened -> Encode.string "reopened"
+                | PrTransition.ChecksPassed -> Encode.string "checksGreen"
+                | PrTransition.ChecksFailed -> Encode.string "checksRed")
           Decode =
             Decode.string
             |> Decode.andThen (function
-                | "merged" -> Decode.succeed PrWasMerged
-                | "closed" -> Decode.succeed PrWasClosed
-                | "reopened" -> Decode.succeed PrWasReopened
-                | "checksGreen" -> Decode.succeed ChecksTurnedGreen
-                | "checksRed" -> Decode.succeed ChecksTurnedRed
+                | "merged" -> Decode.succeed PrTransition.Merged
+                | "closed" -> Decode.succeed PrTransition.Closed
+                | "reopened" -> Decode.succeed PrTransition.Reopened
+                | "checksGreen" -> Decode.succeed PrTransition.ChecksPassed
+                | "checksRed" -> Decode.succeed PrTransition.ChecksFailed
                 | other -> Decode.fail (sprintf "Unknown pull request transition: %s" other)) }
 
-    let private prWatchStarted : Codec<PrWatchStarted> =
+    let private prWatched : Codec<PrWatched> =
         { Encode =
-            fun (p: PrWatchStarted) ->
+            fun (p: PrWatched) ->
                 Encode.object
                     [ "messageId", messageId.Encode p.MessageId
                       "pr", prRef.Encode p.Pr
@@ -1050,23 +1050,23 @@ module Codec =
                       "actor", actor.Encode p.Actor ]
           Decode =
             Decode.object (fun get ->
-                { PrWatchStarted.MessageId = get.Required.Field "messageId" messageId.Decode
-                  PrWatchStarted.Pr = get.Required.Field "pr" prRef.Decode
-                  PrWatchStarted.Initial = get.Required.Field "initial" prSnapshot.Decode
-                  PrWatchStarted.Actor = get.Required.Field "actor" actor.Decode }) }
+                { PrWatched.MessageId = get.Required.Field "messageId" messageId.Decode
+                  PrWatched.Pr = get.Required.Field "pr" prRef.Decode
+                  PrWatched.Initial = get.Required.Field "initial" prSnapshot.Decode
+                  PrWatched.Actor = get.Required.Field "actor" actor.Decode }) }
 
-    let private prWatchStopped : Codec<PrWatchStopped> =
+    let private prUnwatched : Codec<PrUnwatched> =
         { Encode =
-            fun (p: PrWatchStopped) ->
+            fun (p: PrUnwatched) ->
                 Encode.object
                     [ "messageId", messageId.Encode p.MessageId
                       "pr", prRef.Encode p.Pr
                       "actor", actor.Encode p.Actor ]
           Decode =
             Decode.object (fun get ->
-                { PrWatchStopped.MessageId = get.Required.Field "messageId" messageId.Decode
-                  PrWatchStopped.Pr = get.Required.Field "pr" prRef.Decode
-                  PrWatchStopped.Actor = get.Required.Field "actor" actor.Decode }) }
+                { PrUnwatched.MessageId = get.Required.Field "messageId" messageId.Decode
+                  PrUnwatched.Pr = get.Required.Field "pr" prRef.Decode
+                  PrUnwatched.Actor = get.Required.Field "actor" actor.Decode }) }
 
     let private prTransitioned : Codec<PrTransitioned> =
         { Encode =
@@ -1379,10 +1379,10 @@ module Codec =
                     Encode.object [ "type", Encode.string "mcpServerAvailable"; "payload", mcpServerNoted.Encode p ]
                 | McpServerUnavailable p ->
                     Encode.object [ "type", Encode.string "mcpServerUnavailable"; "payload", mcpServerNoted.Encode p ]
-                | SessionEvent.PrWatchStarted p ->
-                    Encode.object [ "type", Encode.string "prWatchStarted"; "payload", prWatchStarted.Encode p ]
-                | SessionEvent.PrWatchStopped p ->
-                    Encode.object [ "type", Encode.string "prWatchStopped"; "payload", prWatchStopped.Encode p ]
+                | SessionEvent.PrWatched p ->
+                    Encode.object [ "type", Encode.string "prWatched"; "payload", prWatched.Encode p ]
+                | SessionEvent.PrUnwatched p ->
+                    Encode.object [ "type", Encode.string "prUnwatched"; "payload", prUnwatched.Encode p ]
                 | SessionEvent.PrTransitioned p ->
                     Encode.object [ "type", Encode.string "prTransitioned"; "payload", prTransitioned.Encode p ])
           Decode =
@@ -1441,10 +1441,10 @@ module Codec =
                     Decode.field "payload" mcpServerNoted.Decode |> Decode.map McpServerAvailable
                 | "mcpServerUnavailable" ->
                     Decode.field "payload" mcpServerNoted.Decode |> Decode.map McpServerUnavailable
-                | "prWatchStarted" ->
-                    Decode.field "payload" prWatchStarted.Decode |> Decode.map SessionEvent.PrWatchStarted
-                | "prWatchStopped" ->
-                    Decode.field "payload" prWatchStopped.Decode |> Decode.map SessionEvent.PrWatchStopped
+                | "prWatched" ->
+                    Decode.field "payload" prWatched.Decode |> Decode.map SessionEvent.PrWatched
+                | "prUnwatched" ->
+                    Decode.field "payload" prUnwatched.Decode |> Decode.map SessionEvent.PrUnwatched
                 | "prTransitioned" ->
                     Decode.field "payload" prTransitioned.Decode |> Decode.map SessionEvent.PrTransitioned
                 | other -> Decode.fail (sprintf "Unknown session event type: %s" other)) }

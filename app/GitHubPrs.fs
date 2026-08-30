@@ -502,7 +502,7 @@ let watchService
 
     let describe (pr: PrRef) (snapshot: PrSnapshot) =
         sprintf
-            "watching %s (%s, %s)"
+            "%s watched (%s, %s)"
             (PrRef.render pr)
             (PrState.describe snapshot.State)
             (ChecksRollup.describe snapshot.Checks)
@@ -518,7 +518,7 @@ let watchService
                     return
                         Ok (
                             sprintf
-                                "already watching %s (%s, %s)"
+                                "%s already watched (%s, %s)"
                                 (PrRef.render pr)
                                 (PrState.describe existing.Known.State)
                                 (ChecksRollup.describe existing.Known.Checks))
@@ -548,7 +548,7 @@ let watchService
                             do!
                                 append
                                     actor
-                                    (SessionEvent.PrWatchStarted
+                                    (SessionEvent.PrWatched
                                         { MessageId = messageId; Pr = pr; Initial = snapshot; Actor = actor })
                             let! watches = watchesNow ()
                             refold watches
@@ -559,15 +559,15 @@ let watchService
             async {
                 let! watches = watchesNow ()
                 if watches |> List.exists (fun w -> w.Pr = pr) |> not then
-                    return Error (sprintf "not watching %s" (PrRef.render pr))
+                    return Error (sprintf "%s not watched" (PrRef.render pr))
                 else
                     match mintId () with
                     | Error e -> return Error e
                     | Ok messageId ->
-                        do! append actor (SessionEvent.PrWatchStopped { MessageId = messageId; Pr = pr; Actor = actor })
+                        do! append actor (SessionEvent.PrUnwatched { MessageId = messageId; Pr = pr; Actor = actor })
                         let! watches = watchesNow ()
                         refold watches
-                        return Ok (sprintf "stopped watching %s" (PrRef.render pr))
+                        return Ok (sprintf "%s unwatched" (PrRef.render pr))
             } }
 
 // --- the hook subscription -------------------------------------------------------------------

@@ -361,7 +361,7 @@ module ConversationProjection =
         // Watched pull requests fold in for the repo notes' reason: a watch is a
         // session-shaping act, and a transition is exactly what a joining human or the
         // agent's next turn needs to be told — the news arrived through no other door.
-        | SessionEvent.PrWatchStarted p ->
+        | SessionEvent.PrWatched p ->
             { proj with
                 Items =
                     proj.Items
@@ -369,7 +369,7 @@ module ConversationProjection =
                           Author = p.Actor
                           Body =
                             sprintf
-                                "watching PR %s (%s, %s)"
+                                "PR %s watched (%s, %s)"
                                 (PrRef.render p.Pr)
                                 (PrState.describe p.Initial.State)
                                 (ChecksRollup.describe p.Initial.Checks)
@@ -377,13 +377,13 @@ module ConversationProjection =
                           Kind = ConversationItemKind.ActNote
                           Offset = envelope.Offset
                           Woke = None } ] }
-        | SessionEvent.PrWatchStopped p ->
+        | SessionEvent.PrUnwatched p ->
             { proj with
                 Items =
                     proj.Items
                     @ [ { MessageId = p.MessageId
                           Author = p.Actor
-                          Body = sprintf "stopped watching PR %s" (PrRef.render p.Pr)
+                          Body = sprintf "PR %s unwatched" (PrRef.render p.Pr)
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
                           Offset = envelope.Offset

@@ -55,6 +55,6 @@ module Bootstrap =
         | SessionEvent.ToolUseFinished _ -> "tool-use-finished"
         | SessionEvent.McpServerAvailable _ -> "mcp-server-available"
         | SessionEvent.McpServerUnavailable _ -> "mcp-server-unavailable"
-        | SessionEvent.PrWatchStarted _ -> "pr-watch-started"
-        | SessionEvent.PrWatchStopped _ -> "pr-watch-stopped"
+        | SessionEvent.PrWatched _ -> "pr-watched"
+        | SessionEvent.PrUnwatched _ -> "pr-unwatched"
         | SessionEvent.PrTransitioned _ -> "pr-transitioned"

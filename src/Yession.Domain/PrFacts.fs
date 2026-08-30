@@ -65,26 +65,27 @@ type PrSnapshot =
 
 /// A watched pull request's state changes — the vocabulary grows HERE, not inside
 /// `SessionEvent`, which carries one `PrTransitioned` case whatever is announced.
+[<RequireQualifiedAccess>]
 type PrTransition =
-    | PrWasMerged
-    | PrWasClosed
-    | PrWasReopened
-    | ChecksTurnedGreen
-    | ChecksTurnedRed
+    | Merged
+    | Closed
+    | Reopened
+    | ChecksPassed
+    | ChecksFailed
 
 module PrTransition =
     let describe (transition: PrTransition) : string =
         match transition with
-        | PrWasMerged -> "was merged"
-        | PrWasClosed -> "was closed"
-        | PrWasReopened -> "was reopened"
-        | ChecksTurnedGreen -> "checks went green"
-        | ChecksTurnedRed -> "checks went red"
+        | PrTransition.Merged -> "merged"
+        | PrTransition.Closed -> "closed"
+        | PrTransition.Reopened -> "reopened"
+        | PrTransition.ChecksPassed -> "checks passed"
+        | PrTransition.ChecksFailed -> "checks failed"
 
 // --- event payloads (the RepoFacts shape: MessageId + payload + attribution) -----------
 
 /// A party started watching a pull request.
-type PrWatchStarted =
+type PrWatched =
     { /// The timeline note's identity, minted by the Process at append time.
       MessageId : MessageId
       Pr : PrRef
@@ -97,7 +98,7 @@ type PrWatchStarted =
       /// on behalf of, and the actor any wake this watch causes would run as.
       Actor : ActorRef }
 
-and PrWatchStopped =
+and PrUnwatched =
     { MessageId : MessageId
       Pr : PrRef
       Actor : ActorRef }
