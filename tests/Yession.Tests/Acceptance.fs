@@ -945,6 +945,25 @@ let private uiChecklistTests =
             // The hook means something only if an ordinary cell does not claim one.
             Expect.isTrue (html.Contains "data-query-tone=\"\"") "an ordinary cell claims no tone, so the hook means something"
 
+        // The lane a query lands in is 280px wide at every breakpoint, so a row is drawn as
+        // a RECORD — named by its first column, with the rest as labelled facts — rather
+        // than as a table row that only a horizontal scroll could reach the end of. What is
+        // pinned is that the record still carries the WHOLE row: an identity column dropped
+        // from the pairs must reappear as the name, and no other column may go missing.
+        testCase "a row is one record, named by its first column, carrying every other one" <| fun () ->
+            let html = Support.render representativeModel
+            Expect.isTrue (html.Contains "data-query-row=\"octo/hello\"") "the record is named by its first column"
+            let record =
+                let start = html.IndexOf "data-query-row=\"octo/hello\""
+                Expect.isTrue (start > 0) "the record renders"
+                html.Substring (start, html.IndexOf ("</dl>", start) - start)
+            for label, value in [ "branch", "main"; "checks", "checks red"; "uncommitted changes", "yes" ] do
+                Expect.isTrue (record.Contains (sprintf ">%s<" label)) (sprintf "'%s' is labelled" label)
+                Expect.isTrue (record.Contains (sprintf ">%s<" value)) (sprintf "'%s' is on the page" value)
+            // The name is not said twice: a record headed "octo/hello" with a "repo:
+            // octo/hello" pair under it spends two lines of a narrow lane saying one thing.
+            Expect.isFalse (record.Contains ">repo<") "the naming column is not also a labelled pair"
+
         // The one approval card, at both mount points (Plan 15, stage 3c). What is worth
         // pinning is that the CHAT column carries the terminal's pending commands too: the
         // whole claim of this stage is that approving what the agent is about to run is the
@@ -961,13 +980,19 @@ let private uiChecklistTests =
             Expect.isTrue (list.Contains "data-terminal-queued") "with the terminal's own queued command in it"
             Expect.isTrue (list.Contains "data-pending-subject") "and a chip saying what it is about"
 
-        // The structure a table owes a screen reader (CLAUDE.md, UI baseline). Held in the
+        // The structure an answer owes a screen reader (CLAUDE.md, UI baseline). Held in the
         // renderer, so it is held for every query — the reason the surface is generated.
-        testCase "a rows query renders a real table with column headers" <| fun () ->
+        //
+        // A description list, since a row became a record: at 280px there are no columns to
+        // compare down, so a `<table>` would claim a structure the eye cannot see, and it is
+        // `<dt>`/`<dd>` that says which label a value answers to. (This case used to assert
+        // `<table>` and `scope="col"`, which was the same promise in the shape the renderer
+        // happened to have.)
+        testCase "a query's values are structurally bound to the labels they answer to" <| fun () ->
             let html = Support.render representativeModel
-            Expect.isTrue (html.Contains "<table") "rows render as a table"
-            Expect.isTrue (html.Contains "scope=\"col\"") "columns carry a scope"
-            Expect.isTrue (html.Contains "uncommitted changes") "the column's human label is the heading, not its wire key"
+            Expect.isTrue (html.Contains "<dl") "an answer's pairs are a description list"
+            Expect.isTrue (html.Contains "<dt") "each value has a term naming it"
+            Expect.isTrue (html.Contains "uncommitted changes") "the column's human label is the term, not its wire key"
 
         // What Plan 15 RETIRED: the panel's write actions. A human asks the agent, so
         // there is one authorization path and one place the act is recorded.

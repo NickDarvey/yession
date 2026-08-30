@@ -820,6 +820,10 @@ module View =
             | ToneBusy -> Style.toneBusy
             | ToneBad -> Style.toneBad
             | ToneMuted -> Style.toneMuted
+        let face (cell: QueryCell) =
+            match cell with
+            | CellStatus (_, tone) -> Style.queryValueIn (ink tone)
+            | _ -> Style.queryValue
         // A toned cell carries its tone as a data hook as well as an ink, because the ink
         // is the thing a test must not assert on — a class name is how the surface is
         // BUILT, and the hook is what it PROMISES.
@@ -827,59 +831,42 @@ module View =
             match cell with
             | CellStatus (_, tone) -> QueryTone.name tone
             | _ -> ""
+        // One record's pairs, on the aligned two-track grid (`Style.queryFields`). A `<dl>`
+        // and not a table: the lane is 280px, so there are no columns to compare down, and
+        // a description list is what says "these are facts about the subject above" to a
+        // screen reader without pretending to a structure the eye cannot see.
+        let pairs (row: (string * QueryCell) list) (columns: QueryColumn list) =
+            columns
+            |> List.collect (fun column ->
+                let cell = cellAt row column
+                [ html $"""<dt class="{Style.queryFieldLabel}">{column.Label}</dt>"""
+                  html $"""<dd class="{face cell}" data-query-cell="{column.Key}" data-query-tone="{toneHook cell}">{QueryCell.describe cell}</dd>""" ])
         match shape, value with
         | _, None -> html $"""<span class="{Style.small}" data-query-pending>…</span>"""
         | Value, Some (ValueOf cellValue) ->
-            let face =
-                match cellValue with
-                | CellStatus (_, tone) -> Style.queryTextIn (ink tone)
-                | _ -> Style.small
-            html $"""<span class="{face}" data-query-value data-query-tone="{toneHook cellValue}">{QueryCell.describe cellValue}</span>"""
+            html $"""<span class="{face cellValue}" data-query-value data-query-tone="{toneHook cellValue}">{QueryCell.describe cellValue}</span>"""
         | Fields columns, Some (FieldsOf fields) ->
-            let rows =
-                columns
-                |> List.map (fun column ->
-                    let cell = cellAt fields column
-                    let face =
-                        match cell with
-                        | CellStatus (_, tone) -> Style.queryTextIn (ink tone)
-                        | _ -> Style.small
-                    html $"""
-                        <div class="{Style.sideRow}" data-query-field="{column.Key}">
-                          <span class="{Style.statusFaint}">{column.Label}</span>
-                          <span class="{face}" data-query-tone="{toneHook cell}">{QueryCell.describe cell}</span>
-                        </div>""")
-            html $"""<div class="flex flex-col gap-1">{rows}</div>"""
+            // One record, and the whole answer — so every column is a labelled pair,
+            // including the first. There is no list to scan by name here.
+            html $"""<dl class="{Style.queryFields}">{pairs fields columns}</dl>"""
         | Rows _, Some (RowsOf []) ->
             html $"""<span class="{Style.small}" data-query-empty>(none)</span>"""
         | Rows columns, Some (RowsOf rows) ->
-            // A real `<table>` with `<th scope="col">`, because this IS tabular data and a
-            // grid of divs tells a screen reader nothing about which heading a value sits
-            // under (CLAUDE.md, UI baseline: structure).
-            let head =
-                columns
-                |> List.map (fun column ->
-                    html $"""<th scope="col" class="{Style.queryHeadCell}">{column.Label}</th>""")
-            let body =
-                rows
-                |> List.map (fun row ->
-                    let cells =
-                        columns
-                        |> List.map (fun column ->
-                            let cell = cellAt row column
-                            let face =
-                                match cell with
-                                | CellStatus (_, tone) -> Style.queryCellIn (ink tone)
-                                | _ -> Style.queryCell
-                            html $"""<td class="{face}" data-query-cell="{column.Key}" data-query-tone="{toneHook cell}">{QueryCell.describe cell}</td>""")
-                    html $"""<tr>{cells}</tr>""")
-            html $"""
-                <div class="{Style.queryTable}">
-                  <table class="w-full">
-                    <thead><tr>{head}</tr></thead>
-                    <tbody>{body}</tbody>
-                  </table>
-                </div>"""
+            // The first column NAMES the row (`QueryShape.Rows` says so), so it is drawn
+            // as the record's heading rather than as a pair — which is what makes a list
+            // of records scannable at all.
+            let name = List.tryHead columns
+            let rest = match columns with | [] -> [] | _ :: tail -> tail
+            let record index row =
+                let named = name |> Option.map (cellAt row) |> Option.defaultValue CellAbsent
+                let shell = if index = 0 then Style.queryRecord else Style.queryRecordAfter
+                let key = name |> Option.map (fun column -> column.Key) |> Option.defaultValue ""
+                html $"""
+                    <div class="{shell}" data-query-row="{QueryCell.describe named}">
+                      <span class="{Style.queryRecordName}" data-query-cell="{key}" data-query-tone="{toneHook named}">{QueryCell.describe named}</span>
+                      <dl class="{Style.queryFields}">{pairs row rest}</dl>
+                    </div>"""
+            html $"""<div class="{Style.queryRecords}">{rows |> List.mapi record}</div>"""
         // A value that does not match its declared shape never reaches here — the registry
         // refuses it Process-side — so this arm exists only to keep the match total.
         | _, Some _ -> html $"""<span class="{Style.small}" data-query-pending>…</span>"""

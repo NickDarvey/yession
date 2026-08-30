@@ -591,6 +591,46 @@ let tests =
                 Expect.isTrue (body.Contains sessionId) "and it knows the session whose shell pointed here"
             }
 
+        // The generated read surface (Plan 15) renders into a 280px lane — the settings face
+        // of a fixed column on desktop, that same column as a drawer on a phone. Whether an
+        // answer FITS that lane is a question no cheap test can ask: the markup carries every
+        // `data-query-cell` either way, and the tier that reads it cannot see that six of the
+        // nine sat past a horizontal scroll with a scrollbar over the last row. Which is what
+        // they did, for as long as a row was a table row.
+        //
+        // The long value is ARRANGED, not waited for. A live session's sandbox says `srt` and
+        // `not started`, and nothing that short overflows anything — the first version of this
+        // case asserted on whatever the session happened to answer, and stayed green with the
+        // old non-wrapping cell put back. What has to hold is that a value LONGER than the
+        // lane stays inside it, so the test writes one and then measures the real layout.
+        //
+        // Measured against each PANEL's own box rather than the pane's, so the settings face's
+        // slide-in (`Style.settingsLane1` translates the section 24px) cannot read as an
+        // overflow while it is still arriving.
+        testCaseAsync "a value longer than the lane stays inside it" <|
+            async {
+                do! awaitU (pageA.ClickAsync "[data-settings-toggle='open']")
+                // A session always has its default work sandbox, so this panel always has a
+                // record to write into — the arrangement cannot silently find nothing.
+                let! _ = await (pageA.WaitForSelectorAsync "[data-query-panel='work_sandboxes'] [data-query-row]")
+                let! overflowing =
+                    await (pageA.EvaluateAsync<string[]> ("""() => {
+                        const panel = document.querySelector('[data-query-panel="work_sandboxes"]')
+                        const long = 'a value far longer than two hundred and eighty pixels of column'
+                        panel.querySelectorAll('[data-query-cell]').forEach(el => { el.textContent = long })
+                        const edge = panel.getBoundingClientRect().right
+                        return [...panel.querySelectorAll('*')]
+                            .filter(el => el.scrollWidth > el.clientWidth + 1
+                                       || el.getBoundingClientRect().right > edge + 1)
+                            .map(el => `${el.tagName}: ${el.textContent.trim().slice(0, 40)}`)
+                    }"""))
+                Expect.isEmpty
+                    overflowing
+                    (sprintf "every part of an answer must stay inside its panel, these do not: %s"
+                        (String.Join (" | ", overflowing)))
+                do! awaitU (pageA.ClickAsync "[data-settings-toggle='close']")
+            }
+
         testCaseAsync "the doc store is keyed by session" <|
             async {
                 // The store is keyed by SESSION (embedded in the served page), not by address.
