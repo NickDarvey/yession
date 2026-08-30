@@ -187,7 +187,7 @@ let private frameChannel (dc: obj) (pc: obj) : FrameChannel<string> =
 /// One attempt at the transport, shaped as the resilience policy consumes it. What settles is
 /// a CHANNEL, not the WebRTC objects behind it: the peer connection never leaves this module,
 /// which is what lets everything above hold one idea of a transport.
-let private connectChannel (signalUrl: string) : Async<Result<FrameChannel<string>, App.ChannelFault>> =
+let private connectChannel (signalUrl: string) : Async<Result<FrameChannel<string>, Client.ChannelFault>> =
     async {
         let! reply = openDataChannel signalUrl channelOpenTimeoutMs |> Async.AwaitPromise
         // How long the handshake took, said out loud. Open latency is a property this repo has
@@ -198,8 +198,8 @@ let private connectChannel (signalUrl: string) : Async<Result<FrameChannel<strin
             sprintf "yession/link: handshake %s in %dms" (if reply.ok then "opened" else "failed") reply.tookMs)
         return
             if reply.ok then Ok (frameChannel reply.channel reply.connection)
-            elif reply.timedOut then Error App.ChannelTimedOut
-            else Error (App.ChannelUnreachable reply.detail)
+            elif reply.timedOut then Error Client.ChannelTimedOut
+            else Error (Client.ChannelUnreachable reply.detail)
     }
 
 // --- DOM shell -------------------------------------------------------------------------
@@ -592,14 +592,14 @@ let private absolute (relative: string) : string = jsNative
   e => ({ ok: false, status: 0, url: '', detail: String(e) }))""")>]
 let private fetchChunk (url: string) : JS.Promise<{| ok: bool; status: int; url: string; detail: string |}> = jsNative
 
-let private httpGet : App.HttpGet =
+let private httpGet : Client.HttpGet =
     fun url ->
         async {
             let! reply = fetchChunk url |> Async.AwaitPromise
             return
                 if reply.ok then Ok { Url = reply.url; Body = reply.detail }
-                elif reply.status = 0 then Error (App.HttpUnreachable reply.detail)
-                else Error (App.HttpStatus reply.status)
+                elif reply.status = 0 then Error (Client.HttpUnreachable reply.detail)
+                else Error (Client.HttpStatus reply.status)
         }
 
 // --- The history store (Plan 20, step 2): the Cache API, not the HTTP cache ---------------
@@ -628,7 +628,7 @@ let private openCache (name: string) : JS.Promise<obj> = jsNative
 // `keys()` answers in insertion order, and insertion order is NOT log order: `put` of an
 // address already kept deletes the entry and appends the new one, so an answer two tabs both
 // fetched moves to the end of the enumeration. The replay orders by what the answers hold
-// (`App.EventFetch.replay`); this is a bag of addresses and promises nothing about their order.
+// (`Client.EventFetch.replay`); this is a bag of addresses and promises nothing about their order.
 [<Emit("$0.keys().then(rs => rs.map(r => r.url))")>]
 let private cacheKeys (cache: obj) : JS.Promise<string array> = jsNative
 
@@ -667,9 +667,9 @@ let private requestPersistence () : JS.Promise<bool> = jsNative
 /// The history store for this session, or the one that keeps nothing when this context cannot
 /// have one. Total either way: a client with no store is exactly today's client, asking the
 /// network from its cursor.
-let private openHistoryCache () : Async<App.HistoryCache> =
+let private openHistoryCache () : Async<Client.HistoryCache> =
     async {
-        if not (canKeepHistory ()) then return App.HistoryCache.none
+        if not (canKeepHistory ()) then return Client.HistoryCache.none
         else
             let! cache = openCache (historyCacheName ()) |> Async.AwaitPromise
             let! _ = requestPersistence () |> Async.AwaitPromise
@@ -712,9 +712,9 @@ cache.match(url).then(async r => {
 let private transcriptRead (cache: obj) (url: string) : JS.Promise<(int * string) option> = jsNative
 
 /// Every terminal's store for this session, or the one that keeps nothing.
-let private openTranscriptCaches () : Async<App.TranscriptCaches> =
+let private openTranscriptCaches () : Async<Client.TranscriptCaches> =
     async {
-        if not (canKeepHistory ()) then return App.TranscriptCaches.none
+        if not (canKeepHistory ()) then return Client.TranscriptCaches.none
         else
             return
                 { For =
@@ -954,7 +954,7 @@ let private start () =
         // control holds this ref so everything else works before — and without — the
         // network (local first). `dispatchRef` lets the connection driver feed inbound
         // frames into the same Elmish loop the view dispatches into.
-        let mutable connectionRef : App.Connection option = None
+        let mutable connectionRef : Client.Connection option = None
         let mutable dispatchRef : (ClientMsg -> unit) = ignore
 
         // Rich-text editor mounts. `registry` resolves each body's live Y.XmlFragment (a
@@ -1435,7 +1435,7 @@ let private start () =
                 })
 
         // The side effects a template can't derive from the model. Send routes to the one
-        // implementation in `App.connect` (capture markdown, enqueue, seed the queue fragment).
+        // implementation in `Client.connect` (capture markdown, enqueue, seed the queue fragment).
         let actions : ViewActions =
             { SendDraft = fun peer -> connectionRef |> Option.iter (fun c -> c.SendDraft peer)
               DiscardDraft = fun peer -> connectionRef |> Option.iter (fun c -> c.DiscardDraft peer)
@@ -1621,7 +1621,7 @@ let private start () =
             let tab = ClientModel.tabTitle model
             if Browser.Dom.document.title <> tab then Browser.Dom.document.title <- tab
 
-        App.makeProgram doc initial
+        Client.makeProgram doc initial
         |> Program.withSetState setState
         |> Program.run
 
@@ -1659,10 +1659,10 @@ let private start () =
 
         let! historyCache = openHistoryCache ()
         let! transcriptCaches = openTranscriptCaches ()
-        do! App.EventFetch.replay historyCache (fun msg -> dispatchRef msg)
+        do! Client.EventFetch.replay historyCache (fun msg -> dispatchRef msg)
         // After the events, never beside them: a terminal exists because an event said so, and
         // records folded before that event has been folded have nowhere to land.
-        do! App.TranscriptFetch.replay transcriptCaches (fun msg -> dispatchRef msg)
+        do! Client.TranscriptFetch.replay transcriptCaches (fun msg -> dispatchRef msg)
 
         // Authorization by renavigation: probe `/me` for a peer token. 401 -> bounce
         // through `/login` (code + PKCE via the Manager) and land back on this shell,
@@ -1672,7 +1672,7 @@ let private start () =
         // says why it is alone.
         let! probe = fetchMe (SessionRoute.relative Me) |> Async.AwaitPromise
         if not probe.reachable then
-            dispatchRef (ConnectFailedMsg (App.ChannelFault.describe (App.ChannelUnreachable probe.detail)))
+            dispatchRef (ConnectFailedMsg (Client.ChannelFault.describe (Client.ChannelUnreachable probe.detail)))
         elif not probe.authorized then
             // The peer id rides the login bounce so the Manager can witness which peer
             // signed in for this session (Plan 07 — peer-scoped secrets).
@@ -1696,17 +1696,17 @@ let private start () =
             // clean).
             //
             // Both resilience policies are composed HERE, at the transport, and nowhere else:
-            // `App.connect` is handed a feed that has already spent its retries, so the read
+            // `Client.connect` is handed a feed that has already spent its retries, so the read
             // loop only ever sees a settled outcome and the application code holds no notion of
             // retrying, backoff, or attempt counts. Interim progress is the policy's to report,
             // which is the one thing a settled outcome cannot carry.
             let feed =
                 // `storing` sits UNDER the policy, so only a settled answer is kept — a
                 // retried fetch stores once, and a failed one stores nothing.
-                App.EventFetch.overHttp (App.EventFetch.storing historyCache httpGet) SessionRoute.relative None
+                Client.EventFetch.overHttp (Client.EventFetch.storing historyCache httpGet) SessionRoute.relative None
                 |> Resilience.Policy.guard
-                    (App.EventFetch.policy Resilience.Policy.sleep jsRandom (fun attempt ->
-                        App.EventFetch.retrying attempt
+                    (Client.EventFetch.policy Resilience.Policy.sleep jsRandom (fun attempt ->
+                        Client.EventFetch.retrying attempt
                         |> Option.iter (fun health -> dispatchRef (EventFeedMsg health))))
             // Terminal history rides the same HTTP leg, by the same cursor, for the same
             // payoff: a reload replays a terminal out of this client's own store and only what
@@ -1714,9 +1714,9 @@ let private start () =
             // feed, a failed read here is re-armed by the next record or availability hint
             // that arrives, so there is nothing for a retry schedule to add.
             let transcripts =
-                App.TranscriptFetch.overHttp transcriptCaches httpGet SessionRoute.relative None
+                Client.TranscriptFetch.overHttp transcriptCaches httpGet SessionRoute.relative None
             let options =
-                { App.ConnectOptions.defaults with
+                { Client.ConnectOptions.defaults with
                     FetchEvents = Some feed
                     FetchTranscripts = Some transcripts
                     // A terminal's screen seeds this client's emulator. The transcript stays
@@ -1737,26 +1737,26 @@ let private start () =
                             |> Option.defaultValue 0) }
             let openChannel =
                 Resilience.Policy.guard
-                    (App.SessionChannel.policy Resilience.Policy.sleep jsRandom)
+                    (Client.SessionChannel.policy Resilience.Policy.sleep jsRandom)
                     (fun () -> connectChannel (absolute (SessionRoute.relative Signal)))
 
             // The session leg. The RULES — announce, open, serve, and come back only for a
-            // session that was accepted — are `App.SessionLifecycle`; this supplies the
+            // session that was accepted — are `Client.SessionLifecycle`; this supplies the
             // browser's four ports and nothing else.
             do!
-                App.SessionLifecycle.run
-                    (App.SessionLifecycle.supervision jsRandom)
+                Client.SessionLifecycle.run
+                    (Client.SessionLifecycle.supervision jsRandom)
                     { Open = openChannel
                       Serve =
                         fun resumeAfter dispatch carrier ->
                             async {
                                 // Supervised at the transport boundary, exactly as the event
                                 // feed's resilience policy is composed here and nowhere else:
-                                // `App.connect` receives a channel that already knows how to
+                                // `Client.connect` receives a channel that already knows how to
                                 // notice its own death, and holds no notion of heartbeats.
                                 let channel = Link.supervise Link.LinkPolicy.shipped carrier
                                 let connection =
-                                    App.connect
+                                    Client.connect
                                         { options with ResumeAfter = resumeAfter }
                                         doc
                                         registry

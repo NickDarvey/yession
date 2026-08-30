@@ -58,7 +58,7 @@ let tests =
                 let peerDoc = Y.Doc.Create ()
                 peerDoc.clientID <- 7.0
                 let peerRegistry = BodyRegistry peerDoc
-                let peerRunner = Harness.run (App.makeProgram peerDoc (ClientModel.init (peer "ada" "Ada")))
+                let peerRunner = Harness.run (Client.makeProgram peerDoc (ClientModel.init (peer "ada" "Ada")))
                 let peerId = (peerRunner.Model ()).Peer.PeerId
                 Body.authorAs (QueueId.create "q-1" |> expect) peerRegistry peerRunner peerId "trigger a turn"
                 Body.send peerRegistry peerRunner peerId |> ignore

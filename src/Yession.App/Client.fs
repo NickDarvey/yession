@@ -12,7 +12,7 @@ open Yession.Domain.Collab
 /// the Ylmish sync boundary, and the wiring of a connected `FrameChannel` to that
 /// document. The Elmish model stays the single typed snapshot; only `ClientModel.Synced`
 /// crosses into the doc (docs/design.md §1 "Ylmish is the sync boundary").
-module App =
+module Client =
 
     /// Decode direction: read the synced state out of the doc, carrying every other
     /// model field through untouched (`Decode.ask` supplies the current model, so

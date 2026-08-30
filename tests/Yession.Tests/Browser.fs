@@ -1894,7 +1894,7 @@ let private printedInTerminal = "printed-before-the-session-died"
 ///
 /// On screen is not kept. The live leg puts a record in the model the moment it arrives, and
 /// the SAME record triggers a separate HTTP read that is what writes it to the store
-/// (`App.fs`: `TerminalRecordMsg` / `EventsAvailable` -> fetch -> `cache.Write`), started with
+/// (`Client.fs`: `TerminalRecordMsg` / `EventsAvailable` -> fetch -> `cache.Write`), started with
 /// `Async.StartImmediate` and awaited by nothing. So there is a window in which the assertion
 /// these cases make about the LIVE page is already true and the store behind the reload is
 /// still empty — measured at 1 run in 3 on an idle box, and wider on a loaded CI runner, where

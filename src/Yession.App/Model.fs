@@ -1509,7 +1509,7 @@ module ClientModel =
             // wrote it — and it lands at the queue tail. Two peers sending this draft
             // concurrently write the same key, so the replicas merge to one entry instead of
             // queueing the message twice. The body fragment's content is carried over
-            // imperatively (`App.connect`'s SendDraft), not in the model.
+            // imperatively (`Client.connect`'s SendDraft), not in the model.
             match Map.tryFind peerId model.Synced.Drafts with
             | Some draft when not (Map.containsKey draft.QueueId model.Synced.Queue) ->
                 let entry =
@@ -1672,7 +1672,7 @@ module ClientModel =
             // the slot's AUTHOR rather than to whoever pressed send. Two peers sending the
             // same slot write the same key, so the replicas merge to one entry instead of
             // running the command twice. The command TEXT is carried over imperatively in
-            // the same transaction (`App.connect`'s SendTerminalDraft) — shared types
+            // the same transaction (`Client.connect`'s SendTerminalDraft) — shared types
             // cannot be re-parented.
             match Map.tryFind (terminal, author) model.Synced.TerminalDrafts with
             | Some draft when not (Map.containsKey draft.QueueId model.Synced.Pending) ->

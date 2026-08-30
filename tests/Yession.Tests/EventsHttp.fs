@@ -37,7 +37,7 @@ type private RedirectReply =
 [<Emit("fetch($0, { redirect: 'manual' }).then(r => ({ status: r.status, cacheControl: r.headers.get('cache-control') || '', location: r.headers.get('location') || '' }))")>]
 let private httpGetRaw (url: string) : JS.Promise<RedirectReply> = Fable.Core.Util.jsNative
 
-// The chunk GET shaped as `App.HttpGet` is — total, with the status on a refusal. Identical
+// The chunk GET shaped as `Client.HttpGet` is — total, with the status on a refusal. Identical
 // to the browser's port (app/browser/Browser.fs); failure classification is covered in
 // Resilience.fs, so here it only has to be the real thing.
 [<Emit("""fetch($0).then(
@@ -45,14 +45,14 @@ let private httpGetRaw (url: string) : JS.Promise<RedirectReply> = Fable.Core.Ut
   e => ({ ok: false, status: 0, url: '', detail: String(e) }))""")>]
 let private fetchChunk (url: string) : JS.Promise<{| ok: bool; status: int; url: string; detail: string |}> = Fable.Core.Util.jsNative
 
-let private chunkGet : App.HttpGet =
+let private chunkGet : Client.HttpGet =
     fun url ->
         async {
             let! reply = fetchChunk url |> Async.AwaitPromise
             return
                 if reply.ok then Ok { Url = reply.url; Body = reply.detail }
-                elif reply.status = 0 then Error (App.HttpUnreachable reply.detail)
-                else Error (App.HttpStatus reply.status)
+                elif reply.status = 0 then Error (Client.HttpUnreachable reply.detail)
+                else Error (Client.HttpStatus reply.status)
         }
 
 let private endpointTests =
@@ -141,9 +141,9 @@ let private endpointTests =
                 let baseUrl = sprintf "http://127.0.0.1:%d" h.Port
                 let signalUrl = SessionRoute.at baseUrl Signal
                 let options =
-                    { App.ConnectOptions.defaults with
+                    { Client.ConnectOptions.defaults with
                         FetchEvents =
-                            Some (App.EventFetch.overHttp chunkGet (SessionRoute.at baseUrl) (Some mintedToken)) }
+                            Some (Client.EventFetch.overHttp chunkGet (SessionRoute.at baseUrl) (Some mintedToken)) }
                 let! a = connectClientWith options signalUrl mintedToken "ada" "Ada"
 
                 do! compose a a.Hello.PeerId "fetched over http"
@@ -169,9 +169,9 @@ let private storeOf (entries: (string * string) list) =
     // Type-qualified: `Read` is a field name several records in the domain share, and an
     // unqualified one would resolve to whichever was declared last. `HistoryCache` carries
     // `RequireQualifiedAccess`, so the record TYPE has to be named, not just its module.
-    { App.HistoryCache.Stored = fun () -> async.Return (kept |> Seq.map fst |> List.ofSeq)
-      App.HistoryCache.Read = fun url -> async.Return (kept |> Seq.tryPick (fun (u, body) -> if u = url then Some body else None))
-      App.HistoryCache.Write = fun url body -> async { kept.Add (url, body) } }
+    { Client.HistoryCache.Stored = fun () -> async.Return (kept |> Seq.map fst |> List.ofSeq)
+      Client.HistoryCache.Read = fun url -> async.Return (kept |> Seq.tryPick (fun (u, body) -> if u = url then Some body else None))
+      Client.HistoryCache.Write = fun url body -> async { kept.Add (url, body) } }
 
 /// One kept answer: the JSONL the server served for offsets [first, last].
 let private answerOf (first: int64) (count: int) =
@@ -198,7 +198,7 @@ let private storeTests =
             async {
                 let store = storeOf [ answerOf 0L 3; answerOf 3L 2 ]
                 let seen = ResizeArray ()
-                do! App.EventFetch.replay store seen.Add
+                do! Client.EventFetch.replay store seen.Add
                 let offsets =
                     seen
                     |> Seq.collect (fun msg ->
@@ -217,7 +217,7 @@ let private storeTests =
                 // about the one leg that is down.
                 let store = storeOf [ answerOf 0L 2 ]
                 let seen = ResizeArray ()
-                do! App.EventFetch.replay store seen.Add
+                do! Client.EventFetch.replay store seen.Add
                 let stalled = { ClientModel.init { PeerId = PeerId.create "p" |> expect; DisplayName = "P" } with
                                   EventConsumer =
                                     { (ClientModel.init { PeerId = PeerId.create "p" |> expect; DisplayName = "P" }).EventConsumer with
@@ -243,7 +243,7 @@ let private storeTests =
                 // called every event before it missing, on a client that held them all.
                 let store = storeOf [ answerOf 3L 2; answerOf 0L 3 ]
                 let seen = ResizeArray ()
-                do! App.EventFetch.replay store seen.Add
+                do! Client.EventFetch.replay store seen.Add
                 let offsets =
                     seen
                     |> Seq.collect (fun msg ->
@@ -264,7 +264,7 @@ let private storeTests =
                 // so the walk stops AT the hole rather than looking like the end of history.
                 let store = storeOf [ answerOf 0L 2; answerOf 5L 2 ]
                 let seen = ResizeArray ()
-                do! App.EventFetch.replay store seen.Add
+                do! Client.EventFetch.replay store seen.Add
                 let folded =
                     seen
                     |> Seq.collect (fun msg ->
@@ -283,7 +283,7 @@ let private storeTests =
                 // the first page repaired the thing it was complaining about.
                 let store = storeOf [ answerOf 0L 2; answerOf 5L 2 ]
                 let seen = ResizeArray ()
-                do! App.EventFetch.replay store seen.Add
+                do! Client.EventFetch.replay store seen.Add
                 Expect.isFalse
                     (seen |> Seq.exists (function EventFeedMsg _ -> true | _ -> false))
                     "a local read reports no feed health at all"
@@ -302,7 +302,7 @@ let private storeTests =
                 // is being filled, and what is left to arrive is ordinary catch-up.
                 let store = storeOf [ answerOf 0L 2; answerOf 5L 2 ]
                 let seen = ResizeArray ()
-                do! App.EventFetch.replay store seen.Add
+                do! Client.EventFetch.replay store seen.Add
                 let model =
                     seen
                     |> Seq.fold
@@ -313,9 +313,9 @@ let private storeTests =
                     (Some 5L)
                     "the replay left the hole on the model"
                 let fill =
-                    match App.EventFetch.decodeLines (snd (answerOf 2L 3)) with
+                    match Client.EventFetch.decodeLines (snd (answerOf 2L 3)) with
                     | Ok envelopes -> envelopes
-                    | Error fault -> failwith (App.FeedFault.describe fault)
+                    | Error fault -> failwith (Client.FeedFault.describe fault)
                 let filled =
                     ClientModel.update
                         (EventsPageMsg
@@ -332,9 +332,9 @@ let private storeTests =
                 // would key history under an address whose meaning changes, which is the bug
                 // the whole scheme exists to avoid.
                 let store = storeOf []
-                let answering : App.HttpGet =
+                let answering : Client.HttpGet =
                     fun _ -> async { return Ok { Url = "events/0-41"; Body = snd (answerOf 0L 2) } }
-                let storing = App.EventFetch.storing store answering
+                let storing = Client.EventFetch.storing store answering
                 let! _ = storing "events/after/99"
                 let! kept = store.Stored ()
                 Expect.equal kept [ "events/0-41" ] "the resolved range is the key"

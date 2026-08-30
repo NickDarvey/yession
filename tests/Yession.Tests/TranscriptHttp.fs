@@ -219,7 +219,7 @@ let private storeOf (entries: (TerminalId * (string * int * string) list) list) 
             let answers = ResizeArray ()
             kept.[TerminalId.value terminal] <- answers
             answers
-    { App.For =
+    { Client.For =
         fun terminal ->
             let answers = forTerminal terminal
             // Annotated, because `Stored`/`Read`/`Write` are field names both history stores
@@ -231,8 +231,8 @@ let private storeOf (entries: (TerminalId * (string * int * string) list) list) 
                          async.Return (
                              answers
                              |> Seq.tryPick (fun (u, first, body) -> if u = url then Some (first, body) else None))
-                   Write = fun url first body -> async { answers.Add (url, first, body) } } : App.TranscriptCache)
-      App.Kept = fun () -> async.Return (entries |> List.map fst) } : App.TranscriptCaches
+                   Write = fun url first body -> async { answers.Add (url, first, body) } } : Client.TranscriptCache)
+      Client.Kept = fun () -> async.Return (entries |> List.map fst) } : Client.TranscriptCaches
 
 /// One kept answer: the JSONL the server served for lines [first, first + count - 1], and the
 /// address it came back from. The header goes at line 0, exactly as the recording has it.
@@ -263,7 +263,7 @@ let private storeTests =
             async {
                 let store = storeOf [ terminal, [ answerOf 0 3; answerOf 3 2 ] ]
                 let seen = ResizeArray ()
-                do! App.TranscriptFetch.replay store seen.Add
+                do! Client.TranscriptFetch.replay store seen.Add
                 // Line 0 is the header and is no record, so the records are lines 1..4.
                 Expect.equal (recordsIn seen terminal) [ 1; 2; 3; 4 ] "every kept line, once, in recording order"
             }
@@ -274,7 +274,7 @@ let private storeTests =
                 // terminal actually was, and they live on line 0 alone.
                 let store = storeOf [ terminal, [ answerOf 0 3 ] ]
                 let seen = ResizeArray ()
-                do! App.TranscriptFetch.replay store seen.Add
+                do! Client.TranscriptFetch.replay store seen.Add
                 let header =
                     seen |> Seq.tryPick (fun msg ->
                         match msg with
@@ -287,7 +287,7 @@ let private storeTests =
             async {
                 let store = storeOf [ terminal, [ answerOf 0 3; answerOf 3 2 ] ]
                 let seen = ResizeArray ()
-                do! App.TranscriptFetch.replay store seen.Add
+                do! Client.TranscriptFetch.replay store seen.Add
                 let readThrough =
                     seen |> Seq.fold (fun acc msg ->
                         match msg with
@@ -305,7 +305,7 @@ let private storeTests =
                 // and that — never the store's order — is what the walk goes by.
                 let store = storeOf [ terminal, [ answerOf 3 2; answerOf 0 3 ] ]
                 let seen = ResizeArray ()
-                do! App.TranscriptFetch.replay store seen.Add
+                do! Client.TranscriptFetch.replay store seen.Add
                 Expect.equal (recordsIn seen terminal) [ 1; 2; 3; 4 ] "every kept line, once, in recording order"
             }
 
@@ -315,7 +315,7 @@ let private storeTests =
                 // would advance the read position past lines nothing will ever offer again.
                 let store = storeOf [ terminal, [ answerOf 0 3; answerOf 8 2 ] ]
                 let seen = ResizeArray ()
-                do! App.TranscriptFetch.replay store seen.Add
+                do! Client.TranscriptFetch.replay store seen.Add
                 Expect.equal (recordsIn seen terminal) [ 1; 2 ] "everything up to the hole, and nothing past it"
             }
 
@@ -329,7 +329,7 @@ let private storeTests =
                         [ terminal, [ answerOf 0 3; answerOf 8 2 ]
                           other, [ answerOf 0 3 ] ]
                 let seen = ResizeArray ()
-                do! App.TranscriptFetch.replay store seen.Add
+                do! Client.TranscriptFetch.replay store seen.Add
                 Expect.equal (recordsIn seen terminal) [ 1; 2 ] "the holed terminal stops at its hole"
                 Expect.equal (recordsIn seen other) [ 1; 2 ] "and the other one is folded in full"
             }
@@ -340,13 +340,13 @@ let private storeTests =
                 // on is kept beside the bytes, because a transcript line cannot carry its own
                 // index and the address must never be parsed for one.
                 let store = storeOf []
-                let answering : App.HttpGet =
+                let answering : Client.HttpGet =
                     fun _ ->
                         async {
                             let url, _, body = answerOf 5 2
                             return Ok { Url = url; Body = body }
                         }
-                let feed = App.TranscriptFetch.overHttp store answering (fun r -> SessionRoute.relative r) None
+                let feed = Client.TranscriptFetch.overHttp store answering (fun r -> SessionRoute.relative r) None
                 let! _ = feed terminal 5
                 let! cache = store.For terminal
                 let! kept = cache.Stored ()
@@ -361,9 +361,9 @@ let private storeTests =
                 // no redirect happened. Keeping it would put an empty entry in the store that
                 // the replay would then read as a hole in the recording.
                 let store = storeOf []
-                let answering : App.HttpGet =
+                let answering : Client.HttpGet =
                     fun url -> async { return Ok { Url = url; Body = "" } }
-                let feed = App.TranscriptFetch.overHttp store answering (fun r -> SessionRoute.relative r) None
+                let feed = Client.TranscriptFetch.overHttp store answering (fun r -> SessionRoute.relative r) None
                 let! _ = feed terminal 7
                 let! cache = store.For terminal
                 let! kept = cache.Stored ()

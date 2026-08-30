@@ -7,7 +7,7 @@ module Yession.Tests.Resilience
 // is down" is a value the test chooses rather than a server it has to kill and a race it has
 // to win. Everything on either side of that function is production code — the real
 // `EventFetch.overHttp` (URL scheme, chunk math, JSONL codec), the real resilience policy
-// that ships in the browser, the real `App.connect` read loop, the real `ClientModel`, and
+// that ships in the browser, the real `Client.connect` read loop, the real `ClientModel`, and
 // the real Session Process host on the other end of an in-memory channel. That combination —
 // durable history over HTTP, collaborative state over the data channel — is precisely the one
 // the browser runs, and the one no existing suite covered.
@@ -85,7 +85,7 @@ let private scheduleTests =
 // --- The interpreter ---------------------------------------------------------------------
 
 /// An operation that fails `failures` times with `fault`, then succeeds. Counts its calls.
-let private flaky (calls: int ref) (failures: int) (fault: App.FeedFault) =
+let private flaky (calls: int ref) (failures: int) (fault: Client.FeedFault) =
     fun (_: unit) ->
         async {
             calls.Value <- calls.Value + 1
@@ -98,14 +98,14 @@ let private guardTests =
             async {
                 let calls = ref 0
                 let delays = ResizeArray<TimeSpan> ()
-                let observed = ResizeArray<Resilience.Attempt<App.FeedFault>> ()
-                let policy : Resilience.Policy<App.FeedFault> =
+                let observed = ResizeArray<Resilience.Attempt<Client.FeedFault>> ()
+                let policy : Resilience.Policy<Client.FeedFault> =
                     { Schedule = Resilience.Schedule.exponential (ms 250.0) 2.0 (ms 10000.0) 5
-                      Retryable = App.FeedFault.isTransient
+                      Retryable = Client.FeedFault.isTransient
                       Sleep = recordingSleep delays
                       Observe = observed.Add }
                 let! result =
-                    Resilience.Policy.guard policy (flaky calls 3 (App.FeedUnreachable "ECONNREFUSED")) ()
+                    Resilience.Policy.guard policy (flaky calls 3 (Client.FeedUnreachable "ECONNREFUSED")) ()
                 Expect.equal result (Ok "served") "the fourth attempt got through"
                 Expect.equal calls.Value 4 "three failures, then one success — no extra attempts"
                 Expect.equal
@@ -122,15 +122,15 @@ let private guardTests =
             async {
                 let calls = ref 0
                 let delays = ResizeArray<TimeSpan> ()
-                let observed = ResizeArray<Resilience.Attempt<App.FeedFault>> ()
-                let policy : Resilience.Policy<App.FeedFault> =
+                let observed = ResizeArray<Resilience.Attempt<Client.FeedFault>> ()
+                let policy : Resilience.Policy<Client.FeedFault> =
                     { Schedule = Resilience.Schedule.constant (ms 10.0) 5
-                      Retryable = App.FeedFault.isTransient
+                      Retryable = Client.FeedFault.isTransient
                       Sleep = recordingSleep delays
                       Observe = observed.Add }
                 // 401 is a decision, not a hiccup: retrying it only hammers the session.
-                let! result = Resilience.Policy.guard policy (flaky calls 99 (App.FeedRefused 401)) ()
-                Expect.equal result (Error (App.FeedRefused 401)) "the fault is returned, unchanged"
+                let! result = Resilience.Policy.guard policy (flaky calls 99 (Client.FeedRefused 401)) ()
+                Expect.equal result (Error (Client.FeedRefused 401)) "the fault is returned, unchanged"
                 Expect.equal calls.Value 1 "an unhandled fault is never retried"
                 Expect.equal delays.Count 0 "and never waited on"
                 Expect.equal [ for a in observed -> a.Retrying ] [ None ] "observed once, as final"
@@ -139,13 +139,13 @@ let private guardTests =
         testCaseAsync "once the schedule retires, the last error is returned — never a fake success" <|
             async {
                 let calls = ref 0
-                let policy : Resilience.Policy<App.FeedFault> =
+                let policy : Resilience.Policy<Client.FeedFault> =
                     { Schedule = Resilience.Schedule.constant (ms 10.0) 2
-                      Retryable = App.FeedFault.isTransient
+                      Retryable = Client.FeedFault.isTransient
                       Sleep = recordingSleep (ResizeArray ())
                       Observe = ignore }
-                let! result = Resilience.Policy.guard policy (flaky calls 99 (App.FeedUnreachable "offline")) ()
-                Expect.equal result (Error (App.FeedUnreachable "offline")) "the failure survives as a failure"
+                let! result = Resilience.Policy.guard policy (flaky calls 99 (Client.FeedUnreachable "offline")) ()
+                Expect.equal result (Error (Client.FeedUnreachable "offline")) "the failure survives as a failure"
                 Expect.equal calls.Value 3 "one attempt plus the schedule's two retries — bounded"
             }
     ]
@@ -160,52 +160,52 @@ let private guardTests =
 let private realFetch (url: string) : JS.Promise<{| ok: bool; status: int; url: string; detail: string |}> =
     Fable.Core.Util.jsNative
 
-let private realHttpGet : App.HttpGet =
+let private realHttpGet : Client.HttpGet =
     fun url ->
         async {
             let! reply = realFetch url |> Async.AwaitPromise
             return
                 if reply.ok then Ok { Url = reply.url; Body = reply.detail }
-                elif reply.status = 0 then Error (App.HttpUnreachable reply.detail)
-                else Error (App.HttpStatus reply.status)
+                elif reply.status = 0 then Error (Client.HttpUnreachable reply.detail)
+                else Error (Client.HttpStatus reply.status)
         }
 
 let private classificationTests =
     testList "HTTP faults are classified, not flattened" [
         testCaseAsync "a transport failure is an unreachable feed, not an empty log" <|
             async {
-                let get : App.HttpGet = fun _ -> async { return Error (App.HttpUnreachable "ECONNREFUSED") }
-                let! result = App.EventFetch.overHttp get SessionRoute.relative None None
+                let get : Client.HttpGet = fun _ -> async { return Error (Client.HttpUnreachable "ECONNREFUSED") }
+                let! result = Client.EventFetch.overHttp get SessionRoute.relative None None
                 Expect.equal
                     result
-                    (Error (App.FeedUnreachable "ECONNREFUSED"))
+                    (Error (Client.FeedUnreachable "ECONNREFUSED"))
                     "the old design returned an empty FINAL page here, which reads as 'nothing new'"
                 Expect.isTrue
-                    (App.FeedFault.isTransient (App.FeedUnreachable "ECONNREFUSED"))
+                    (Client.FeedFault.isTransient (Client.FeedUnreachable "ECONNREFUSED"))
                     "and it is worth retrying"
             }
 
         testCaseAsync "a refusal keeps its status, so authorization and overload differ" <|
             async {
-                let refusing (status: int) : App.HttpGet = fun _ -> async { return Error (App.HttpStatus status) }
-                let! unauthorized = App.EventFetch.overHttp (refusing 401) SessionRoute.relative None None
-                let! overloaded = App.EventFetch.overHttp (refusing 503) SessionRoute.relative None None
-                Expect.equal unauthorized (Error (App.FeedRefused 401)) "401 survives as 401"
-                Expect.equal overloaded (Error (App.FeedRefused 503)) "503 survives as 503"
-                Expect.isFalse (App.FeedFault.isTransient (App.FeedRefused 401)) "retrying cannot fix a 401"
-                Expect.isTrue (App.FeedFault.isTransient (App.FeedRefused 503)) "a struggling session is worth waiting for"
-                Expect.equal (App.FeedFault.describe (App.FeedRefused 401)) "not authorized" "and it says so in the UI"
+                let refusing (status: int) : Client.HttpGet = fun _ -> async { return Error (Client.HttpStatus status) }
+                let! unauthorized = Client.EventFetch.overHttp (refusing 401) SessionRoute.relative None None
+                let! overloaded = Client.EventFetch.overHttp (refusing 503) SessionRoute.relative None None
+                Expect.equal unauthorized (Error (Client.FeedRefused 401)) "401 survives as 401"
+                Expect.equal overloaded (Error (Client.FeedRefused 503)) "503 survives as 503"
+                Expect.isFalse (Client.FeedFault.isTransient (Client.FeedRefused 401)) "retrying cannot fix a 401"
+                Expect.isTrue (Client.FeedFault.isTransient (Client.FeedRefused 503)) "a struggling session is worth waiting for"
+                Expect.equal (Client.FeedFault.describe (Client.FeedRefused 401)) "not authorized" "and it says so in the UI"
             }
 
         testCaseAsync "a chunk that will not decode is corruption — a value, not a thrown page" <|
             async {
-                let get : App.HttpGet =
+                let get : Client.HttpGet =
                     fun url -> async { return Ok { Url = url; Body = "{\"not\":\"an envelope\"}" } }
-                match! App.EventFetch.overHttp get SessionRoute.relative None None with
-                | Error (App.FeedCorrupt _) -> ()
+                match! Client.EventFetch.overHttp get SessionRoute.relative None None with
+                | Error (Client.FeedCorrupt _) -> ()
                 | other -> failwithf "expected FeedCorrupt, got %A" other
                 Expect.isFalse
-                    (App.FeedFault.isTransient (App.FeedCorrupt "x"))
+                    (Client.FeedFault.isTransient (Client.FeedCorrupt "x"))
                     "a bad line will not decode next time either"
             }
 
@@ -214,8 +214,8 @@ let private classificationTests =
                 // The one thing a fake `HttpGet` cannot prove: that a genuine `fetch` rejection
                 // maps to `FeedUnreachable`. Port 1 has no listener, so this is a real
                 // connection failure, with no server to start or stop.
-                match! App.EventFetch.overHttp realHttpGet (SessionRoute.at "http://127.0.0.1:1") None None with
-                | Error (App.FeedUnreachable _) -> ()
+                match! Client.EventFetch.overHttp realHttpGet (SessionRoute.at "http://127.0.0.1:1") None None with
+                | Error (Client.FeedUnreachable _) -> ()
                 | other -> failwithf "a dead port must be an unreachable feed, got %A" other
             }
     ]
@@ -227,7 +227,7 @@ let private classificationTests =
 /// (app/Host.fs `eventsEndpoint`); when down it fails the way an unreachable session does.
 type private Socket =
     { /// The port `EventFetch.overHttp` is built over.
-      Get : App.HttpGet
+      Get : Client.HttpGet
       /// Bring the feed back up.
       GoOnline : unit -> unit
       /// Every request ever made, so a spin cannot hide.
@@ -252,7 +252,7 @@ let private fakeSocket (host: Host.SessionHost) : Socket =
                 if attempts > spinLimit then
                     failwithf "the event feed spun: %d requests for one session's history" attempts
                 if offline then
-                    return Error (App.HttpUnreachable "ECONNREFUSED")
+                    return Error (Client.HttpUnreachable "ECONNREFUSED")
                 else
                     // `overHttp` builds `<base>/events` or `<base>/events/after/{n}`. The
                     // real server answers a cursor with a redirect to the range it chose;
@@ -279,17 +279,17 @@ let private fakeSocket (host: Host.SessionHost) : Socket =
 /// interim reports dispatched into the model exactly as the browser wires them. `retries`
 /// collects those reports so the test can assert the retry behaviour it cannot see from the
 /// model alone (the model only ever holds the latest).
-let private connectOverFeed (get: App.HttpGet) (retries: ResizeArray<FeedHealth>) =
+let private connectOverFeed (get: Client.HttpGet) (retries: ResizeArray<FeedHealth>) =
     connectInMemoryClientVia (fun dispatch ->
         let feed =
-            App.EventFetch.overHttp get SessionRoute.relative None
+            Client.EventFetch.overHttp get SessionRoute.relative None
             |> Resilience.Policy.guard
-                (App.EventFetch.policy (recordingSleep (ResizeArray ())) noJitter (fun attempt ->
-                    App.EventFetch.retrying attempt
+                (Client.EventFetch.policy (recordingSleep (ResizeArray ())) noJitter (fun attempt ->
+                    Client.EventFetch.retrying attempt
                     |> Option.iter (fun health ->
                         retries.Add health
                         dispatch (EventFeedMsg health))))
-        { App.ConnectOptions.defaults with FetchEvents = Some feed })
+        { Client.ConnectOptions.defaults with FetchEvents = Some feed })
 
 let private stalled (m: ClientModel) =
     match m.EventConsumer.Feed with
@@ -380,11 +380,11 @@ let private feedFailureTests =
             async {
                 let! host = Host.start (SessionId.create "feed-unauthorized" |> expect) 0
                 let mutable attempts = 0
-                let refusing : App.HttpGet =
+                let refusing : Client.HttpGet =
                     fun _ ->
                         async {
                             attempts <- attempts + 1
-                            return Error (App.HttpStatus 401)
+                            return Error (Client.HttpStatus 401)
                         }
                 let retries = ResizeArray<FeedHealth> ()
                 let! ada = connectOverFeed refusing retries host "ada" "Ada"
@@ -413,18 +413,18 @@ let private channelTests =
                 // "connecting" with nothing to say. Now it is a fault, and the policy bounds
                 // how long the client spends hoping.
                 let attempts = ref 0
-                let policy = App.SessionChannel.policy (recordingSleep (ResizeArray ())) noJitter
+                let policy = Client.SessionChannel.policy (recordingSleep (ResizeArray ())) noJitter
                 let! result =
                     Resilience.Policy.guard policy (fun () ->
                         async {
                             attempts.Value <- attempts.Value + 1
-                            return Error App.ChannelTimedOut
+                            return Error Client.ChannelTimedOut
                         })
                     <| ()
-                Expect.equal result (Error App.ChannelTimedOut) "the attempt settles as a failure"
+                Expect.equal result (Error Client.ChannelTimedOut) "the attempt settles as a failure"
                 Expect.equal attempts.Value 5 "one attempt plus the policy's four retries"
                 Expect.equal
-                    (App.ChannelFault.describe App.ChannelTimedOut)
+                    (Client.ChannelFault.describe Client.ChannelTimedOut)
                     "the session did not answer"
                     "and it says something a person can act on"
             }
@@ -434,12 +434,12 @@ let private channelTests =
                 // A restarting Session Process is the ordinary case, and every fault this port
                 // produces means "not there YET" — which is why the policy retries all of them.
                 let attempts = ref 0
-                let policy = App.SessionChannel.policy (recordingSleep (ResizeArray ())) noJitter
+                let policy = Client.SessionChannel.policy (recordingSleep (ResizeArray ())) noJitter
                 let! result =
                     Resilience.Policy.guard policy (fun () ->
                         async {
                             attempts.Value <- attempts.Value + 1
-                            if attempts.Value < 3 then return Error (App.ChannelUnreachable "signalling refused: 502")
+                            if attempts.Value < 3 then return Error (Client.ChannelUnreachable "signalling refused: 502")
                             else return Ok "channel"
                         })
                     <| ()
@@ -667,12 +667,12 @@ let private startLifecycle (host: Host.SessionHost) (token: string) (id: string)
     let doc = Y.Doc.Create ()
     let local = peer id name
     let registry = BodyRegistry doc
-    let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
+    let runner = Harness.run (Client.makeProgram doc (ClientModel.init local))
     let hello = { PeerId = local.PeerId; DisplayName = name; Token = token }
     let opens = ref 0
     let resumes = ref []
     let serverEnd : FrameChannel<string> option ref = ref None
-    let live : App.Connection option ref = ref None
+    let live : Client.Connection option ref = ref None
     // The link is supervised here exactly as the browser supervises it, on a clock this test
     // owns — so a half-open transport is noticed by the production rule, on demand.
     let clock = TestClock ()
@@ -682,7 +682,7 @@ let private startLifecycle (host: Host.SessionHost) (token: string) (id: string)
         seen.Add msg
         runner.Dispatch (user msg)
     Async.StartImmediate (
-        App.SessionLifecycle.run
+        Client.SessionLifecycle.run
             (Resilience.Schedule.constant System.TimeSpan.Zero 0)
             { // What this harness drives is the FEED; the session leg makes one pass and stops
               // rather than supervising, so a refused peer here ends instead of parking.
@@ -704,8 +704,8 @@ let private startLifecycle (host: Host.SessionHost) (token: string) (id: string)
                     async {
                         resumes.Value <- resumes.Value @ [ resumeAfter ]
                         let connection =
-                            App.connect
-                                { App.ConnectOptions.defaults with ResumeAfter = resumeAfter }
+                            Client.connect
+                                { Client.ConnectOptions.defaults with ResumeAfter = resumeAfter }
                                 doc
                                 registry
                                 (TextRegistry doc)
@@ -848,13 +848,13 @@ let private lifecycleTests =
                 let dispatched = ResizeArray<ClientMsg> ()
                 let model = ref (ClientModel.init (peer "ada" "Ada"))
                 do!
-                    App.SessionLifecycle.run
-                        (App.SessionLifecycle.supervision (fun () -> 0.0))
+                    Client.SessionLifecycle.run
+                        (Client.SessionLifecycle.supervision (fun () -> 0.0))
                         { Open =
                             fun () ->
                                 async {
                                     opens.Value <- opens.Value + 1
-                                    return Error App.ChannelTimedOut
+                                    return Error Client.ChannelTimedOut
                                 }
                           Serve = fun _ _ _ -> async { failwith "must not serve a channel it never opened" }
                           ReadPosition = fun () -> None
@@ -905,8 +905,8 @@ let private lifecycleTests =
                 let waits = ResizeArray<System.TimeSpan option> ()
                 let dispatched = ResizeArray<ClientMsg> ()
                 do!
-                    App.SessionLifecycle.run
-                        (App.SessionLifecycle.supervision (fun () -> 0.0))
+                    Client.SessionLifecycle.run
+                        (Client.SessionLifecycle.supervision (fun () -> 0.0))
                         { Open = fun () -> async { return Ok () }
                           Serve =
                             fun _ dispatch _ ->
@@ -964,8 +964,8 @@ let private releaseTests =
                 let clientEnd, serverEnd = Yession.SessionProcess.InMemoryChannel.createPair<string> ()
                 let channel, sent = recordingOver clientEnd
                 let connection =
-                    App.connect
-                        App.ConnectOptions.defaults
+                    Client.connect
+                        Client.ConnectOptions.defaults
                         doc
                         registry
                         (TextRegistry doc)

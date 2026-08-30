@@ -436,7 +436,7 @@ let waitUntil (label: string) (condition: unit -> bool) : Async<unit> = waitUnti
 /// its doc), so the body seam below binds the same top-level fragment roots the app does.
 type Client =
     { Runner : Harness.Runner<ClientModel, Ylmish.Program.Message<ClientMsg>>
-      Connection : App.Connection
+      Connection : Client.Connection
       Registry : BodyRegistry
       /// The plain-text roots the terminal composers live in (Plan 13), alongside the rich
       /// bodies. Held on the client for the same reason `Registry` is: a test drives the
@@ -449,21 +449,21 @@ type Client =
 /// Connect one full client with explicit options: WebRTC channel, its own Yjs doc, the
 /// withYlmish program, and the connection driver. Resolves once the model reaches
 /// `Connected`.
-let connectClientWith (options: App.ConnectOptions) (signalUrl: string) (token: string) (id: string) (name: string) : Async<Client> =
+let connectClientWith (options: Client.ConnectOptions) (signalUrl: string) (token: string) (id: string) (name: string) : Async<Client> =
     async {
         let! channel = WebRtc.connect signalUrl
         let doc = Y.Doc.Create ()
         let local = peer id name
         let registry = BodyRegistry doc
         let texts = TextRegistry doc
-        let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
+        let runner = Harness.run (Client.makeProgram doc (ClientModel.init local))
         // The composer's publication rule, wired exactly as the browser wires it: the client's
         // draft slot appears when its body has content and goes when the body empties.
         DraftSlot.follow doc registry local.PeerId (user >> runner.Dispatch) |> ignore
         let hello = { PeerId = local.PeerId; DisplayName = name; Token = token }
         // The model is what "how far have we consumed" means (see `ConnectOptions`).
         let options = { options with ReadPosition = Some (fun () -> (runner.Model ()).EventConsumer.LastProcessedOffset) }
-        let connection = App.connect options doc registry texts hello (user >> runner.Dispatch) channel
+        let connection = Client.connect options doc registry texts hello (user >> runner.Dispatch) channel
         Async.StartImmediate connection.Run
         do! runner.WaitFor (fun m -> m.Connection = Connected)
         return { Runner = runner; Connection = connection; Registry = registry; Texts = texts; Channel = channel; Doc = doc; Hello = hello }
@@ -471,10 +471,10 @@ let connectClientWith (options: App.ConnectOptions) (signalUrl: string) (token: 
 
 /// `connectClientWith` under the default options (frame-based event reads).
 let connectClient (signalUrl: string) (token: string) (id: string) (name: string) : Async<Client> =
-    connectClientWith App.ConnectOptions.defaults signalUrl token id name
+    connectClientWith Client.ConnectOptions.defaults signalUrl token id name
 
 /// Connect one full client to a host over an IN-MEMORY channel pair — the same drivers as
-/// the WebRTC path (`App.makeProgram` + `App.connect` on one end, the Host's real per-peer
+/// the WebRTC path (`Client.makeProgram` + `Client.connect` on one end, the Host's real per-peer
 /// pump on the other via `host.Connect`), but with no WebRTC, HTTP, or native addon, so it
 /// runs in the cheap tier. The peer token is minted from the host — what `/me` would serve
 /// an authorized browser. Resolves once the model reaches `Connected`.
@@ -484,7 +484,7 @@ let connectClient (signalUrl: string) (token: string) (id: string) (name: string
 /// interim health that way) is therefore wired before the first frame moves, with no window
 /// in which reports are dropped.
 let connectInMemoryClientVia
-    (makeOptions: (ClientMsg -> unit) -> App.ConnectOptions)
+    (makeOptions: (ClientMsg -> unit) -> Client.ConnectOptions)
     (host: Host.SessionHost)
     (id: string)
     (name: string)
@@ -501,7 +501,7 @@ let connectInMemoryClientVia
         let local = peer id name
         let registry = BodyRegistry doc
         let texts = TextRegistry doc
-        let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
+        let runner = Harness.run (Client.makeProgram doc (ClientModel.init local))
         // As the browser wires it (see `connectClientWith`).
         DraftSlot.follow doc registry local.PeerId (user >> runner.Dispatch) |> ignore
         let hello = { PeerId = local.PeerId; DisplayName = name; Token = host.MintPeerToken () }
@@ -509,19 +509,19 @@ let connectInMemoryClientVia
         let options =
             { makeOptions dispatch with
                 ReadPosition = Some (fun () -> (runner.Model ()).EventConsumer.LastProcessedOffset) }
-        let connection = App.connect options doc registry texts hello dispatch clientEnd
+        let connection = Client.connect options doc registry texts hello dispatch clientEnd
         Async.StartImmediate connection.Run
         do! runner.WaitFor (fun m -> m.Connection = Connected)
         return { Runner = runner; Connection = connection; Registry = registry; Texts = texts; Channel = clientEnd; Doc = doc; Hello = hello }
     }
 
 /// `connectInMemoryClientVia` with options that do not depend on dispatch.
-let connectInMemoryClientWith (options: App.ConnectOptions) : Host.SessionHost -> string -> string -> Async<Client> =
+let connectInMemoryClientWith (options: Client.ConnectOptions) : Host.SessionHost -> string -> string -> Async<Client> =
     connectInMemoryClientVia (fun _ -> options)
 
 /// `connectInMemoryClientWith` under the default options (events over frames).
 let connectInMemoryClient : Host.SessionHost -> string -> string -> Async<Client> =
-    connectInMemoryClientWith App.ConnectOptions.defaults
+    connectInMemoryClientWith Client.ConnectOptions.defaults
 
 /// Reconnect an existing client on a fresh channel, resuming event consumption from its
 /// model's processed offset (E2E-4's catch-up path). Small pages force multi-page reads.
@@ -529,11 +529,11 @@ let reconnectClient (signalUrl: string) (client: Client) : Async<Client> =
     async {
         let! channel = WebRtc.connect signalUrl
         let options =
-            { App.ConnectOptions.defaults with
+            { Client.ConnectOptions.defaults with
                 ResumeAfter = (client.Runner.Model ()).EventConsumer.LastProcessedOffset
                 PageSize = 2
                 ReadPosition = Some (fun () -> (client.Runner.Model ()).EventConsumer.LastProcessedOffset) }
-        let connection = App.connect options client.Doc client.Registry client.Texts client.Hello (user >> client.Runner.Dispatch) channel
+        let connection = Client.connect options client.Doc client.Registry client.Texts client.Hello (user >> client.Runner.Dispatch) channel
         Async.StartImmediate connection.Run
         do! client.Runner.WaitFor (fun m -> m.Connection = Connected)
         return { client with Connection = connection; Channel = channel }
