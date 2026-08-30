@@ -992,7 +992,7 @@ let createWithUi
                 // so the child never inherits the Manager's own service.name.
                 let telemetryIdentityEnv =
                     let sid = SessionId.value record.SessionId
-                    let inherited = Interop.envOr "OTEL_RESOURCE_ATTRIBUTES" ""
+                    let inherited = Telemetry.inheritedResourceAttributes ()
                     let sessionAttrs =
                         sprintf "service.instance.id=%s,service.namespace=yession,yession.session.id=%s" sid sid
                     let resourceAttrs =

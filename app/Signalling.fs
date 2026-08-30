@@ -33,12 +33,6 @@ let private bootstrapHtml (sessionId: SessionId) (mount: string) (managerOrigin:
     // browser re-learns it from `PeerAccepted` once connected).
     Ssr.page sessionId mount managerOrigin ephemeralStorage assets { ClientModel.init placeholderPeer with Session = Some sessionId }
 
-/// Where the built asset set lives when this is not an installed package (`Assets` looks
-/// beside the running bundle first). One variable for the whole directory, not one per file:
-/// a deployment that could point the stylesheet and its faces at different builds is a
-/// deployment that could serve a stylesheet its faces do not match.
-let private assetsDir = envOr "YESSION_ASSETS" "app/out/public/assets"
-
 /// The app icon's bytes. The constant is base64 (`WebApp.iconPngBase64`) because it lives in
 /// source; the wire wants the PNG, and `res.end` is typed to the string case it is used with
 /// everywhere else — so the Buffer goes through `unbox`, which is what Node's `end` accepts.
@@ -137,7 +131,7 @@ let start
     // out (a per-request read could drift from the document that named it), the immutable
     // URLs are stable for the life of the process, and the static route stops doing a
     // synchronous `readFileSync` on every hit.
-    let assets = Assets.load assetsDir
+    let assets = Assets.configured ()
     let bootstrapHtml = bootstrapHtml sessionId mount managerOrigin ephemeralStorage assets.Build
     // The shell is a pure function of the session id, the mount, the Manager origin, and the
     // assets it names — all fixed at boot — so its validator is too, and a reload costs a 304
