@@ -183,22 +183,26 @@ first's.
       path that its read-deny tmpfs wiped — so both are readable AND writable from inside a
       sandbox whose policy names neither. The home they resolve against is the Session
       Process's `os.homedir()`, so the fix is that process's own `HOME`, not the policy.
-    - **A symlink INSIDE a granted directory is still denied, and that is the limit of
-      declaring canonical paths.** Since #330 a resource must name the path the kernel will
-      check, which fixes a grant written as `/etc/ssl/cert.pem`. It does nothing for a
-      symlink one level further in: on a nix-darwin host `/private/etc/nix/nix.conf` is a
-      link to `/etc/static/nix/nix.conf`, whose own path starts at the denied `/etc` node, so
-      granting `/private/etc/nix` yields a directory the sandbox can list and a file it
-      cannot read (`Operation not permitted`). Resolving every link under every granted tree
-      is not a policy this can compute — the honest fix is srt allowing the symlink nodes on
-      the way to a granted path, which is the same one-line widening `/usr/bin/git` ->
-      `/var/select` wanted above.
+    - **A granted path answers by every spelling that names it, and symlink nodes en
+      route to a grant answer lstat.** The forked srt this repo depends on
+      (`NickDarvey/sandbox-runtime#srt-0.0.67-symlink`) closes every configured path over
+      its spellings (as-written, realpath under srt's own boundary guard, and the macOS
+      `/private` pair map both ways) and admits `file-read-metadata` on exactly the symlink
+      components a grant is written through — per node, never per vnode-type, so a link en
+      route to nothing granted stays invisible even to stat. This is what lets a sandboxed
+      `dotnet build` run at all (MSBuild binds `/tmp/MSBuild<pid>`, hardcoded, spelled
+      through the symlink) and it is the shape the 2026-08-28 ADR asked for instead of the
+      broad variant it reverted; the `/run`-traversal hazard that justified that revert is
+      measured absent here. Both mechanisms are built to be upstreamed, and the fork
+      retires when they land. Decision and measurements:
+      [ADR](decisions/2026-08-30-srt-fork-narrow-symlink-spellings.md).
 
-      A fork that did exactly that was built, measured and reverted: it makes `nix.conf`
-      readable and `nix` unrunnable on the same host, and what the sandbox wanted from that
-      file is declarable instead. **Do not simply rebuild it** — the measurements, and the
-      shape to prefer if it is ever worth carrying again, are in the
-      [ADR](decisions/2026-08-28-no-srt-fork-for-symlink-metadata.md).
+      What srt still cannot give: a symlink DEEP inside a granted tree whose target starts
+      in a denied region (`/private/etc/nix/nix.conf` -> `/etc/static/...`) is closed over
+      only when the grant itself is; what a sandbox wanted from such a file is usually
+      better declared (`NIX_CONFIG` in `yession.yaml`) — the argument of the
+      [2026-08-28 ADR](decisions/2026-08-28-no-srt-fork-for-symlink-metadata.md), which
+      stands for declarations even though its verdict on forking is superseded.
     - **A `Socket` grant is path-scoped on macOS and unenforceable on Linux.** #335 gave a
       socket its own axis, and srt honours it as `network.allowUnixSockets` — a list of paths
       the Seatbelt profile turns into `network-outbound` rules. On Linux srt filters unix
@@ -221,10 +225,12 @@ first's.
     - **`dotnet`'s named mutexes reach a path no sandbox can grant.** They `stat("/tmp/")`
       — hardcoded, so `TMPDIR` does not reach it — and the SDK takes one on first use, from
       `NuGet.Common.Migrations`; `/tmp` is a symlink, so it is denied for the reason above
-      and a sandboxed `check` dies before compiling anything. No grant fixes it: `/tmp` is
-      refused as non-canonical (#330) and `/private/tmp` leaves `stat("/tmp/")` refused.
-      What fixes it is seeding NuGet's migration marker into the sandbox's own home, so the
-      mutex is never taken — the three deny variants that were measured and rejected first,
+      and a sandboxed `check` died before compiling anything. Under the forked srt a
+      `/tmp`-spelled grant now makes that stat answer, but the repo-side fix stays the
+      marker: seeding NuGet's migration marker into the sandbox's own home means the mutex
+      is never taken, on ANY host, whether or not its operator's dotnet resource grants
+      `/tmp` — not a second mechanism for one requirement, a fix that does not depend on
+      somebody else's profile — the three deny variants that were measured and rejected first,
       and why the marker is not a lie, are in the
       [ADR](decisions/2026-08-29-sandboxed-dotnet-seeds-the-nuget-marker.md).
     - **A granted executable that cannot RUN is invisible to the start-up checks.** Measured:

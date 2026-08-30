@@ -155,7 +155,7 @@ let
   npmDeps = pkgs.fetchNpmDeps {
     src = npmManifests;
     name = "yession-npm-deps";
-    hash = "sha256-OAaJfXve4YHULpUNnN9pWKUZXY93IIvzQq7ALWnEDn8=";
+    hash = "sha256-mh434EV1H73Dn8ipDiUKWmigBTK4gE82sqgjqg1H//w=";
   };
 
   # node_modules as a Nix artifact: the offline npm tree (npmConfigHook installs it from npmDeps
@@ -170,6 +170,10 @@ let
     inherit npmDeps;
     nativeBuildInputs = [ pkgs.nodejs_24 pkgs.npmHooks.npmConfigHook ];
     npmFlags = [ "--ignore-scripts" ];
+    # srt is a git dependency (the NickDarvey fork), and npm PACKS a git dep at
+    # install time, which needs a writable cache — the FOD stays fixed, npm just
+    # works on a copy of it.
+    makeCacheWritable = true;
     dontBuild = true;
     installPhase = ''
       runHook preInstall
