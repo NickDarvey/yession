@@ -26,6 +26,7 @@
     <Compile Include="Emits.fs" />
     <Compile Include="EmitMacro.fs" />
     <Compile Include="EmitBody.fs" />
+    <Compile Include="RecordShapes.fs" />
   </ItemGroup>
 
   <ItemGroup>

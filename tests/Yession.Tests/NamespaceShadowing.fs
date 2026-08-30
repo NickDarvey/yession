@@ -30,11 +30,10 @@ module Yession.Tests.NamespaceShadowing
 // nothing else is reachable as `Short.member`. A module's are those plus its values.
 //
 // It is deliberately blind to whether the two are ever in scope together, for the reason
-// `RecordShapes` is: that belongs to some third file's `open` list, which changes without
+// YES004 is: that belongs to some third file's `open` list, which changes without
 // either author present.
 //
-// No capability: it reads files, like `RecordShapes`, `TestSources` and `LockSource`
-// beside it.
+// No capability: it reads files, like `TestSources` and `LockSource` beside it.
 
 open Fable.Core
 open Fable.Core.JsInterop
@@ -183,9 +182,10 @@ let private sharedExportsAmong (surfaces: Surface list) =
 
 let private sharedExports () = sharedExportsAmong scanned.Value
 
-// Assembled with escapes rather than written down the page, for the reason `RecordShapes`
-// assembles its fixtures: spelled out as real lines, they would be real declarations in a
-// real scanned file, and this suite would read its own fixtures back as product code.
+// Assembled with escapes rather than written down the page: spelled out as real lines, they
+// would be real declarations in a real scanned file, and this suite would read its own
+// fixtures back as product code. The analyzer fixtures do not need this, which is most of
+// the argument for moving a rule like this one onto the typed tree — see YES004.
 let private namespaceFixture = "namespace Alpha.Beta.Widgets\ntype Gadget =\n    { Size : int }\nmodule Gadget =\n    let make () = 1"
 let private moduleFixture = "module Other.Place.Widgets\nlet Gadget () = 2\ntype Unrelated = Unrelated"
 let private disjointModuleFixture = "module Other.Place.Widgets\nlet nothingInCommon () = 2"

@@ -336,6 +336,21 @@ violation — and needed a case asserting it had matched at least 300 emits, bec
 that has stopped seeing them and a codebase that obeys the rule read identically in a green
 run. Reading the attribute's value off the typed tree costs none of that.
 
+The fourth is not about interop at all (`RecordShapes.fs`): two record types carrying the same
+field names make a bare `{ … = … }` build whichever was declared last, silently, at every
+warning level, so a record added today re-points constructions written months ago in files its
+author never opened. The remedy is `[<RequireQualifiedAccess>]` on every type in the group, and
+the rule is what says which groups there are. It replaced a suite that read F# source with
+regular expressions — a brace-balancer for the record body, an indent scan for where it ended,
+a walk back up over doc comments for the attribute — six of whose eight cases tested that
+reader rather than the rule. Two holes came with the text and the tree closes both: its label
+pattern required an initial capital, so a lowercase-labelled record was invisible, and it had
+no model of accessibility, so it counted records against each other that no scope can hold at
+once. The population is now the assembly graph rather than a hand-kept list of directories,
+which is also what lets it see a collision the old one structurally could not: neither
+`Yession.Domain` nor the serial example references the other, so the pair only meets in
+`tests/Yession.Tests`, which references both.
+
 One rule answers for the others (`Unjudged.fs`). A declaration the compiler could not build is
 not in the typed tree, so no rule sees it, each correctly reports nothing, and the run ends in
 exactly the shape a clean one has — which is how `lint` came to report a product clean, and
