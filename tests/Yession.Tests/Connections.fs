@@ -1854,7 +1854,8 @@ let private pollerOver
 
 let private prPollTests =
     let ada = PeerRef (PeerId.create "ada" |> expect)
-    let watching known : PrWatch = { Pr = prOne; Watcher = ada; Known = known }
+    let watchedAt = DateTimeOffset (2026, 8, 27, 11, 30, 0, TimeSpan.Zero)
+    let watching known : PrWatch = { Pr = prOne; Watcher = ada; Known = known; Since = watchedAt }
     let fixedNow () = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
 
     testList "pull request polling" [
@@ -2119,6 +2120,24 @@ let private prPollTests =
                 | other -> failwithf "expected one row, got %A" other
             }
 
+        testCaseAsync "since reports when the watch last moved, not when it was last looked at" <|
+            async {
+                // The distinction the column exists for: a poll that found nothing new has
+                // learned nothing about when this pull request became what it is, so a
+                // settled watch's stamp must not creep forward every fifteen seconds.
+                let script = scriptedFetch [ PrWatches.PrChanged (snapshotOf PrOpen ChecksGreen, PrWatches.PrEtags.none) ]
+                let poller = pollerOver fixedNow script.Fetch (RecordedTransitions ()) (ResizeArray ())
+                poller.Apply [ watching { State = PrOpen; Checks = ChecksGreen; Queue = NotQueued } ]
+                let! _ = poller.Poll ()
+                match! (PrWatches.query (fun () -> poller)).Read () with
+                | Ok (RowsOf [ row ]) ->
+                    Expect.equal
+                        (row |> List.tryFind (fun (key, _) -> key = "since") |> Option.map snd)
+                        (Some (CellText "2026-08-27 11:30Z"))
+                        "the stamp is the recorded one, though the clock has moved half an hour past it"
+                | other -> failwithf "expected one row, got %A" other
+            }
+
         testCaseAsync "a watch that stopped moving marks its status, not its checks" <|
             async {
                 // A credential that died is a problem with the WATCH; whatever its checks
@@ -2154,19 +2173,30 @@ let private prPollTests =
             // poller, and show them. A watch survives a restart because the log has it —
             // there is nowhere else it could come from.
             let msg n = MessageId.create n |> expect
+            let at (minute: int) (event: SessionEvent) : EventEnvelope<SessionEvent> =
+                { EventId = EventId.fresh ()
+                  SessionId = SessionId.create "pr-session" |> expect
+                  Offset = EventOffset.create 1L |> expect
+                  Actor = ActorRef.System
+                  Timestamp = DateTimeOffset (2026, 8, 27, 11, minute, 0, TimeSpan.Zero)
+                  Event = event }
             let folded =
-                [ SessionEvent.PrWatched
-                    { MessageId = msg "w1"
-                      Pr = prOne
-                      Initial = snapshotOf PrOpen ChecksPending
-                      Actor = ada }
-                  SessionEvent.PrTransitioned
-                    { MessageId = msg "t1"
-                      Pr = prOne
-                      Transition = PrTransition.ChecksPassed
-                      State = PrOpen
-                      Checks = ChecksGreen
-                      Watcher = ada } ]
+                [ at
+                    0
+                    (SessionEvent.PrWatched
+                        { MessageId = msg "w1"
+                          Pr = prOne
+                          Initial = snapshotOf PrOpen ChecksPending
+                          Actor = ada })
+                  at
+                    6
+                    (SessionEvent.PrTransitioned
+                        { MessageId = msg "t1"
+                          Pr = prOne
+                          Transition = PrTransition.ChecksPassed
+                          State = PrOpen
+                          Checks = ChecksGreen
+                          Watcher = ada }) ]
                 |> List.fold PrWatchesProjection.applyEvent PrWatchesProjection.empty
             let poller =
                 pollerOver fixedNow (scriptedFetch []).Fetch (RecordedTransitions ()) (ResizeArray ())
@@ -2459,7 +2489,6 @@ let private prWatchVerbTests =
                 let! page = log.Read None System.Int32.MaxValue
                 return
                     page.Events
-                    |> List.map (fun e -> e.Event)
                     |> List.fold PrWatchesProjection.applyEvent PrWatchesProjection.empty
                     |> fun projection -> projection.Watches
             }
