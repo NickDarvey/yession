@@ -1,5 +1,6 @@
 namespace Yession.Domain.Prs
 
+open System
 open Yession.Domain
 
 /// The session's watched pull requests, projected from events — `ReposProjection`'s
@@ -64,7 +65,12 @@ type PrWatch =
     { Pr : PrRef
       /// Whose watch — see `PrWatched.Actor`.
       Watcher : ActorRef
-      Known : PrKnown }
+      Known : PrKnown
+      /// When this pull request last became what it now is: the envelope timestamp of the
+      /// watch's start, advanced by each recorded transition. Read from the LOG for the
+      /// baseline's reason — a poll that finds nothing new must not make a watch look
+      /// fresher than it is, and only an event says something happened.
+      Since : DateTimeOffset }
 
 type PrWatchesProjection = { Watches : PrWatch list }
 
@@ -145,10 +151,14 @@ module PrWatchesProjection =
     /// Fold one event. Re-watching an existing pull request replaces its entry (the
     /// newest baseline wins — the `add_repo` rule); a transition advances that watch's
     /// baseline by exactly what was announced.
-    let applyEvent (proj: PrWatchesProjection) (event: SessionEvent) : PrWatchesProjection =
-        match event with
+    let applyEvent (proj: PrWatchesProjection) (envelope: EventEnvelope<SessionEvent>) : PrWatchesProjection =
+        match envelope.Event with
         | PrWatched p ->
-            let entry = { Pr = p.Pr; Watcher = p.Actor; Known = PrTransitions.knownOf p.Initial }
+            let entry =
+                { Pr = p.Pr
+                  Watcher = p.Actor
+                  Known = PrTransitions.knownOf p.Initial
+                  Since = envelope.Timestamp }
             if proj.Watches |> List.exists (fun w -> w.Pr = p.Pr) then
                 { Watches = proj.Watches |> List.map (fun w -> if w.Pr = p.Pr then entry else w) }
             else
@@ -159,7 +169,10 @@ module PrWatchesProjection =
             { Watches =
                 proj.Watches
                 |> List.map (fun w ->
-                    if w.Pr = p.Pr then { w with Known = PrTransitions.advance w.Known p.Transition }
+                    if w.Pr = p.Pr then
+                        { w with
+                            Known = PrTransitions.advance w.Known p.Transition
+                            Since = envelope.Timestamp }
                     else w) }
         | _ -> proj
 

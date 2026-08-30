@@ -540,7 +540,17 @@ let private prWatchTests =
     let transitioned transition state checks : SessionEvent =
         PrTransitioned
             { MessageId = msg "t1"; Pr = pr; Transition = transition; State = state; Checks = checks; Watcher = PeerRef ada }
-    let fold events = events |> List.fold PrWatchesProjection.applyEvent PrWatchesProjection.empty
+    /// The projection folds ENVELOPES, because when a watch last moved is the envelope's
+    /// timestamp and nothing in a payload says it. Minute-apart stamps, so a test can tell
+    /// which event a `Since` came from.
+    let at (minute: int) (event: SessionEvent) : EventEnvelope<SessionEvent> =
+        { EventId = EventId.fresh ()
+          SessionId = SessionId.create "pr-session" |> expect
+          Offset = EventOffset.create 1L |> expect
+          Actor = ActorRef.System
+          Timestamp = DateTimeOffset (2026, 8, 27, 10, minute, 0, TimeSpan.Zero)
+          Event = event }
+    let fold envelopes = envelopes |> List.fold PrWatchesProjection.applyEvent PrWatchesProjection.empty
 
     testList "Watched pull requests" [
         testCase "PrRef parses a number and renders canonically" <| fun () ->
@@ -631,12 +641,16 @@ let private prWatchTests =
             Expect.equal (PrStatus.worse "merged" "a word from the future") "merged" "an unknown word does not shout"
 
         testCase "the watches projection folds start, re-watch, transition and stop" <| fun () ->
-            let folded = fold [ started PrOpen ChecksPending ]
+            let folded = fold [ at 0 (started PrOpen ChecksPending) ]
             Expect.equal
                 folded.Watches
-                [ { Pr = pr; Watcher = PeerRef ada; Known = (known PrOpen ChecksPending) } ]
+                [ { Pr = pr
+                    Watcher = PeerRef ada
+                    Known = (known PrOpen ChecksPending)
+                    Since = DateTimeOffset (2026, 8, 27, 10, 0, 0, TimeSpan.Zero) } ]
                 "a watch starts from its Initial baseline"
-            let advanced = PrWatchesProjection.applyEvent folded (transitioned PrTransition.ChecksPassed PrOpen ChecksGreen)
+            let advanced =
+                PrWatchesProjection.applyEvent folded (at 5 (transitioned PrTransition.ChecksPassed PrOpen ChecksGreen))
             Expect.equal
                 (PrWatchesProjection.tryFind pr advanced |> Option.map (fun w -> w.Known))
                 (Some (known PrOpen ChecksGreen))
@@ -644,14 +658,40 @@ let private prWatchTests =
             let rewatched =
                 PrWatchesProjection.applyEvent
                     advanced
-                    (PrWatched { MessageId = msg "w2"; Pr = pr; Initial = snapshot PrOpen ChecksNone; Actor = ActorRef.Agent })
+                    (at
+                        9
+                        (PrWatched
+                            { MessageId = msg "w2"; Pr = pr; Initial = snapshot PrOpen ChecksNone; Actor = ActorRef.Agent }))
             Expect.equal
                 rewatched.Watches
-                [ { Pr = pr; Watcher = ActorRef.Agent; Known = (known PrOpen ChecksNone) } ]
+                [ { Pr = pr
+                    Watcher = ActorRef.Agent
+                    Known = (known PrOpen ChecksNone)
+                    Since = DateTimeOffset (2026, 8, 27, 10, 9, 0, TimeSpan.Zero) } ]
                 "re-watch replaces in place, newest baseline and watcher win"
             let stopped =
-                PrWatchesProjection.applyEvent rewatched (PrUnwatched { MessageId = msg "w3"; Pr = pr; Actor = PeerRef ada })
+                PrWatchesProjection.applyEvent
+                    rewatched
+                    (at 12 (PrUnwatched { MessageId = msg "w3"; Pr = pr; Actor = PeerRef ada }))
             Expect.equal stopped.Watches [] "stopped"
+
+        testCase "a watch dates itself from the last thing that was recorded about it" <| fun () ->
+            // What separates a suite still working from one that died. It moves on an
+            // EVENT and never on a look: a poll that found nothing new has learned nothing
+            // about when this pull request became what it is.
+            let started = fold [ at 0 (started PrOpen ChecksPending) ]
+            let since (proj: PrWatchesProjection) =
+                PrWatchesProjection.tryFind pr proj |> Option.map (fun w -> w.Since)
+            Expect.equal
+                (since started)
+                (Some (DateTimeOffset (2026, 8, 27, 10, 0, 0, TimeSpan.Zero)))
+                "a fresh watch dates from when it began"
+            let moved =
+                PrWatchesProjection.applyEvent started (at 7 (transitioned PrTransition.ChecksPassed PrOpen ChecksGreen))
+            Expect.equal
+                (since moved)
+                (Some (DateTimeOffset (2026, 8, 27, 10, 7, 0, TimeSpan.Zero)))
+                "and re-dates from each transition after it"
 
         testCase "a restart re-announces nothing: the folded baseline already knows what was said" <| fun () ->
             // The dedupe property the durable baseline exists for. After a green was
@@ -659,8 +699,8 @@ let private prWatchTests =
             // snapshot detects nothing — however many times the process restarts.
             let folded =
                 fold
-                    [ started PrOpen ChecksPending
-                      transitioned PrTransition.ChecksPassed PrOpen ChecksGreen ]
+                    [ at 0 (started PrOpen ChecksPending)
+                      at 5 (transitioned PrTransition.ChecksPassed PrOpen ChecksGreen) ]
             let known = (PrWatchesProjection.tryFind pr folded |> Option.get).Known
             Expect.equal (PrTransitions.detect known (snapshot PrOpen ChecksGreen)) [] "already announced"
             Expect.equal

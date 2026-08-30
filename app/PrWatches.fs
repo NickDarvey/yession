@@ -69,6 +69,8 @@ type PrWatchRow =
       /// snapshot alone can only say whether a pull request is queued right now, never
       /// whether it used to be.
       Known : PrKnown
+      /// When it last became what it is — see `PrWatch.Since`.
+      Since : DateTimeOffset
       /// Has a delivery ever reached this watch?
       Pushed : bool
       /// `None` while the last look worked; the reason otherwise, so a query reader
@@ -108,6 +110,9 @@ type private WatchEntry =
     { Pr : PrRef
       Watcher : ActorRef
       mutable Known : PrKnown
+      /// Overwritten from the projection beside `Known`, and only from there: the two are
+      /// halves of one fact — what was last recorded, and when.
+      mutable Since : DateTimeOffset
       mutable Snapshot : PrSnapshot option
       mutable Etags : PrEtags
       mutable Health : string option
@@ -191,11 +196,13 @@ let create
                 // recorded transition advanced both and they cannot disagree.
                 | Some existing ->
                     existing.Known <- watch.Known
+                    existing.Since <- watch.Since
                     existing
                 | None ->
                     { Pr = watch.Pr
                       Watcher = watch.Watcher
                       Known = watch.Known
+                      Since = watch.Since
                       Snapshot = None
                       Etags = PrEtags.none
                       Health = None
@@ -319,6 +326,7 @@ let create
                   Watcher = e.Watcher
                   Snapshot = e.Snapshot
                   Known = e.Known
+                  Since = e.Since
                   Pushed = e.Pushed
                   Health = e.Health }) }
 
@@ -451,7 +459,18 @@ let private queryDef : QueryDef =
               QueryColumn.create "state" "state"
               QueryColumn.create "checks" "checks"
               QueryColumn.create "watcher" "watched by"
-              QueryColumn.create "status" "status" ] }
+              QueryColumn.create "status" "status"
+              QueryColumn.create "since" "since" ] }
+
+/// When a watch last became what it is, as a stamp the reader subtracts from.
+///
+/// Absolute and complete, the `createdView` rule: a relative time ("4 minutes ago") is
+/// right when it is rendered and quietly wrong from the next second onwards, and these
+/// surfaces redraw when something MOVES rather than on a clock. Which also means this
+/// needs no clock of its own — nothing here has to know what today is.
+let private sinceView (at: DateTimeOffset) : string =
+    let utc = at.ToUniversalTime ()
+    sprintf "%04d-%02d-%02d %02d:%02dZ" utc.Year utc.Month utc.Day utc.Hour utc.Minute
 
 /// Register the watched pull requests as a query. A GETTER for the `mcp_servers` reason:
 /// the query surface is composed before the Host is started, and the Host is what builds
@@ -517,5 +536,9 @@ let query (current: unit -> PrWatchers) : Queries.QueryRegistration =
                                // The difference between a hook that is wired up and one
                                // that is not, which is otherwise only visible as latency.
                                | None, true -> CellStatus ("ok (push)", ToneOk)
-                               | None, false -> CellStatus ("ok", ToneMuted)) ])))
+                               | None, false -> CellStatus ("ok", ToneMuted))
+                              // How long it has been THAT, which is what separates a
+                              // suite still working from one that died — and the reader,
+                              // human or agent, is who does the subtracting.
+                              "since", CellText (sinceView row.Since) ])))
             } }

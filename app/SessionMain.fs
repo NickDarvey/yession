@@ -803,7 +803,6 @@ Async.StartImmediate (
                     let! page = log.Read None System.Int32.MaxValue
                     return
                         page.Events
-                        |> List.map (fun e -> e.Event)
                         |> List.fold PrWatchesProjection.applyEvent PrWatchesProjection.empty
                         |> fun projection -> projection.Watches
                 }
@@ -1004,7 +1003,6 @@ Async.StartImmediate (
                 let! page = log.Read None System.Int32.MaxValue
                 let projection =
                     page.Events
-                    |> List.map (fun e -> e.Event)
                     |> List.fold PrWatchesProjection.applyEvent PrWatchesProjection.empty
                 reconcileWatches projection.Watches
                 queryRegistry.Invalidate PrWatches.queryName
