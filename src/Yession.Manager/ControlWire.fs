@@ -84,7 +84,7 @@ module ControlWire =
     type SubscribeHookRequest = { Filter : DeliveryFilter }
 
     // Both of these carry a lone `Id`, so a bare `{ Id = … }` would build whichever was
-    // declared last. Qualified, and the `Record shapes` suite is what says so.
+    // declared last. Qualified, and YES004 is what says so.
     [<RequireQualifiedAccess>]
     type SubscribeHookResponse = { Id : string }
 
