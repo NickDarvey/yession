@@ -1,11 +1,8 @@
 module Yession.Analyzers.RecordShapes
 
-open System.Collections.Concurrent
-open System.IO
 open FSharp.Analyzers.SDK
-open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Symbols
-open FSharp.Compiler.Text
+open Yession.Analyzers.Population
 
 /// Which record type does a bare `{ … = …; … = … }` build, when two of them carry the same
 /// field names?
@@ -58,197 +55,52 @@ open FSharp.Compiler.Text
 ///     `{ status; body }` records it never saw.
 ///   * It had no model of accessibility — it matched `private` on the declaration line and
 ///     discarded it — so it counted records against each other that no scope can hold at once.
+///
+/// Both of those, and the population the rule reads, live in `Population.fs`, which the
+/// namespace rules read too.
 
 [<Literal>]
 let Code = "YES004"
 
-/// Where a type's labels can be brought into scope. Not where it is USED: where a file could
-/// `open` its way to it, which is the question this rule asks and the one accessibility
-/// answers.
-type private Scope =
-    | Everywhere
-    | InAssembly
-    /// The full name of the scope a `private` declaration is sealed inside.
-    | InModule of string
-
 /// One record type, as the compiler has it.
 type private Shape =
-    { Owner: string
+    { Declared: Declaration
       Fields: string list
-      Guarded: bool
-      Where: range
-      Assembly: string
-      Scope: Scope
-      Own: bool }
-
-/// The narrowest scope enclosing a declaration, its own accessibility and its ancestors' both.
-/// A public type inside a private module is reachable only from that module's parent, and a
-/// rule reading the type alone would call it public.
-let rec private scopeOf (e: FSharpEntity) =
-    let outer =
-        match e.DeclaringEntity with
-        | Some parent -> scopeOf parent
-        | None -> Everywhere
-
-    let here =
-        if e.Accessibility.IsPrivate then
-            match e.DeclaringEntity with
-            | Some parent -> InModule parent.FullName
-            | None -> InAssembly
-        elif e.Accessibility.IsInternal then
-            InAssembly
-        else
-            Everywhere
-
-    match here, outer with
-    | InModule m, _ -> InModule m
-    | _, InModule m -> InModule m
-    | InAssembly, _
-    | _, InAssembly -> InAssembly
-    | Everywhere, Everywhere -> Everywhere
-
-/// Whether two declarations can have their labels in one scope at once, which is what it takes
-/// for a bare construction to be ambiguous between them.
-///
-/// This is the half F# metadata will not do for you by omission. A referenced assembly's
-/// `Contents` hands over its non-public entities with the rest — `SerialProvider.Mcp`'s
-/// `private Request` arrives in `Yession.Tests`'s population as readily as anything public — so
-/// a rule that reads absence as inaccessibility reports a collision with `Yession.Domain`'s
-/// `JsonRpcRequest` that no file can write. Two records sealed in DIFFERENT modules are the
-/// same story one assembly down, and that one is live: the suite declares `{ status; body }`
-/// privately in five modules, none of which can see another's.
-///
-/// Both fall out of one question — is there a scope that holds both label sets — asked of the
-/// pair rather than of either declaration.
-let private meet (a: Shape) (b: Shape) =
-    match a.Scope, b.Scope with
-    // Two public types meet wherever both assemblies are referenced, which is here.
-    | Everywhere, Everywhere -> true
-    // Sealed inside a module: reachable from that module and what it encloses, and from
-    // nowhere in another assembly at all.
-    | InModule m, InModule n ->
-        a.Assembly = b.Assembly && (m = n || m.StartsWith (n + ".") || n.StartsWith (m + "."))
-    // Anything else has one side narrowed to an assembly or a module, so both have to be in it.
-    | _ -> a.Assembly = b.Assembly
+      Guarded: bool }
 
 let private guarded (e: FSharpEntity) =
     e.Attributes
     |> Seq.exists (fun a ->
         a.AttributeType.TryFullName = Some "Microsoft.FSharp.Core.RequireQualifiedAccessAttribute")
 
-/// The shape of an entity, when it is a record at all. Everything here can throw for a symbol
-/// FCS declines to describe — a full name it cannot spell, a declaration location it does not
-/// have — and a rule that cannot read one type must still read the rest.
-let private shapeOf (assembly: string) (own: bool) (e: FSharpEntity) =
+let private shapeOf (declaration: Declaration) =
     try
-        if not e.IsFSharpRecord then
+        if not declaration.Entity.IsFSharpRecord then
             None
         else
-            match [ for f in e.FSharpFields -> f.Name ] with
+            match [ for f in declaration.Entity.FSharpFields -> f.Name ] with
             | [] -> None
             | fields ->
                 Some
-                    { Owner = e.FullName
+                    { Declared = declaration
                       Fields = List.sort fields
-                      Guarded = guarded e
-                      Where = e.DeclarationLocation
-                      Assembly = assembly
-                      Scope = scopeOf e
-                      Own = own }
+                      Guarded = guarded declaration.Entity }
     with _ ->
         None
-
-let rec private nested (es: seq<FSharpEntity>) =
-    seq {
-        for e in es do
-            yield e
-            yield! nested e.NestedEntities
-    }
-
-let rec private declared (ds: FSharpImplementationFileDeclaration list) =
-    seq {
-        for d in ds do
-            match d with
-            | FSharpImplementationFileDeclaration.Entity (e, inner) ->
-                yield e
-                yield! declared inner
-            | _ -> ()
-    }
-
-/// The repository, found from the project being analyzed by walking up to the solution file.
-/// It bounds the population to code somebody here can change: the rule's remedy is that EVERY
-/// type in a group carries the attribute, which is unavailable against a package, and a
-/// collision between two of THEM — Thoth.Json and Thoth.Json.Net declare `ExtraCoders` twice —
-/// is nobody here's to answer for. The source scan this replaced drew the same line by keeping
-/// a list of directories; this reads it off the tree it is already analyzing.
-let rec private repositoryOf (dir: string) =
-    if isNull dir then None
-    elif File.Exists (Path.Combine (dir, "Yession.slnx")) then Some dir
-    else repositoryOf (Path.GetDirectoryName dir)
-
-let private inside (root: string) (path: string) =
-    try
-        (Path.GetFullPath path).StartsWith (Path.GetFullPath root + string Path.DirectorySeparatorChar)
-    with _ ->
-        false
-
-/// Every record one project could construct, of the code this repository builds: its own
-/// declarations and everything it references. Both go in whole — `meet` is what decides which
-/// pairs are hazards, rather than the population pretending the unreachable ones are not there.
-let private populationOf (name: string) (root: string) (results: FSharpCheckProjectResults) =
-    let own =
-        seq {
-            for file in results.AssemblyContents.ImplementationFiles do
-                yield! declared file.Declarations
-        }
-        |> nested
-        |> Seq.choose (shapeOf name true)
-
-    let referenced =
-        seq {
-            for assembly in results.ProjectContext.GetReferencedAssemblies () do
-                match (try Some (assembly.SimpleName, assembly.Contents.Entities) with _ -> None) with
-                | Some (from, es) -> yield! nested es |> Seq.choose (shapeOf from false)
-                | None -> ()
-        }
-
-    Seq.append own referenced
-    |> Seq.filter (fun s -> inside root s.Where.FileName)
-    // One entity reaches the walk by more than one route — a nested module is a member of its
-    // parent as well as an entity in its own right.
-    |> Seq.distinctBy (fun s -> s.Owner, s.Where)
-    |> List.ofSeq
-
-/// A whole-population verdict is the same for every file in a project, and the walk that
-/// produces it reads every referenced assembly. Once per project, not once per file.
-let private populations = ConcurrentDictionary<string, Shape list> ()
 
 let private describe (fields: string list) (partners: Shape list) (culprit: Shape) =
     let others =
         partners
-        |> List.map (fun s -> if s.Guarded then s.Owner else s.Owner + " (also unqualified)")
+        |> List.map (fun s -> if s.Guarded then s.Declared.Owner else s.Declared.Owner + " (also unqualified)")
         |> List.sort
         |> String.concat ", "
 
     let labels = String.concat "; " fields
 
-    $"`%s{culprit.Owner}` carries {{ %s{labels} }}, and so does %s{others}. "
+    $"`%s{culprit.Declared.Owner}` carries {{ %s{labels} }}, and so does %s{others}. "
     + "A bare construction of these labels builds whichever type was declared last, with no "
     + "diagnostic anywhere. Give every type in the group [<RequireQualifiedAccess>] and name "
     + "the type at its construction sites."
-
-/// Whether this project is the one that answers for a pair. Every project sees what it
-/// references, so a pair living entirely inside ONE other assembly is visible from every
-/// project downstream of it and would be reported by each — while the project that declares it
-/// is already reporting it, anchored at the same lines. That pair is somebody else's.
-///
-/// What is left is exactly the two cases with nowhere else to go: a pair this project declares
-/// part of, and a pair spanning assemblies that need not reference each other at all, whose
-/// members only ever meet in a project like this one — `Yession.Domain`'s MCP tool beside the
-/// serial example's, which no run of either project can see.
-let private mine (shapes: Shape list) =
-    shapes |> List.exists (fun s -> s.Own)
-    || (shapes |> List.map (fun s -> s.Assembly) |> List.distinct |> List.length) > 1
 
 let private offenders (shapes: Shape list) =
     shapes
@@ -258,38 +110,24 @@ let private offenders (shapes: Shape list) =
               if not culprit.Guarded then
                   let partners =
                       group
-                      |> List.filter (fun other -> other.Where <> culprit.Where && meet culprit other)
+                      |> List.filter (fun other ->
+                          other.Declared.Where <> culprit.Declared.Where
+                          && meet culprit.Declared other.Declared)
 
-                  if not (List.isEmpty partners) && mine (culprit :: partners) then
-                      yield culprit.Where, describe fields partners culprit ])
+                  if not (List.isEmpty partners) then
+                      let involved = [ for s in culprit :: partners -> s.Declared ]
 
-/// Where the project's one verdict is reported: its last hand-written source file. Generated
-/// files (an `AssemblyInfo` the SDK writes into `obj`) are not somewhere a person will look,
-/// and which of them compiles last is not this rule's business.
-let private authored files =
-    files
-    |> Seq.filter (fun (f: string) -> not ((f.Replace ('\\', '/')).Contains "/obj/"))
-    |> List.ofSeq
-
-let private reportsHere (ctx: CliContext) =
-    match authored ctx.ProjectOptions.SourceFiles with
-    | [] -> false
-    | own -> Path.GetFullPath (List.last own) = Path.GetFullPath ctx.FileName
+                      if mine involved then
+                          yield culprit.Declared.Where, describe fields partners culprit ])
 
 [<CliAnalyzer("RecordShapes", "Record types that share a field set all require qualified access", "")>]
 let recordShapes: Analyzer<CliContext> =
     fun ctx ->
         async {
-            match reportsHere ctx, repositoryOf (Path.GetDirectoryName ctx.ProjectOptions.ProjectFileName) with
-            | false, _
-            | _, None -> return []
-            | true, Some root ->
-                let shapes =
-                    populations.GetOrAdd (
-                        ctx.ProjectOptions.ProjectFileName,
-                        fun project ->
-                            populationOf (Path.GetFileNameWithoutExtension project) root ctx.CheckProjectResults
-                    )
+            if not (Population.reportsHere ctx) then
+                return []
+            else
+                let shapes = Population.of' ctx |> List.choose shapeOf
 
                 return
                     [ for (where, message) in offenders shapes ->

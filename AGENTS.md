@@ -351,6 +351,26 @@ which is also what lets it see a collision the old one structurally could not: n
 `Yession.Domain` nor the serial example references the other, so the pair only meets in
 `tests/Yession.Tests`, which references both.
 
+The fifth is the same fault on a different axis (`NamespaceShadowing.fs`): `open Yession.Domain`
+puts every sub-namespace of it in front of a file by short name, so given a module `Terminals`
+in scope and an opened namespace `Terminals`, a reference to `Terminals.foo` resolves to the
+NAMESPACE when the namespace has a `foo` and falls through to the module when it does not, with
+nothing said either way. Two scopes may share a short name; they may not also share a member —
+which is what keeps `Yession.Domain` beside `Yession.Tests.Domain` legal. It replaced a scan
+whose member pattern was anchored `^(?:type|and|module)` with no leading whitespace, so every
+member of every nested module was invisible to it and a nested module never became a scope at
+all; between them `Yession.App.App` did not exist as far as it was concerned, while it and the
+namespace holding it both exported `Connection`. Note what a namespace is NOT: FCS gives the one
+a file declares as a chain of one entity per segment, each holding no children, so the rule
+derives a namespace from its members rather than reading it — which is also the only shape that
+works for a referenced assembly, where namespaces do hold theirs.
+
+`Population.fs` is what both of those read: every declaration one project could name, of the code
+this repository builds — its own contents entire, plus what it references, bounded to the
+repository and cached per project. A verdict over a whole population is the same for every file
+in it, so it is reported once, on the project's last authored source file, anchored at the
+declaration it is about.
+
 One rule answers for the others (`Unjudged.fs`). A declaration the compiler could not build is
 not in the typed tree, so no rule sees it, each correctly reports nothing, and the run ends in
 exactly the shape a clean one has — which is how `lint` came to report a product clean, and
