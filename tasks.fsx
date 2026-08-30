@@ -1365,7 +1365,8 @@ let private fixtures =
       "YES002", "EmitMacroFixture", "Emits.fs"
       "YES003", "EmitBodyFixture", "Bodies.fs"
       "YES004", "RecordShapeFixture", "Shapes.fs"
-      "YES005", "NamespaceShadowingFixture", "Scopes.fs" ]
+      "YES005", "NamespaceShadowingFixture", "Scopes.fs"
+      "YES006", "DomainExportsFixture", "Slices.fs" ]
 
 let private fixtureProject name =
     Path.Combine ("analyzers", "fixtures", name, name + ".fsproj")

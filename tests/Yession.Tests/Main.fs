@@ -102,13 +102,13 @@ let all =
         // after it in the same process. Cheap tier deliberately — the mutation happens there,
         // and only its consequence needs a live tier.
         Tag.needs "Test sources" [] (fun () -> TestSources.tests)
-        // The third source contract, and the one that guards a file no F# reads: what a
-        // checkout of devenv.lock gives a machine that is not this one.
-        Tag.needs "Namespace shadowing" [] (fun () -> NamespaceShadowing.tests)
         // The source contract that guards a DEFAULT rather than a declaration: a confinement
         // switch read in two places is read with two defaults, and the weaker one wins
         // without anybody choosing it.
         Tag.needs "Sandbox backends" [] (fun () -> SandboxBackends.tests)
+        // The source contract that guards a file no F# reads: what a checkout of devenv.lock
+        // gives a machine that is not this one. (This comment sat above `Namespace shadowing`
+        // for as long as that suite existed, describing neither it nor its neighbour.)
         Tag.needs "Committed lock" [] (fun () -> LockSource.tests)
         // The rich editor rendering E2E stands alone: it needs a browser but NOT the native
         // WebRTC host, so it runs wherever Chromium exists ([Browser]). The full two-peer

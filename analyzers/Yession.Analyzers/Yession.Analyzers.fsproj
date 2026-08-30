@@ -28,7 +28,9 @@
     <Compile Include="EmitBody.fs" />
     <Compile Include="Population.fs" />
     <Compile Include="RecordShapes.fs" />
+    <Compile Include="Surfaces.fs" />
     <Compile Include="NamespaceShadowing.fs" />
+    <Compile Include="DomainExports.fs" />
   </ItemGroup>
 
   <ItemGroup>

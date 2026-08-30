@@ -365,9 +365,22 @@ a file declares as a chain of one entity per segment, each holding no children, 
 derives a namespace from its members rather than reading it — which is also the only shape that
 works for a referenced assembly, where namespaces do hold theirs.
 
-`Population.fs` is what both of those read: every declaration one project could name, of the code
+The sixth is the other half of that hazard (`DomainExports.fs`), and stricter for a reason: the
+domain is split so a file opens the two or three slices it needs, in no order anything fixes, and
+a namespace is opened for its CONTENTS — so if two `Yession.Domain.*` namespaces both exported a
+`Projection`, a file opening both would get whichever was opened last. No two of them may export
+the same name at all. That is what makes the short names affordable: `TerminalProjection` and
+`AuthzSubject` were prefixed to clear a flat namespace of 267 types and came off once each slice
+had a namespace, and what stops `Projection` and `Subject` being ambiguous is not luck but this.
+Its population is NAMED rather than derived, deliberately — `Yession.Domain.*` is the one family
+this repository expects a file to open several of at once, which is a fact about how the domain
+is meant to be used and not one the assembly graph knows.
+
+`Population.fs` is what these read: every declaration one project could name, of the code
 this repository builds — its own contents entire, plus what it references, bounded to the
-repository and cached per project. A verdict over a whole population is the same for every file
+repository and cached per project. `Surfaces.fs` is the half the two namespace rules share:
+what an `open` puts in front of a file, read once because both break the same way if it is
+read wrong. A verdict over a whole population is the same for every file
 in it, so it is reported once, on the project's last authored source file, anchored at the
 declaration it is about.
 
