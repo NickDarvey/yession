@@ -1,7 +1,7 @@
 module Yession.Tests.InMemory
 
 // Cheap-tier end-to-end coverage that drives the REAL Session Process host over an
-// in-memory channel pair (`host.Connect` + `App.connect`) instead of a WebRTC data channel.
+// in-memory channel pair (`host.Connect` + `Client.connect`) instead of a WebRTC data channel.
 // Same production code path — the peer handshake, the doc State relay, the queue drain, the
 // cursor-presence relay, and the title→Manager report — but with no WebRTC, no HTTP, and no
 // native addon, so it runs on every PR. Event-driven throughout via model waiters; the one

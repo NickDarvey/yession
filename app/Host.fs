@@ -588,7 +588,7 @@ let startFull
         // peer; peer payloads are relayed by the receiving connection.
         // Not released: this one belongs to the SESSION, and it outlives every peer in the
         // map it broadcasts to (a client's own per-channel listener is the one that goes,
-        // in `App.connect`).
+        // in `Client.connect`).
         DocSync.onLocalUpdate doc (fun payload ->
             connections |> Map.iter (fun _ channel -> sendState channel payload))
         |> ignore

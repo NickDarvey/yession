@@ -97,7 +97,7 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
         let doc = Y.Doc.Create ()
         doc.clientID <- float (i + 1)
         let registry = BodyRegistry doc
-        let runner = Harness.run (App.makeProgram doc (ClientModel.init (peer (sprintf "peer-%d" i) (sprintf "Peer %d" i))))
+        let runner = Harness.run (Client.makeProgram doc (ClientModel.init (peer (sprintf "peer-%d" i) (sprintf "Peer %d" i))))
         doc, runner, registry
     let peers = [| mkPeer 0; mkPeer 1 |]
     let peerDoc i = let (d, _, _) = peers.[i] in d
@@ -364,7 +364,7 @@ let private runDraftSchedule (ops: DraftOp list) : (string * string) list * Peer
     doc.clientID <- 1.0
     let owner = peerIdOf 0
     let registry = BodyRegistry doc
-    let runner = Harness.run (App.makeProgram doc (ClientModel.init (peer "peer-0" "Peer 0")))
+    let runner = Harness.run (Client.makeProgram doc (ClientModel.init (peer "peer-0" "Peer 0")))
     let snapshots = ResizeArray<string * string> ()
     let mutable qn = 0
     let apply op =

@@ -23,7 +23,7 @@
          composer) and by App (which sends it). -->
     <Compile Include="TerminalText.fs" />
     <Compile Include="View.fs" />
-    <Compile Include="App.fs" />
+    <Compile Include="Client.fs" />
   </ItemGroup>
 
   <ItemGroup>

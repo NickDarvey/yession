@@ -44,7 +44,7 @@ let private codecTests =
         testCase "decode∘encode preserves the synced session state" <| fun () ->
             let doc = Y.Doc.Create ()
             let registry = BodyRegistry doc
-            let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            let p = Harness.run (Client.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
             // A draft slot whose rich body is a top-level fragment root (not a model field, and
             // not in the decoded tree). So equality below is over the slot's identity; the body
             // is asserted separately, through the registry.
@@ -60,7 +60,7 @@ let private codecTests =
         // hand the choice back to its provider.
         testCase "the model choice crosses the sync boundary" <| fun () ->
             let doc = Y.Doc.Create ()
-            let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            let p = Harness.run (Client.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
             let chosen = ModelId.create "a-model" |> expect
             p.Dispatch (user (SetModelMsg (Some chosen)))
             let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
@@ -68,7 +68,7 @@ let private codecTests =
 
         testCase "unpicking a model hands the choice back to the provider" <| fun () ->
             let doc = Y.Doc.Create ()
-            let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            let p = Harness.run (Client.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
             p.Dispatch (user (SetModelMsg (Some (ModelId.create "a-model" |> expect))))
             p.Dispatch (user (SetModelMsg None))
             let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
@@ -96,7 +96,7 @@ let private codecTests =
                         Woke = None } ]
                   ActiveAgentMessages = Map.empty; WokenTurn = None }
             let initial = { ClientModel.init (peer "ada" "Ada") with Conversation = conversation }
-            let p = Harness.run (App.makeProgram doc initial)
+            let p = Harness.run (Client.makeProgram doc initial)
             Body.author registry p ada "draft body"
 
             let drafts : Y.Map<obj> = doc.getMap "drafts"
@@ -108,7 +108,7 @@ let private codecTests =
         testCase "enqueueing round-trips through the codec (draft moves into the queue)" <| fun () ->
             let doc = Y.Doc.Create ()
             let registry = BodyRegistry doc
-            let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            let p = Harness.run (Client.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
             let queueId = QueueId.create "q-1" |> expect
             Body.authorAs queueId registry p ada "queued words"
             Expect.equal
@@ -130,8 +130,8 @@ let private codecTests =
             docB.clientID <- 2.0
             let regA = BodyRegistry docA
             let regB = BodyRegistry docB
-            let pA = Harness.run (App.makeProgram docA (ClientModel.init (peer "ada" "Ada")))
-            let pB = Harness.run (App.makeProgram docB (ClientModel.init (peer "grace" "Grace")))
+            let pA = Harness.run (Client.makeProgram docA (ClientModel.init (peer "ada" "Ada")))
+            let pB = Harness.run (Client.makeProgram docB (ClientModel.init (peer "grace" "Grace")))
             let q1 = QueueId.create "q-1" |> expect
             let q2 = QueueId.create "q-2" |> expect
             let queueIds (p: Body.Runner) =
@@ -169,7 +169,7 @@ let private codecTests =
         // program observes the doc through, and only a second replica exercises it.
         testCase "the width a command claims crosses the sync boundary" <| fun () ->
             let doc = Y.Doc.Create ()
-            let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            let p = Harness.run (Client.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
             let terminal = TerminalId.create "term-a" |> expect
             let queueId = QueueId.create "q-term" |> expect
             p.Dispatch (user (TerminalViewportMsg (terminal, { Cols = 132; Rows = 43 })))
@@ -187,8 +187,8 @@ let private codecTests =
             let docB = Y.Doc.Create ()
             docA.clientID <- 1.0
             docB.clientID <- 2.0
-            let pA = Harness.run (App.makeProgram docA (ClientModel.init (peer "ada" "Ada")))
-            let pB = Harness.run (App.makeProgram docB (ClientModel.init (peer "grace" "Grace")))
+            let pA = Harness.run (Client.makeProgram docA (ClientModel.init (peer "ada" "Ada")))
+            let pB = Harness.run (Client.makeProgram docB (ClientModel.init (peer "grace" "Grace")))
             let terminal = TerminalId.create "term-a" |> expect
             let queueId = QueueId.create "q-term" |> expect
             pA.Dispatch (user (TerminalViewportMsg (terminal, { Cols = 132; Rows = 43 })))
@@ -206,7 +206,7 @@ let private codecTests =
             // A size is text in the doc, so the empty one has to decode to NO claim: as a
             // `{ Cols = 0; Rows = 0 }` it would be a resize to a terminal with no columns.
             let doc = Y.Doc.Create ()
-            let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            let p = Harness.run (Client.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
             let terminal = TerminalId.create "term-a" |> expect
             let queueId = QueueId.create "q-term" |> expect
             p.Dispatch (user (EnsureTerminalDraftMsg (terminal, ada, queueId)))
@@ -220,7 +220,7 @@ let private codecTests =
         testCase "the collaborative title round-trips through the codec" <| fun () ->
             let doc = Y.Doc.Create ()
             let registry = BodyRegistry doc
-            let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            let p = Harness.run (Client.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
             p.Dispatch (user (EditTitleMsg (Text.insert 0 "Launch plan" (p.Model ()).Synced.Title)))
 
             let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
@@ -249,7 +249,7 @@ let private draftSlotTests =
             async {
                 let doc = Y.Doc.Create ()
                 let registry = BodyRegistry doc
-                let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+                let p = Harness.run (Client.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
                 DraftSlot.follow doc registry ada (user >> p.Dispatch) |> ignore
 
                 // Mounting a composer is not drafting: the editor writes an empty paragraph into
@@ -270,7 +270,7 @@ let private draftSlotTests =
         testCase "an empty-bodied slot is dropped from a doc at boot; a typed draft survives" <| fun () ->
             let doc = Y.Doc.Create ()
             let registry = BodyRegistry doc
-            let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            let p = Harness.run (Client.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
             let grace = PeerId.create "grace" |> expect
             // The pre-rule shape, as a persisted doc carries it: ada published a slot and never
             // typed; grace has a real draft.
@@ -763,7 +763,7 @@ let private harnessTests =
         testCaseAsync "a condition that never arrives fails the ONE test, with why" <|
             async {
                 let doc = Y.Doc.Create ()
-                let p = Harness.runWith 50 (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+                let p = Harness.runWith 50 (Client.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
                 let! outcome = Async.Catch (p.WaitFor (fun _ -> false))
                 match outcome with
                 | Choice1Of2 () -> failwith "a never-satisfied predicate must not resolve"
@@ -777,14 +777,14 @@ let private harnessTests =
         testCaseAsync "a condition that is already true resolves without waiting" <|
             async {
                 let doc = Y.Doc.Create ()
-                let p = Harness.runWith 50 (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+                let p = Harness.runWith 50 (Client.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
                 do! p.WaitFor (fun m -> m.Peer.DisplayName = "Ada")
             }
 
         testCaseAsync "a condition that arrives resolves, and the deadline never fires after it" <|
             async {
                 let doc = Y.Doc.Create ()
-                let p = Harness.runWith 50 (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+                let p = Harness.runWith 50 (Client.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
                 let waited = p.WaitFor (fun m -> m.Composer = Own)
                 p.Dispatch (user StartDraftMsg)
                 do! waited

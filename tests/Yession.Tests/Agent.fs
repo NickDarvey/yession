@@ -942,7 +942,7 @@ let private armTests =
 /// nobody asked for is still a turn.
 let private schedulerOverPickedModel (choice: ModelId option) =
     let doc = Y.Doc.Create ()
-    let picker = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+    let picker = Harness.run (Client.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
     picker.Dispatch (user (SetModelMsg choice))
     let log = newLog ()
     appendNow log (blockStarted "b1" true (Some (PeerRef ada)))
