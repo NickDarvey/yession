@@ -20,8 +20,8 @@ module Yession.Tests.LockSource
 //
 // So the check moved to where no clone's local configuration can be missing it. A filter keeps
 // a working tree clean, which is worth having and is why it stays; this refuses the content.
-// `TestSources` says the same thing about a different rule: a guard on the source fires on the
-// pull request that writes it.
+// `YES007`, the rule that keeps the environment written from one place, says the same thing
+// about a different guard: it fires on the pull request that writes it.
 //
 // No capability: it reads a file.
 

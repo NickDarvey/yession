@@ -115,7 +115,7 @@ let rec private declaredIn (ds: FSharpImplementationFileDeclaration list) =
 /// THEM — Thoth.Json and Thoth.Json.Net declare `ExtraCoders` twice — is nobody here's to
 /// answer for. The source scans this replaced drew the same line by keeping lists of
 /// directories; this reads it off the tree it is already analyzing.
-let rec private repositoryOf (dir: string) =
+let rec repositoryOf (dir: string) =
     if isNull dir then None
     elif File.Exists (Path.Combine (dir, "Yession.slnx")) then Some dir
     else repositoryOf (Path.GetDirectoryName dir)

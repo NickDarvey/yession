@@ -76,7 +76,6 @@
     <Compile Include="InMemory.fs" />
     <Compile Include="Cli.fs" />
     <Compile Include="NixSource.fs" />
-    <Compile Include="TestSources.fs" />
     <Compile Include="SandboxBackends.fs" />
     <Compile Include="LockSource.fs" />
     <Compile Include="Main.fs" />

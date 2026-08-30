@@ -101,7 +101,6 @@ let all =
         // may write the process env, because a suite that writes it writes it for every suite
         // after it in the same process. Cheap tier deliberately — the mutation happens there,
         // and only its consequence needs a live tier.
-        Tag.needs "Test sources" [] (fun () -> TestSources.tests)
         // The source contract that guards a DEFAULT rather than a declaration: a confinement
         // switch read in two places is read with two defaults, and the weaker one wins
         // without anybody choosing it.

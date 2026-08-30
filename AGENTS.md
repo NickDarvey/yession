@@ -376,13 +376,35 @@ Its population is NAMED rather than derived, deliberately — `Yession.Domain.*`
 this repository expects a file to open several of at once, which is a fact about how the domain
 is meant to be used and not one the assembly graph knows.
 
-`Population.fs` is what these read: every declaration one project could name, of the code
-this repository builds — its own contents entire, plus what it references, bounded to the
-repository and cached per project. `Surfaces.fs` is the half the two namespace rules share:
+The seventh is not about names at all (`EnvWrites.fs`): a process has ONE environment, so a
+write to it is a write for everything that runs after — and the half that is easy to forget is
+putting back what was there. A test suite is one process, and `Phase2`'s credential-leak
+regression planted `ANTHROPIC_API_KEY` and DELETED it on the way out, which is a clear rather
+than a restore: every `LiveAgent` suite after it ran with no credential, `SessionMain` answers
+no credential by starting NO AGENT, and the live clone case got a session that accepted a
+message and never replied. Nothing said why, four times. So the writes stay in one file per
+assembly, which is the unit that becomes a process, and that file owns the give-back
+(`Support.withEnv`). Guarding the write rather than its consequence is deliberate: the mutation
+is in the cheap tier and only the consequence needs `LiveAgent`, so a guard on the consequence
+fires on a tier almost nobody runs, months later. It replaced a suite whose patterns could not
+tell a write from the mention of one — they matched an `[<Emit>]` macro's TEXT, so declaring the
+JavaScript that assigns counted the same as running it, which is why it had to be scoped by hand
+to one directory and why the product's own `Interop.setEnv` was invisible to it either way. On
+the tree a declaration is a declaration and a call is a call.
+
+`Population.fs` is what the scoping rules read: every declaration one project could name, of
+the code this repository builds — its own contents entire, plus what it references, bounded to
+the repository and cached per project. `Surfaces.fs` is the half the two namespace rules share:
 what an `open` puts in front of a file, read once because both break the same way if it is
-read wrong. A verdict over a whole population is the same for every file
-in it, so it is reported once, on the project's last authored source file, anchored at the
-declaration it is about.
+read wrong. `Expressions.fs` is the other side of the same idea, for a rule about what the code
+DOES rather than what it could name: every call the project makes, and the binding each is
+written inside — its own files only, because a referenced assembly hands over its declarations
+and never its bodies, and a use is always somewhere. `Environs.fs` is what the environment rules
+share on top of it: whether a call touches the process environment and which argument carries
+the variable's name, which under Fable means reading the `[<Emit>]` macro, since the `$0` in
+`process.env[$0]` is exactly that answer. A verdict over a whole population is the same for
+every file in it, so it is reported once, on the project's last authored source file, anchored
+at the declaration or the call it is about.
 
 One rule answers for the others (`Unjudged.fs`). A declaration the compiler could not build is
 not in the typed tree, so no rule sees it, each correctly reports nothing, and the run ends in
@@ -396,7 +418,9 @@ free with the type-check every rule depends on, so this reports the first error 
 "these rules found nothing", and the next step is `build`, not a rule to go and fix.
 
 Every rule carries a fixture — `analyzers/fixtures/<Rule>Fixture` — whose source says in
-`// YES00n` markers which of its cases must be reported, and `lint` checks the verdicts
+`// YES00n` markers which of its cases must be reported (across several files where the rule is
+about how many files do something, since one file could then neither break it nor prove the rule
+still sees a break), and `lint` checks the verdicts
 against them in both directions on every run, counting only that rule's own diagnostics — the
 two emit rules read the same macros from opposite ends, so a case one is asking about is
 routinely something the other has an opinion on. That is what stops a rule going silently blind:
