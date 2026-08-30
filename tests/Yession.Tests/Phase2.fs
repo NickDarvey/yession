@@ -566,6 +566,45 @@ let private sandboxPolicyTests =
             let prepared = Sandboxes.SessionLayout.prepareTmpDir dir
             Expect.equal (Fs.canonical prepared) (Some prepared) "it settled on a path that is its own canonical form"
 
+        // Where a repo-declared sandbox stands. `toRequest` resolves `workdir` against the
+        // checkout as everything outside a sandbox says it, and that is deliberately
+        // relative — `SessionMain` hands out `repos/octo/hello` so a person, the repo verbs
+        // and `set_shell_profile` all say one short thing. The policy is the last place
+        // holding the root it is relative to, so it is the place that has to resolve it.
+        //
+        // Left unresolved, every repo-declared sandbox failed to start: the backend
+        // `mkdir`s this path, and against the session process's own cwd it is nowhere.
+        testCase "a workdir in the outside vocabulary becomes an absolute directory" <| fun () ->
+            let policy =
+                Sandboxes.policyFor
+                    SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") Map.empty Map.empty
+                    (Some "/data/workspace") None (Some "/data/home") []
+                    { EnvironmentSpec.defaults with WorkingDirectory = Some "repos/octo/hello" }
+                |> expect
+            Expect.equal
+                policy.WorkingDirectory
+                (Some "/data/workspace/repos/octo/hello")
+                "resolved against the workspace it was made relative to"
+
+        // The other two arms of the same vocabulary, so the case above cannot pass by
+        // prefixing everything: an absolute path is already an answer, and asking for
+        // nothing is the workspace.
+        testCase "a workdir already absolute is left alone, and none at all is the workspace" <| fun () ->
+            let workdir spec =
+                Sandboxes.policyFor
+                    SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") Map.empty Map.empty
+                    (Some "/data/workspace") None (Some "/data/home") [] spec
+                |> expect
+                |> fun policy -> policy.WorkingDirectory
+            Expect.equal
+                (workdir { EnvironmentSpec.defaults with WorkingDirectory = Some "/elsewhere" })
+                (Some "/elsewhere")
+                "an absolute path names itself"
+            Expect.equal
+                (workdir EnvironmentSpec.defaults)
+                (Some "/data/workspace")
+                "and a sandbox with no opinion stands in its workspace"
+
         testCase "the srt config carries the tools, the egress and the temp dir through" <| fun () ->
             let policy = { Support.emptyPolicy with WritePaths = [ "/data/workspace" ]; AllowedDomains = Some [ "api.example.com" ] }
             let config =

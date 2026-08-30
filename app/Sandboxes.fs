@@ -433,20 +433,33 @@ let policyFor
           Sockets = List.distinct grantedSockets
           Realisation = differences
           Env = env
-          // What the sandbox ASKED to start in, and the workspace only when it asked
-          // for nothing. `toRequest` has already resolved this against the checkout
-          // as the sandbox SEES it (`ReposService.CheckoutOf` is backend-aware), so
-          // there is nothing left here to resolve — only to honour.
+          // What the sandbox ASKED to start in, RESOLVED — the workspace when it asked
+          // for nothing, and otherwise the spec's path acquiring its meaning here.
           //
-          // It used to be `workspace` outright, which made a repo's `workdir` a key
-          // the decoder validated strictly and the policy then dropped: a file that
-          // read as applied and was not. The tell was that `ensure` reported the
-          // difference correctly — "it starts in repos/foo/bar" — about a sandbox
-          // whose `pwd` was the workspace, so the product asserted something untrue.
+          // `toRequest` resolves a repo's `workdir` against the checkout as everything
+          // OUTSIDE a sandbox says it, and that vocabulary is relative on purpose:
+          // `SessionMain` hands out `repos/octo/hello` (via `SandboxPath.reachedFrom`)
+          // so a person, `set_shell_profile` and the repo verbs all say one short
+          // thing. What comes back is therefore relative, and this is the last place
+          // holding the root it is relative TO — so this is where it stops being a
+          // path in that vocabulary and becomes a directory.
+          //
+          // It used to say `Option.orElse workspace`, which honoured the relative form
+          // verbatim: a repo declaring `workdir: .` produced a policy whose directory
+          // was `repos/octo/hello`, the backend then `mkdir`'d it against the SESSION
+          // PROCESS's cwd, and every repo-declared sandbox failed to start with
+          // `ENOENT: no such file or directory, mkdir 'repos/octo/hello'`. It is also
+          // the root `resolvedFrom` resolves each spawn's own directory against, so a
+          // relative one made every later resolution relative too.
+          //
+          // Before that it was `workspace` outright, which dropped a repo's `workdir`
+          // entirely — a file that read as applied and was not. `resolvedFrom` is both
+          // fixes at once, and it is `reachedFrom`'s own inverse: the pair that made
+          // the path short is the pair that makes it a directory again.
           //
           // The write root stays the workspace either way (`WritePaths` above): a
           // sandbox that starts in its checkout still writes where it always did.
-          WorkingDirectory = spec.WorkingDirectory |> Option.orElse workspace
+          WorkingDirectory = SandboxPath.resolvedFrom workspace spec.WorkingDirectory
           Filesystem = Confined }
 
 /// A one-line description of the backend + spec for the start-requested event.
