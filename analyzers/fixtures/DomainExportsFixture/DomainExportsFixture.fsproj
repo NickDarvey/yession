@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Not a product project and deliberately not in Yession.slnx, for the same reason the
+    other fixtures are not: half the namespaces below are meant to be reported. `lint`
+    analyzes it on its own and checks the verdicts against the `// YES006` markers.
+
+    It declares `Yession.Domain.*` namespaces of its own, which is the population the rule
+    names. That is the point: the rule is about a family this repository expects a file to
+    open several of at once, so a fixture for it has to be in that family.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Slices.fs" />
+  </ItemGroup>
+
+</Project>

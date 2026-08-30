@@ -26,7 +26,7 @@ module Yession.Tests.SandboxBackends
 // Comments are exempt: naming the variable in prose is how the rest of the codebase
 // explains itself, and a mention cannot decide anything.
 //
-// No capability: it reads files, like `NamespaceShadowing` and `TestSources` beside it.
+// No capability: it reads files, like `TestSources` beside it.
 
 open Fable.Core
 open Fable.Core.JsInterop

@@ -1,9 +1,8 @@
 module Yession.Analyzers.NamespaceShadowing
 
-open FSharp.Compiler.Symbols
-open FSharp.Compiler.Text
 open FSharp.Analyzers.SDK
 open Yession.Analyzers.Population
+open Yession.Analyzers.Surfaces
 
 /// `open Yession.Domain` brings every SUB-NAMESPACE of it into scope by short name. So the
 /// moment the domain is split into feature namespaces, `Yession.Domain.Terminals` puts the name
@@ -56,112 +55,6 @@ open Yession.Analyzers.Population
 [<Literal>]
 let Code = "YES005"
 
-/// One scope, and what an `open` of its parent puts in front of a file.
-type private Surface =
-    { Full: string
-      Short: string
-      IsNamespace: bool
-      Exports: (string * range) list
-      Declared: Declaration list }
-
-let private shortOf (full: string) =
-    let cut = full.LastIndexOf '.'
-    if cut < 0 then full else full.Substring (cut + 1)
-
-let private enclosing (full: string) =
-    let cut = full.LastIndexOf '.'
-    if cut < 0 then None else Some (full.Substring (0, cut))
-
-let private located (name: string) (at: unit -> range) =
-    try Some (name, at ()) with _ -> None
-
-/// What is reachable as `Short.member` from a file that has a MODULE in front of it: its types
-/// and nested modules, plus its values.
-let private moduleExports (e: FSharpEntity) =
-    seq {
-        for child in e.NestedEntities do
-            if child.Accessibility.IsPublic then
-                match located child.DisplayName (fun () -> child.DeclarationLocation) with
-                | Some export -> yield export
-                | None -> ()
-
-        for value in e.MembersFunctionsAndValues do
-            if value.Accessibility.IsPublic && not value.IsCompilerGenerated then
-                match located value.DisplayName (fun () -> value.DeclarationLocation) with
-                | Some export -> yield export
-                | None -> ()
-    }
-
-/// A namespace is not an entity worth reading. FCS represents the one a file declares as a
-/// chain of one entity per SEGMENT, each carrying that segment as its name and holding no
-/// children — `namespace Alpha.Beta.Widgets` arrives as `Alpha`, `Beta`, `Widgets`, and the
-/// types the file declares in it arrive beside them rather than inside. Nothing in that answers
-/// "what does `Alpha.Beta.Widgets` export".
-///
-/// The members do. A declaration whose parent is a namespace is a member of the namespace its
-/// own full name names, and reading it from that direction is also the only thing that works
-/// uniformly: a namespace in a REFERENCED assembly does hold its children, so a rule reading
-/// entities would have had two shapes to cope with and would have been silently right about
-/// one of them.
-let private namespaceMembership (declaration: Declaration) =
-    try
-        let e = declaration.Entity
-
-        let inNamespace =
-            match e.DeclaringEntity with
-            | Some parent -> parent.IsNamespace
-            | None -> false
-
-        if not inNamespace then
-            None
-        else
-            match enclosing e.FullName, located e.DisplayName (fun () -> e.DeclarationLocation) with
-            | Some owner, Some export -> Some (owner, export, declaration)
-            | _ -> None
-    with _ ->
-        None
-
-let private moduleSurface (declaration: Declaration) =
-    try
-        let e = declaration.Entity
-
-        if not e.IsFSharpModule then
-            None
-        else
-            Some
-                { Full = e.FullName
-                  Short = e.DisplayName
-                  IsNamespace = false
-                  Exports = List.ofSeq (moduleExports e)
-                  Declared = [ declaration ] }
-    with _ ->
-        None
-
-/// Only publicly reachable scopes take part. The hazard is what an `open` of a shared parent
-/// puts in front of an arbitrary file, and a scope nothing outside can name is not something an
-/// arbitrary file can open.
-let private reachable (declaration: Declaration) = declaration.Scope = Everywhere
-
-/// A namespace spans files and assemblies, so what it offers is the union of what each puts in
-/// it.
-let private surfaces (declarations: Declaration list) =
-    let open' = declarations |> List.filter reachable
-
-    let namespaces =
-        open'
-        |> List.choose namespaceMembership
-        |> List.groupBy (fun (owner, _, _) -> owner)
-        |> List.map (fun (owner, group) ->
-            { Full = owner
-              Short = shortOf owner
-              IsNamespace = true
-              Exports = [ for (_, export, _) in group -> export ] |> List.distinct
-              Declared = [ for (_, _, declaration) in group -> declaration ] })
-
-    let modules = open' |> List.choose moduleSurface
-
-    namespaces, modules
-
 let private describe (namespace': Surface) (module': Surface) (shared: string list) =
     let names = shared |> List.sort |> String.concat ", "
 
@@ -172,7 +65,9 @@ let private describe (namespace': Surface) (module': Surface) (shared: string li
     + "namespace a short name nothing else uses."
 
 let private offenders (declarations: Declaration list) =
-    let namespaces, modules = surfaces declarations
+    let all = surfaces declarations
+    let namespaces = all |> List.filter (fun s -> s.IsNamespace)
+    let modules = all |> List.filter (fun s -> not s.IsNamespace)
     // Indexed by the short name, because only scopes that answer to one name can shadow and the
     // product has hundreds of each.
     let byShort = modules |> List.groupBy (fun s -> s.Short) |> Map.ofList
