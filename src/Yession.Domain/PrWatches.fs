@@ -47,10 +47,21 @@ module PrStatus =
             | Stalled -> "stalled"
             | NotQueued -> "open"
 
-    /// Worst first. What "worst" means here is how much it wants a person: a stalled pull
-    /// request has nobody driving it, an open one is waiting on somebody, a queued one is
-    /// waiting on machines, and merged or closed is over.
-    let order : string list = [ "stalled"; "open"; "queued"; "merged"; "closed" ]
+    /// What a watch says when the session cannot currently read it — a dead credential, a
+    /// pull request it cannot see, a rate-limit window. The panel's status column says
+    /// WHICH; a one-line summary has room only for the fact that nobody is driving this
+    /// one, and for a worse reason than a stall.
+    let unreachable : string = "unreachable"
+
+    /// Worst first. What "worst" means here is how much it wants a person: an unreachable
+    /// watch is not being driven at all, a stalled pull request has nobody driving it, an
+    /// open one is waiting on somebody, a queued one is waiting on machines, and merged or
+    /// closed is over.
+    let order : string list = [ unreachable; "stalled"; "open"; "queued"; "merged"; "closed" ]
+
+    /// A pull request that is still owed. Merged and closed ones are history: they are why
+    /// a summary of six watches can honestly be silent.
+    let live (word: string) : bool = word <> "merged" && word <> "closed"
 
     /// Which of two status words wants a person more. Unknown words rank last rather than
     /// first: a surface should not shout about a word this module has never heard of.
@@ -60,6 +71,23 @@ module PrStatus =
             | Some index -> index
             | None -> List.length order
         if rank left <= rank right then left else right
+
+    /// One line a session says about its pull requests, for a surface that has room for
+    /// one line and no more — the Manager's roster, the session page's header strip.
+    ///
+    /// Only what is still OWED is counted. A session whose watches have all merged has
+    /// nothing to say, and says nothing, rather than reporting a number that is really a
+    /// history. Silence here means "nothing waiting", which is what makes a line that IS
+    /// there worth reading.
+    let summarize (standings: (PrRef * string) list) : string =
+        match standings |> List.filter (snd >> live) with
+        | [] -> ""
+        // One is named, because with a single pull request the number IS the answer and a
+        // count of one says less than the thing it counted.
+        | [ pr, word ] -> sprintf "#%d %s" pr.Number word
+        | several ->
+            let worst = several |> List.map snd |> List.reduce worse
+            sprintf "%d PRs · %d %s" (List.length several) (several |> List.filter (snd >> (=) worst) |> List.length) worst
 
 type PrWatch =
     { Pr : PrRef

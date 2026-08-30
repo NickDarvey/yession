@@ -530,6 +530,17 @@ first's.
 - **No browser support matrix**: verified on Chromium (headless, in CI); the ICE
   gathering settle-fallback should cover Safari/Firefox mDNS behaviour, but they are
   untested.
+- **A session's port, pid and build are no longer on the manager page.** They shared the
+  status cell with the line a session now says about itself, and both do not fit — measured,
+  the word plus a summary plus a build want 460px of a 384px cell. The summary is the answer
+  to the question the page exists for (which of six sessions wants me) and the rest is
+  diagnostic, so the diagnostic went and the column shrank to 256px. Nothing else lost it:
+  `SessionRegistryEntry.Build` still rides the registry stream, and the Manager's own build is
+  still on the page header. The way back, if a reader ever wants it, is a row that opens —
+  clicking the id to expand or pop out the process detail — rather than a fourth thing
+  competing for one line; that is unbuilt, and the summary is deliberately what the row shows
+  instead. Below `xl` the summary yields too (the column is 100px there), so a phone gets this
+  answer from the tab title.
 
 ## Agent
 

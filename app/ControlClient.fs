@@ -89,6 +89,24 @@ let nameReporter (baseUrl: string) (secret: string) : string -> Async<unit> =
             with _ -> return ()
         }
 
+/// Report the one line this session says about itself, so the roster can show it.
+/// Best-effort like `nameReporter` and for the same reason: a summary that fails to arrive
+/// leaves the roster showing the last one, which is stale rather than wrong, and never a
+/// reason to disturb the session.
+let summaryReporter (baseUrl: string) (secret: string) : string -> Async<unit> =
+    fun summary ->
+        async {
+            try
+                let! _ =
+                    postJson
+                        (sprintf "%s/control/summary" baseUrl)
+                        secret
+                        (ControlWire.toString ControlWire.sessionSummaryReport summary)
+                    |> Interop.awaitPromise
+                return ()
+            with _ -> return ()
+        }
+
 [<Emit("""fetch($0, { method: 'POST', headers: { 'x-yession-control': $1, 'content-type': 'application/json' }, body: $2 })
   .then(async r => ({ status: r.status, body: await r.text() }))""")>]
 let private postJsonReply (url: string) (secret: string) (body: string) : JS.Promise<{| status: int; body: string |}> = jsNative

@@ -41,6 +41,19 @@ module ControlWire =
     /// to it, and the running turn lives in its scheduler. The Manager supplies the policy
     /// (how long idle is too long) and the CLOCK — it timestamps each report on arrival, so
     /// a child's idea of the time never enters the decision.
+    /// One line a session says about ITSELF, reported child→Manager so the roster can show
+    /// it. Metadata like the name and the activity beat, and deliberately opaque: the
+    /// Manager stores and renders a string, and never learns that this one was made of
+    /// pull requests. Empty clears it.
+    ///
+    /// A summary rather than a structure, because the alternative is the Manager growing a
+    /// vocabulary for every feature a session might want to report — and a roster that has
+    /// to be taught about pull requests cannot be taught about the next thing without a
+    /// deployment.
+    let sessionSummaryReport : Codec<string> =
+        { Encode = fun summary -> Encode.object [ "summary", Encode.string summary ]
+          Decode = Decode.field "summary" Decode.string }
+
     let sessionActivityReport : Codec<bool> =
         { Encode = fun busy -> Encode.object [ "busy", Encode.bool busy ]
           Decode = Decode.field "busy" Decode.bool }

@@ -472,6 +472,28 @@ let private sinceView (at: DateTimeOffset) : string =
     let utc = at.ToUniversalTime ()
     sprintf "%04d-%02d-%02d %02d:%02dZ" utc.Year utc.Month utc.Day utc.Hour utc.Minute
 
+/// Where this watch stands, in the one word every surface says it with. `None` until the
+/// first look: watched-but-not-yet-read is not a state, and guessing one would be a claim
+/// nobody made.
+let word (row: PrWatchRow) : string option =
+    // State from the look just taken; queue from the BASELINE, because stalled is a fact
+    // about history and a snapshot can only say what is true right now.
+    row.Snapshot |> Option.map (fun snapshot -> PrStatus.word row.Known.Queue snapshot.State)
+
+/// The one line this session says about its pull requests — what the roster and the header
+/// strip both read, and the only place the mapping from rows to words lives.
+///
+/// A watch that cannot be READ outranks whatever it last said: a dead credential means
+/// nobody is driving this one, which is worse news than any state it is stuck in. Which of
+/// those words wins, and whether the line is worth saying at all, is `PrStatus.summarize`.
+let summaryOf (rows: PrWatchRow list) : string =
+    rows
+    |> List.choose (fun row ->
+        match row.Health with
+        | Some _ -> Some (row.Pr, PrStatus.unreachable)
+        | None -> word row |> Option.map (fun said -> row.Pr, said))
+    |> PrStatus.summarize
+
 /// Register the watched pull requests as a query. A GETTER for the `mcp_servers` reason:
 /// the query surface is composed before the Host is started, and the Host is what builds
 /// the poller.
@@ -494,15 +516,11 @@ let query (current: unit -> PrWatchers) : Queries.QueryRegistration =
                               // it should not take reading six rows to find it. The word is
                               // still the word — the tone only says how loudly.
                               "state",
-                              (match row.Snapshot with
-                               | Some s ->
-                                   // State from the look just taken; queue from the
-                                   // BASELINE, because stalled is a fact about history and
-                                   // a snapshot can only say what is true right now.
-                                   let word = PrStatus.word row.Known.Queue s.State
+                              (match word row with
+                               | Some said ->
                                    CellStatus (
-                                       word,
-                                       match word with
+                                       said,
+                                       match said with
                                        // Merged is the outcome somebody was waiting for;
                                        // stalled is the one nobody is driving. Queued is
                                        // in flight. Open and closed are the ordinary
