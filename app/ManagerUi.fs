@@ -34,16 +34,23 @@ module private Col =
     /// ids were set in whatever monospace a box happened to have, and the switch to a shipped
     /// face made them 6px too wide for it. The first thing to go on a phone.
     let id = "w-[210px] max-md:hidden"
-    /// Holds the status word plus `port · pid · build` uncut; below `xl`, just the word.
+    /// Holds the status word plus the line the session says about itself; below `xl`, just
+    /// the word.
     ///
-    /// MEASURED like its neighbours, and the threshold moved with the third fact rather than
-    /// the width alone: 256px fitted `port · pid`, a build takes ~105px more, and the name
-    /// column is what pays — it is the only elastic one. At the 1152px this table is capped
-    /// to, 384px leaves the name 190px, which is a name; on the widths between `md` and `xl`
-    /// it would have left a letter and an ellipsis, which is the failure this column was
-    /// already sized around once. So the plumbing yields there exactly as it does on a phone,
-    /// and the cell keeps the word it exists to say.
-    let status = "w-[384px] max-xl:w-[100px]"
+    /// MEASURED like its neighbours, and it SHRANK when `port · pid · build` came out: the
+    /// word is 78px and a summary long enough to be worth reading ("12 PRs · 3 unreachable")
+    /// is 134px, so 256px carries both with 44px to spare, where the plumbing had needed
+    /// 384px and still could not fit a summary beside it. The name column is what gains — it
+    /// is the only elastic one, and at the 1152px this table is capped to it goes from 190px
+    /// to 318px, which is most of a name rather than the start of one.
+    ///
+    /// A longer summary is CLIPPED by the cell rather than wrapping, because a row that
+    /// changes height when a session picks up a third pull request is a list you cannot keep
+    /// your place in. The clipping is the `<td>`'s (`truncate` there, and nowhere on the span
+    /// — `overflow` does nothing to an inline element, so a span wearing it would be a class
+    /// that reads like a promise and keeps none). The worst it can lose is the tail of a
+    /// count; the word it exists to say is first and always whole.
+    let status = "w-[256px] max-xl:w-[100px]"
     /// `2026-08-18 09:12Z` in the 12px mono face, plus the cell's gutter. MEASURED like the
     /// id beside it: 17 characters of 12px Monaspace Neon is 123px, and the caps header over
     /// it is narrower than that. Goes with the id on a phone — it is the sort KEY, and a sort
@@ -57,11 +64,18 @@ module private Col =
     /// 128px text button, a 24px borderless icon, and the 8px between them.
     let actionsNarrow = "w-[160px] max-md:w-[136px]"
 
-// The status word carries the colour (text, never boxed — the affordance rule); the
-// process detail (port · pid) is plumbing, so it sits beside the word in the quieter
-// faint mono step rather than shouting in the status voice, and yields on narrow
-// screens. It stays on ONE line at every width its column is given: a status that
-// wraps when a session starts is a row that changes height when a session starts.
+// The status word carries the colour (text, never boxed — the affordance rule), and beside
+// it the one line the session says about ITSELF. It stays on ONE line at every width its
+// column is given: a status that wraps when a session starts is a row that changes height
+// when a session starts.
+//
+// `port · pid · build` used to sit here and no longer does. It was plumbing — the answer to
+// "which process, running what" — and the summary is the answer to the question the page
+// exists for: which of six sessions wants me. Both do not fit (measured: the word, a
+// summary and a build want 460px of a 384px cell), and a diagnostic does not outrank the
+// reason a reader is scanning the column. The build is still on the wire the registry
+// stream carries, so nothing that consumed it has lost it; what is gone is its place on
+// this page. `docs/GAPS.md` names the way back if one is ever wanted.
 let private statusView (view: ProcessManager.SessionView) : TemplateResult =
     match view.Record.ArchivedAt, view.Status with
     // An operator's decision, not a process state — but it belongs in this cell, because
@@ -71,34 +85,24 @@ let private statusView (view: ProcessManager.SessionView) : TemplateResult =
         html $"""<span class="{Style.statusFaint}" data-status="{Dom.Manager.statusArchived}">archived</span>"""
     | None, ProcessManager.NotRunning ->
         html $"""<span class="{Style.statusFaint}" data-status="{Dom.Manager.statusStopped}">stopped</span>"""
-    | None, ProcessManager.Running (port, pid, build) ->
-        // The build joins port and pid because it is the same KIND of fact — which process,
-        // running what — and because it is only legible next to its neighbours: one row
-        // saying 0.0.0-gf1ce52b beside another saying 0.0.0-g5fdc8a2 is the whole answer to
-        // "is this session running what I merged", with no reference value to publish and
-        // nothing to keep in sync. A launch that reported no build adds nothing here rather
-        // than a word standing in for one.
-        let plumbing =
-            match build with
-            | Some build -> sprintf "port %d · pid %d · %s" port pid build
-            | None -> sprintf "port %d · pid %d" port pid
-        // What the session says about ITSELF, between the word and the plumbing: it is the
-        // reason a reader scans this column at all — which of six sessions wants me — so it
-        // reads louder than port and pid and quieter than the status word.
-        //
+    | None, ProcessManager.Running _ ->
         // Rendered opaquely and NOT toned. The Manager stores a line it was told and never
         // learns what it is made of, so any colour it chose would be a colour it guessed;
         // only the session knows whether its own sentence is good news. It exists in this
         // arm alone because a summary is launch-scoped — a session that is not running has
         // no work in flight to describe.
+        //
+        // It yields below `xl` where the plumbing used to, and for the same reason rather
+        // than by inheritance: the column is 100px there (`Col.status`), which is the status
+        // word and nothing else, so a summary would arrive as three characters and an
+        // ellipsis. A phone gets this answer from the tab title instead.
         let summary =
             match view.Summary with
             | Some line ->
-                html
-                    $"""<span class="text-code-sm text-ink ml-2.5 max-md:hidden" data-session-summary>{line}</span>"""
+                html $"""<span class="{Style.small} text-ink ml-2.5 max-xl:hidden" data-session-summary>{line}</span>"""
             | None -> html $""""""
         html
-            $"""<span class="{Style.statusOk}" data-status="{Dom.Manager.statusRunning}"><span class="{Style.statusDotPulse}"></span>running</span>{summary}<span class="font-terminal text-code-sm text-ink-faint tabular-nums ml-2.5 max-xl:hidden" data-session-build>{plumbing}</span>"""
+            $"""<span class="{Style.statusOk}" data-status="{Dom.Manager.statusRunning}"><span class="{Style.statusDotPulse}"></span>running</span>{summary}"""
     | None, ProcessManager.Exited code ->
         let reason = code |> Option.map string |> Option.defaultValue "signal"
         html $"""<span class="{Style.statusErr}" data-status="{Dom.Manager.statusExited}">exited ({reason})</span>"""

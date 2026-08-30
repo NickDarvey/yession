@@ -501,11 +501,10 @@ module Dom =
         /// The row's archive verb, and the archived row's way back. Both carry the session id.
         let archive = "data-archive"
         let unarchive = "data-unarchive"
-        /// Which build a live process is running: `build` on a session row's plumbing line,
-        /// `managerBuild` on the page's own header. Two hooks rather than one, because they
-        /// answer the same question about different processes and a reader comparing them
-        /// needs to tell which is which.
-        let build = "data-session-build"
+        /// Which build the MANAGER is running, on the page's own header. There is no
+        /// per-session twin any more: the roster row's plumbing line was cut so the summary
+        /// could have the column, and a session's build rides the registry stream instead of
+        /// this page.
         let managerBuild = "data-manager-build"
         /// The one line a session says about ITSELF, rendered beside its status word. The
         /// Manager stores and shows the string without learning what it means, so this hook

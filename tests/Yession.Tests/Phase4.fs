@@ -626,20 +626,6 @@ let private uiRenderTests =
             Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusExited)) "a crash is visible"
             Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.launch "ui-render")) "a crashed session can relaunch"
 
-        // Which build a live session is running had no answer anywhere. The Manager reads it
-        // off the readiness line to refuse a major skew and then dropped it, so the one
-        // process that knows what every session is executing published nothing — and a
-        // session that outlives a promotion keeps running the old image silently. The rule is
-        // the answer is ON the row, because a session runs the image it was spawned from and
-        // only a row-by-row reading shows which ones have moved.
-        testCase "a running row says which build it is running" <| fun () ->
-            let running =
-                ManagerUi.sessionRow
-                    PublicAccess.Loopback
-                    { Record = uiRecord; Status = ProcessManager.Running (8199, 42, Some "0.0.0-gf1ce52b"); Summary = None }
-            Expect.isTrue (running.Contains Dom.Manager.build) "the row carries the hook that marks it"
-            Expect.isTrue (running.Contains "0.0.0-gf1ce52b") "wearing the build the launch reported"
-
         // Which of six sessions wants me is the roster's whole job, and until a session could
         // say something about itself the answer was always "open them and see".
         testCase "a running session's row shows the line it said about itself" <| fun () ->
@@ -651,6 +637,9 @@ let private uiRenderTests =
                       Summary = Some "3 PRs · 1 stalled" }
             Expect.isTrue (running.Contains Dom.Manager.summary) "the row carries the hook that marks it"
             Expect.isTrue (running.Contains "3 PRs · 1 stalled") "wearing the line the session reported"
+            // The status column is 100px below `xl`, which is the word and nothing else, so
+            // a summary there would be three characters and an ellipsis.
+            Expect.isTrue (running.Contains "max-xl:hidden") "and it yields where the column has no room for it"
 
         // A summary describes work in FLIGHT. A row that went on showing one after its
         // session stopped would be claiming something no process is doing.
@@ -666,15 +655,21 @@ let private uiRenderTests =
                     { Record = uiRecord; Status = ProcessManager.NotRunning; Summary = Some "3 PRs · 1 stalled" }
             Expect.isFalse (stopped.Contains Dom.Manager.summary) "and a stopped session claims nothing"
 
-        // The other half, and the one that keeps the first honest: an older bundle reports no
-        // version, and a placeholder there would read as an answer. AGENTS.md's version rule
-        // is the same one — never invent a version-shaped value for a build that cannot state
-        // one.
-        testCase "a launch that reported no build has none invented for it" <| fun () ->
+        // The status cell holds the word and the summary, and nothing else. `port · pid ·
+        // build` was here and was cut so the summary could have the column; this is what
+        // says it stayed cut, because a diagnostic creeping back beside the answer is
+        // exactly how the cell overflowed the first time.
+        testCase "a running row says its state and what the session said, and no plumbing" <| fun () ->
             let running =
-                ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.Running (8199, 42, None); Summary = None }
-            Expect.isTrue (running.Contains "port 8199 · pid 42") "what is known is still said"
-            Expect.isFalse (running.Contains "pid 42 · ") "and nothing stands in for what is not"
+                ManagerUi.sessionRow
+                    PublicAccess.Loopback
+                    { Record = uiRecord
+                      Status = ProcessManager.Running (8199, 42, Some "0.0.0-gf1ce52b")
+                      Summary = Some "3 PRs · 1 stalled" }
+            Expect.isTrue (running.Contains "3 PRs · 1 stalled") "the line the session said"
+            Expect.isFalse (running.Contains "port 8199") "and not which port it answers on"
+            Expect.isFalse (running.Contains "pid 42") "nor which process it is"
+            Expect.isFalse (running.Contains "0.0.0-gf1ce52b") "nor which build it runs"
 
         // The Manager is the process that CANNOT roll forward on its own — it keeps the image
         // it exec'd until a restart, so it is routinely the oldest build on the page, and the
