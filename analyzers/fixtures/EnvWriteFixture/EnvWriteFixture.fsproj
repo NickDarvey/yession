@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Not a product project and deliberately not in Yession.slnx, for the same reason
+    EmitMacroFixture is not: every binding below is there to be judged, and some of them
+    are meant to fail. `lint` analyzes it on its own and checks the verdicts against the
+    `// YES007` markers in the source.
+
+    Three files, because the rule is about how many of them write: one file could not
+    break it, so one file could not prove the rule still sees a break either. All three
+    are checked, in both directions — `Access.fs` earns its place by being reported
+    NOWHERE while carrying every shape that looks like a write and is not.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Access.fs" />
+    <Compile Include="Owner.fs" />
+    <Compile Include="Elsewhere.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fable.Core" />
+  </ItemGroup>
+
+</Project>

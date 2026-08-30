@@ -1359,14 +1359,20 @@ let private unjudged = "YES000"
 [<Literal>]
 let private unjudgedExit = 2
 
+/// Every fixture, and every one of its files whose markers are checked. Usually one — a rule
+/// about a declaration can put all its cases in a single file. A rule about how many FILES do
+/// something cannot: one file could not break it, so one file could not prove the rule still
+/// sees a break either, and every file the fixture spreads its cases across has to be read or
+/// the ones outside the first are unchecked.
 let private fixtures =
-    [ unjudged, "UnjudgedFixture", "Uncompilable.fs"
-      "YES001", "TemplateHoleFixture", "Holes.fs"
-      "YES002", "EmitMacroFixture", "Emits.fs"
-      "YES003", "EmitBodyFixture", "Bodies.fs"
-      "YES004", "RecordShapeFixture", "Shapes.fs"
-      "YES005", "NamespaceShadowingFixture", "Scopes.fs"
-      "YES006", "DomainExportsFixture", "Slices.fs" ]
+    [ unjudged, "UnjudgedFixture", [ "Uncompilable.fs" ]
+      "YES001", "TemplateHoleFixture", [ "Holes.fs" ]
+      "YES002", "EmitMacroFixture", [ "Emits.fs" ]
+      "YES003", "EmitBodyFixture", [ "Bodies.fs" ]
+      "YES004", "RecordShapeFixture", [ "Shapes.fs" ]
+      "YES005", "NamespaceShadowingFixture", [ "Scopes.fs" ]
+      "YES006", "DomainExportsFixture", [ "Slices.fs" ]
+      "YES007", "EnvWriteFixture", [ "Access.fs"; "Owner.fs"; "Elsewhere.fs" ] ]
 
 let private fixtureProject name =
     Path.Combine ("analyzers", "fixtures", name, name + ".fsproj")
@@ -1462,27 +1468,27 @@ let private analyzers () =
 
         failwith "lint: an analyzer rejected something in the product — see above for which rule and where"
 
-    for code, name, file in fixtures do
-        let source = fixtureSource name file
-
-        let expected =
-            File.ReadAllLines source
-            |> Array.indexed
-            |> Array.filter (fun (_, line) -> line.EndsWith ("// " + code))
-            |> Array.map (fun (i, _) -> i + 1)
-            |> List.ofArray
-
+    for code, name, files in fixtures do
         let _, fixtureOutput = analyze [ fixtureProject name ]
-        let actual = reportedLines code file fixtureOutput
 
-        if actual <> expected then
-            printfn "%s" fixtureOutput
-            failwithf
-                "lint: %s is not seeing what it should. %s marks lines %A; the analyzer reported %A"
-                code
-                file
-                expected
-                actual
+        for file in files do
+            let expected =
+                File.ReadAllLines (fixtureSource name file)
+                |> Array.indexed
+                |> Array.filter (fun (_, line) -> line.EndsWith ("// " + code))
+                |> Array.map (fun (i, _) -> i + 1)
+                |> List.ofArray
+
+            let actual = reportedLines code file fixtureOutput
+
+            if actual <> expected then
+                printfn "%s" fixtureOutput
+                failwithf
+                    "lint: %s is not seeing what it should. %s marks lines %A; the analyzer reported %A"
+                    code
+                    file
+                    expected
+                    actual
 
 // A workflow file is only validated by GitHub when it RUNS. release.yml runs on master — after a
 // PR has merged — so a syntax error in it is invisible to PR CI and lands already broken: a

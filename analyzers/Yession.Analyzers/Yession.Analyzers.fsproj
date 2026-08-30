@@ -27,10 +27,13 @@
     <Compile Include="EmitMacro.fs" />
     <Compile Include="EmitBody.fs" />
     <Compile Include="Population.fs" />
+    <Compile Include="Expressions.fs" />
+    <Compile Include="Environs.fs" />
     <Compile Include="RecordShapes.fs" />
     <Compile Include="Surfaces.fs" />
     <Compile Include="NamespaceShadowing.fs" />
     <Compile Include="DomainExports.fs" />
+    <Compile Include="EnvWrites.fs" />
   </ItemGroup>
 
   <ItemGroup>
