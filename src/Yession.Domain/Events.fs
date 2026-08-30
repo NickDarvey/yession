@@ -137,8 +137,8 @@ type SessionEvent =
     // on the watcher's behalf (envelope actor System, watcher on the payload). The
     // watch's Initial snapshot plus the recorded transitions ARE the detection baseline
     // (`PrWatches.fs`), which is what keeps a restart from re-announcing old news.
-    | PrWatchStarted of PrWatchStarted
-    | PrWatchStopped of PrWatchStopped
+    | PrWatched of PrWatched
+    | PrUnwatched of PrUnwatched
     | PrTransitioned of PrTransitioned
 
 and [<RequireQualifiedAccess>] SessionCreated =

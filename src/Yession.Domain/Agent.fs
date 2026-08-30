@@ -775,7 +775,7 @@ module AgentWake =
                 | SessionEvent.PrTransitioned p -> background, lastAgent, better (PrChanged p.Pr, p.Watcher) owed
                 // Unwatching clears what that pull request owed. A person who has just said
                 // they no longer care must not get a turn about it a moment later.
-                | SessionEvent.PrWatchStopped p ->
+                | SessionEvent.PrUnwatched p ->
                     let owed =
                         match owed with
                         | Some (PrChanged pr, _) when pr = p.Pr -> None

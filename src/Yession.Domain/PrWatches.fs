@@ -18,7 +18,7 @@ type PrKnown =
 
 type PrWatch =
     { Pr : PrRef
-      /// Whose watch — see `PrWatchStarted.Actor`.
+      /// Whose watch — see `PrWatched.Actor`.
       Watcher : ActorRef
       Known : PrKnown }
 
@@ -35,11 +35,11 @@ module PrTransitions =
     /// poller's, so the two cannot disagree about what has been said.
     let advance (known: PrKnown) (transition: PrTransition) : PrKnown =
         match transition with
-        | PrWasMerged -> { known with State = PrMerged }
-        | PrWasClosed -> { known with State = PrClosed }
-        | PrWasReopened -> { known with State = PrOpen }
-        | ChecksTurnedGreen -> { known with Checks = ChecksGreen }
-        | ChecksTurnedRed -> { known with Checks = ChecksRed }
+        | PrTransition.Merged -> { known with State = PrMerged }
+        | PrTransition.Closed -> { known with State = PrClosed }
+        | PrTransition.Reopened -> { known with State = PrOpen }
+        | PrTransition.ChecksPassed -> { known with Checks = ChecksGreen }
+        | PrTransition.ChecksFailed -> { known with Checks = ChecksRed }
 
     /// What a fresh snapshot means against the last recorded baseline: at most one state
     /// transition and at most one checks transition, state first.
@@ -51,13 +51,13 @@ module PrTransitions =
     let detect (known: PrKnown) (fresh: PrSnapshot) : PrTransition list =
         let state =
             match known.State, fresh.State with
-            | PrOpen, PrMerged -> [ PrWasMerged ]
-            | PrOpen, PrClosed -> [ PrWasClosed ]
-            | PrClosed, PrOpen -> [ PrWasReopened ]
+            | PrOpen, PrMerged -> [ PrTransition.Merged ]
+            | PrOpen, PrClosed -> [ PrTransition.Closed ]
+            | PrClosed, PrOpen -> [ PrTransition.Reopened ]
             // Closed-to-merged: GitHub reports a merged PR as closed+merged, so a watch
             // whose baseline is closed learning of a merge is real (reopened-then-merged
             // between polls collapses to this) and merged is the fact that matters.
-            | PrClosed, PrMerged -> [ PrWasMerged ]
+            | PrClosed, PrMerged -> [ PrTransition.Merged ]
             | _ -> []
         let stateAfter = state |> List.fold advance known
         let checks =
@@ -66,8 +66,8 @@ module PrTransitions =
                 match known.Checks, fresh.Checks with
                 | ChecksGreen, ChecksGreen
                 | ChecksRed, ChecksRed -> []
-                | _, ChecksGreen -> [ ChecksTurnedGreen ]
-                | _, ChecksRed -> [ ChecksTurnedRed ]
+                | _, ChecksGreen -> [ PrTransition.ChecksPassed ]
+                | _, ChecksRed -> [ PrTransition.ChecksFailed ]
                 | _ -> []
             | PrMerged | PrClosed -> []
         state @ checks
@@ -81,13 +81,13 @@ module PrWatchesProjection =
     /// baseline by exactly what was announced.
     let applyEvent (proj: PrWatchesProjection) (event: SessionEvent) : PrWatchesProjection =
         match event with
-        | PrWatchStarted p ->
+        | PrWatched p ->
             let entry = { Pr = p.Pr; Watcher = p.Actor; Known = PrTransitions.knownOf p.Initial }
             if proj.Watches |> List.exists (fun w -> w.Pr = p.Pr) then
                 { Watches = proj.Watches |> List.map (fun w -> if w.Pr = p.Pr then entry else w) }
             else
                 { Watches = proj.Watches @ [ entry ] }
-        | PrWatchStopped p ->
+        | PrUnwatched p ->
             { Watches = proj.Watches |> List.filter (fun w -> w.Pr <> p.Pr) }
         | PrTransitioned p ->
             { Watches =

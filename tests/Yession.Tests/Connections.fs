@@ -1916,7 +1916,7 @@ let private prPollTests =
                 Expect.equal script.Calls.Count 2 "github was asked twice"
                 Expect.isTrue first "the merge moved something"
                 Expect.isFalse second "the same answer twice is not news"
-                Expect.equal (List.ofSeq recorded |> List.map (fun (_, _, t) -> t)) [ [ PrWasMerged ] ] "one record"
+                Expect.equal (List.ofSeq recorded |> List.map (fun (_, _, t) -> t)) [ [ PrTransition.Merged ] ] "one record"
             }
 
         testCaseAsync "an unchanged answer records nothing and moves nothing" <|
@@ -2121,7 +2121,7 @@ let private prPollTests =
             // there is nowhere else it could come from.
             let msg n = MessageId.create n |> expect
             let folded =
-                [ SessionEvent.PrWatchStarted
+                [ SessionEvent.PrWatched
                     { MessageId = msg "w1"
                       Pr = prOne
                       Initial = snapshotOf PrOpen ChecksPending
@@ -2129,7 +2129,7 @@ let private prPollTests =
                   SessionEvent.PrTransitioned
                     { MessageId = msg "t1"
                       Pr = prOne
-                      Transition = ChecksTurnedGreen
+                      Transition = PrTransition.ChecksPassed
                       State = PrOpen
                       Checks = ChecksGreen
                       Watcher = ada } ]
@@ -2430,9 +2430,9 @@ let private prWatchVerbTests =
                 let! stub = startStubGitHubApi ()
                 let service, log, applied = serviceOver stub
                 let! outcome = service.Watch ada ada prOne
-                Expect.equal outcome (Ok "watching octo/hello#12 (open, checks green)") "it says what it found"
+                Expect.equal outcome (Ok "octo/hello#12 watched (open, checks green)") "it says what it found"
                 match! eventsOf log with
-                | [ SessionEvent.PrWatchStarted started ] ->
+                | [ SessionEvent.PrWatched started ] ->
                     Expect.equal started.Pr prOne "the pull request asked for"
                     Expect.equal started.Actor ada "attributed to the asker"
                     // The validating look IS the baseline — there is no second fetch, and
@@ -2449,7 +2449,7 @@ let private prWatchVerbTests =
                 let service, log, _ = serviceOver stub
                 let! _ = service.Watch ada ada prOne
                 let! again = service.Watch ada ada prOne
-                Expect.equal again (Ok "already watching octo/hello#12 (open, checks green)") "a repeated ask is a question"
+                Expect.equal again (Ok "octo/hello#12 already watched (open, checks green)") "a repeated ask is a question"
                 let! events = eventsOf log
                 Expect.equal (List.length events) 1 "and changes nothing"
             }
@@ -2477,12 +2477,12 @@ let private prWatchVerbTests =
                 let! stub = startStubGitHubApi ()
                 let service, log, _ = serviceOver stub
                 let! missing = service.Unwatch ada prOne
-                Expect.equal missing (Error "not watching octo/hello#12") "nothing to stop"
+                Expect.equal missing (Error "octo/hello#12 not watched") "nothing to stop"
                 let! _ = service.Watch ada ada prOne
                 let! stopped = service.Unwatch ada prOne
-                Expect.equal stopped (Ok "stopped watching octo/hello#12") "stopped"
+                Expect.equal stopped (Ok "octo/hello#12 unwatched") "stopped"
                 match! eventsOf log with
-                | [ SessionEvent.PrWatchStarted _; SessionEvent.PrWatchStopped stop ] ->
+                | [ SessionEvent.PrWatched _; SessionEvent.PrUnwatched stop ] ->
                     Expect.equal stop.Actor ada "attributed to whoever stopped it"
                 | events -> failwithf "expected a start then a stop, got %A" events
             }
