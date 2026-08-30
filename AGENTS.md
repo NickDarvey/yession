@@ -392,6 +392,23 @@ JavaScript that assigns counted the same as running it, which is why it had to b
 to one directory and why the product's own `Interop.setEnv` was invisible to it either way. On
 the tree a declaration is a declaration and a call is a call.
 
+The eighth reads the same expressions from the other end (`EnvReaders.fs`): a variable is read
+from the environment in ONE place, and everywhere else is handed the value. A second reader is a
+second DEFAULT, and two that disagree resolve into whichever the deployment reaches without
+anybody choosing it. `YESSION_SESSION_AGENT_BACKEND` had two — `SessionMain` parsed it at boot
+defaulting to `srt` and validated srt's tools on the strength of it, `Agent.fs` read it again
+where the CLI is spawned defaulting to `host` — so a deployment that set nothing ran the agent
+CLI unconfined while every statement the session made about itself said srt. Nothing was wrong at
+either site; the fault was that there were two. It replaced a suite that could only ask which
+files NAMED a variable, a question with false answers both ways (a comment, a list of names to
+forward into a child, a `Map.tryFind` over somebody else's env), so it had to be told the two
+variables it knew about and the one file each was allowed in. Reading which files READ it needs
+no such table, and the population is every variable this repository names: thirty-three, two of
+which were being read twice with a default apiece while the suite watched the two it had. What
+makes that count honest is following a wrapper — `Tags.getEnv` chooses between the two forms by
+runtime, so a rule seeing only direct reads would find it reading a variable it cannot name three
+times — and stopping at bindings, which is what keeps `Support.withEnv` out of it.
+
 `Population.fs` is what the scoping rules read: every declaration one project could name, of
 the code this repository builds — its own contents entire, plus what it references, bounded to
 the repository and cached per project. `Surfaces.fs` is the half the two namespace rules share:

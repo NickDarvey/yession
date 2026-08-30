@@ -1775,7 +1775,7 @@ module AgentSandbox =
     /// NOT read from the environment here. It used to be, and that second reader carried a
     /// second default that disagreed with the first: a deployment setting nothing ran the
     /// CLI unconfined while its own session had already accepted, and validated the tools
-    /// for, srt. `SandboxBackends` (the suite) is what keeps it to one reader.
+    /// for, srt. `YES008` is what keeps it to one reader.
     let prepare
         (backend: SandboxBackend)
         (dataDir: string)
