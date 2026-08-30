@@ -1815,18 +1815,18 @@ let private snapshotOf state checks : PrSnapshot =
 /// it was asked with. The seam is the whole reason the poll fold is testable without a
 /// socket — the endpoints themselves are exercised in the Ports suite below.
 type private ScriptedFetch =
-    { Fetch : GitHubPrs.FetchPr
-      Calls : ResizeArray<string option * GitHubPrs.PrEtags> }
+    { Fetch : PrWatches.FetchPr
+      Calls : ResizeArray<string option * PrWatches.PrEtags> }
 
-let private scriptedFetch (outcomes: GitHubPrs.PrFetchOutcome list) : ScriptedFetch =
-    let remaining = ResizeArray<GitHubPrs.PrFetchOutcome> outcomes
-    let calls = ResizeArray<string option * GitHubPrs.PrEtags> ()
+let private scriptedFetch (outcomes: PrWatches.PrFetchOutcome list) : ScriptedFetch =
+    let remaining = ResizeArray<PrWatches.PrFetchOutcome> outcomes
+    let calls = ResizeArray<string option * PrWatches.PrEtags> ()
     { Calls = calls
       Fetch =
         fun token _ etags _ ->
             async {
                 calls.Add (token, etags)
-                if remaining.Count = 0 then return GitHubPrs.PrUnchanged
+                if remaining.Count = 0 then return PrWatches.PrUnchanged
                 else
                     let next = remaining.[0]
                     remaining.RemoveAt 0
@@ -1838,11 +1838,12 @@ type private RecordedTransitions = ResizeArray<ActorRef * PrRef * PrTransition l
 
 let private pollerOver
     (now: unit -> DateTimeOffset)
-    (fetch: GitHubPrs.FetchPr)
+    (fetch: PrWatches.FetchPr)
     (recorded: RecordedTransitions)
     (rejected: ResizeArray<ActorRef>)
-    : GitHubPrs.PrWatchers =
-    GitHubPrs.create
+    : PrWatches.PrWatchers =
+    PrWatches.create
+        GitHubPrs.provider
         now
         fetch
         (fun _ -> async { return Some "token-abc" })
@@ -1902,8 +1903,8 @@ let private prPollTests =
                 let recorded = RecordedTransitions ()
                 let script =
                     scriptedFetch
-                        [ GitHubPrs.PrChanged (snapshotOf PrMerged ChecksGreen, GitHubPrs.PrEtags.none)
-                          GitHubPrs.PrChanged (snapshotOf PrMerged ChecksGreen, GitHubPrs.PrEtags.none) ]
+                        [ PrWatches.PrChanged (snapshotOf PrMerged ChecksGreen, PrWatches.PrEtags.none)
+                          PrWatches.PrChanged (snapshotOf PrMerged ChecksGreen, PrWatches.PrEtags.none) ]
                 // The clock moves past the settled interval between the two polls, so
                 // the second one really is a second LOOK. Without that it would be skipped
                 // as not-yet-due and the assertion below would pass for the wrong reason.
@@ -1922,7 +1923,7 @@ let private prPollTests =
         testCaseAsync "an unchanged answer records nothing and moves nothing" <|
             async {
                 let recorded = RecordedTransitions ()
-                let script = scriptedFetch [ GitHubPrs.PrUnchanged ]
+                let script = scriptedFetch [ PrWatches.PrUnchanged ]
                 let poller = pollerOver fixedNow script.Fetch recorded (ResizeArray ())
                 poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
                 let! moved = poller.Poll ()
@@ -1933,7 +1934,7 @@ let private prPollTests =
         testCaseAsync "a refused credential is reported to whoever's watch it is" <|
             async {
                 let rejected = ResizeArray<ActorRef> ()
-                let script = scriptedFetch [ GitHubPrs.PrFetchFailed GitHubPrs.PrUnauthorized ]
+                let script = scriptedFetch [ PrWatches.PrFetchFailed PrWatches.PrUnauthorized ]
                 let poller = pollerOver fixedNow script.Fetch (RecordedTransitions ()) rejected
                 poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
                 let! moved = poller.Poll ()
@@ -1949,8 +1950,8 @@ let private prPollTests =
                 let mutable clock = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
                 let script =
                     scriptedFetch
-                        [ GitHubPrs.PrChanged (snapshotOf PrOpen ChecksPending, GitHubPrs.PrEtags.none)
-                          GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, GitHubPrs.PrEtags.none) ]
+                        [ PrWatches.PrChanged (snapshotOf PrOpen ChecksPending, PrWatches.PrEtags.none)
+                          PrWatches.PrChanged (snapshotOf PrOpen ChecksGreen, PrWatches.PrEtags.none) ]
                 let poller = pollerOver (fun () -> clock) script.Fetch (RecordedTransitions ()) (ResizeArray ())
                 poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
                 let! _ = poller.Poll ()
@@ -1964,8 +1965,8 @@ let private prPollTests =
                 let mutable clock = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
                 let script =
                     scriptedFetch
-                        [ GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, GitHubPrs.PrEtags.none)
-                          GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, GitHubPrs.PrEtags.none) ]
+                        [ PrWatches.PrChanged (snapshotOf PrOpen ChecksGreen, PrWatches.PrEtags.none)
+                          PrWatches.PrChanged (snapshotOf PrOpen ChecksGreen, PrWatches.PrEtags.none) ]
                 let poller = pollerOver (fun () -> clock) script.Fetch (RecordedTransitions ()) (ResizeArray ())
                 poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
                 let! _ = poller.Poll ()
@@ -1984,8 +1985,8 @@ let private prPollTests =
                 let mutable clock = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
                 let script =
                     scriptedFetch
-                        [ GitHubPrs.PrFetchFailed (GitHubPrs.PrUnreachable "network down")
-                          GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, GitHubPrs.PrEtags.none) ]
+                        [ PrWatches.PrFetchFailed (PrWatches.PrUnreachable "network down")
+                          PrWatches.PrChanged (snapshotOf PrOpen ChecksGreen, PrWatches.PrEtags.none) ]
                 let poller = pollerOver (fun () -> clock) script.Fetch (RecordedTransitions ()) (ResizeArray ())
                 poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
                 let! _ = poller.Poll ()
@@ -2002,8 +2003,8 @@ let private prPollTests =
                 let resetAt = int (clock.AddMinutes(10.0).ToUnixTimeSeconds ())
                 let script =
                     scriptedFetch
-                        [ GitHubPrs.PrFetchFailed (GitHubPrs.PrRateLimited (Some resetAt))
-                          GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, GitHubPrs.PrEtags.none) ]
+                        [ PrWatches.PrFetchFailed (PrWatches.PrRateLimited (Some resetAt))
+                          PrWatches.PrChanged (snapshotOf PrOpen ChecksGreen, PrWatches.PrEtags.none) ]
                 let poller = pollerOver (fun () -> clock) script.Fetch (RecordedTransitions ()) (ResizeArray ())
                 poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
                 let! _ = poller.Poll ()
@@ -2022,8 +2023,8 @@ let private prPollTests =
                 let mutable clock = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
                 let script =
                     scriptedFetch
-                        [ GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, GitHubPrs.PrEtags.none)
-                          GitHubPrs.PrChanged (snapshotOf PrMerged ChecksGreen, GitHubPrs.PrEtags.none) ]
+                        [ PrWatches.PrChanged (snapshotOf PrOpen ChecksGreen, PrWatches.PrEtags.none)
+                          PrWatches.PrChanged (snapshotOf PrMerged ChecksGreen, PrWatches.PrEtags.none) ]
                 let poller = pollerOver (fun () -> clock) script.Fetch (RecordedTransitions ()) (ResizeArray ())
                 poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
                 let! _ = poller.Poll ()
@@ -2042,7 +2043,7 @@ let private prPollTests =
                 // to be refused again — a push does not know better than the rate limiter.
                 let mutable clock = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
                 let resetAt = int (clock.AddMinutes(10.0).ToUnixTimeSeconds ())
-                let script = scriptedFetch [ GitHubPrs.PrFetchFailed (GitHubPrs.PrRateLimited (Some resetAt)) ]
+                let script = scriptedFetch [ PrWatches.PrFetchFailed (PrWatches.PrRateLimited (Some resetAt)) ]
                 let poller = pollerOver (fun () -> clock) script.Fetch (RecordedTransitions ()) (ResizeArray ())
                 poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
                 let! _ = poller.Poll ()
@@ -2066,11 +2067,11 @@ let private prPollTests =
             async {
                 // The whole point of toning these cells: the row somebody is looking for is
                 // the failing one, and finding it should not mean reading every row.
-                let script = scriptedFetch [ GitHubPrs.PrChanged (snapshotOf PrOpen ChecksRed, GitHubPrs.PrEtags.none) ]
+                let script = scriptedFetch [ PrWatches.PrChanged (snapshotOf PrOpen ChecksRed, PrWatches.PrEtags.none) ]
                 let poller = pollerOver fixedNow script.Fetch (RecordedTransitions ()) (ResizeArray ())
                 poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
                 let! _ = poller.Poll ()
-                match! (GitHubPrs.query (fun () -> poller)).Read () with
+                match! (PrWatches.query (fun () -> poller)).Read () with
                 | Ok (RowsOf [ row ]) ->
                     Expect.equal
                         (row |> List.tryFind (fun (key, _) -> key = "checks") |> Option.map snd)
@@ -2089,11 +2090,11 @@ let private prPollTests =
             async {
                 // A credential that died is a problem with the WATCH; whatever its checks
                 // last said is not suddenly wrong. Two facts, two cells.
-                let script = scriptedFetch [ GitHubPrs.PrFetchFailed GitHubPrs.PrUnauthorized ]
+                let script = scriptedFetch [ PrWatches.PrFetchFailed PrWatches.PrUnauthorized ]
                 let poller = pollerOver fixedNow script.Fetch (RecordedTransitions ()) (ResizeArray ())
                 poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
                 let! _ = poller.Poll ()
-                match! (GitHubPrs.query (fun () -> poller)).Read () with
+                match! (PrWatches.query (fun () -> poller)).Read () with
                 | Ok (RowsOf [ row ]) ->
                     match row |> List.tryFind (fun (key, _) -> key = "status") |> Option.map snd with
                     | Some (CellStatus (_, tone)) -> Expect.equal tone ToneBad "the row says it is broken"
@@ -2103,7 +2104,7 @@ let private prPollTests =
 
         testCaseAsync "a watch a delivery has reached says so, so a wired-up hook is visible" <|
             async {
-                let script = scriptedFetch [ GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, GitHubPrs.PrEtags.none) ]
+                let script = scriptedFetch [ PrWatches.PrChanged (snapshotOf PrOpen ChecksGreen, PrWatches.PrEtags.none) ]
                 let poller = pollerOver fixedNow script.Fetch (RecordedTransitions ()) (ResizeArray ())
                 poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
                 match poller.Rows () with
@@ -2147,11 +2148,11 @@ let private prPollTests =
 
         testCaseAsync "reconciling keeps an unchanged watch's etags and drops what was unwatched" <|
             async {
-                let etags : GitHubPrs.PrEtags = { Pr = "\"pr-v1\""; Checks = "\"checks-v1\"" }
+                let etags : PrWatches.PrEtags = { Pr = "\"pr-v1\""; Checks = "\"checks-v1\"" }
                 let script =
                     scriptedFetch
-                        [ GitHubPrs.PrChanged (snapshotOf PrOpen ChecksGreen, etags)
-                          GitHubPrs.PrUnchanged ]
+                        [ PrWatches.PrChanged (snapshotOf PrOpen ChecksGreen, etags)
+                          PrWatches.PrUnchanged ]
                 let mutable clock = DateTimeOffset (2026, 8, 27, 12, 0, 0, TimeSpan.Zero)
                 let poller = pollerOver (fun () -> clock) script.Fetch (RecordedTransitions ()) (ResizeArray ())
                 poller.Apply [ watching { State = PrOpen; Checks = ChecksPending } ]
@@ -2298,8 +2299,8 @@ let private prFetchTests =
             async {
                 let! stub = startStubGitHubApi ()
                 let fetch = GitHubPrs.fetchOver stub.Url
-                match! fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none None with
-                | GitHubPrs.PrChanged (snapshot, etags) ->
+                match! fetch (Some "token-abc") prOne PrWatches.PrEtags.none None with
+                | PrWatches.PrChanged (snapshot, etags) ->
                     Expect.equal snapshot.State PrOpen "open"
                     Expect.equal snapshot.HeadSha "abc123" "head sha"
                     Expect.equal snapshot.Checks ChecksGreen "one successful run"
@@ -2315,10 +2316,10 @@ let private prFetchTests =
             async {
                 let! stub = startStubGitHubApi ()
                 let fetch = GitHubPrs.fetchOver stub.Url
-                match! fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none None with
-                | GitHubPrs.PrChanged (snapshot, etags) ->
+                match! fetch (Some "token-abc") prOne PrWatches.PrEtags.none None with
+                | PrWatches.PrChanged (snapshot, etags) ->
                     match! fetch (Some "token-abc") prOne etags (Some snapshot) with
-                    | GitHubPrs.PrUnchanged -> ()
+                    | PrWatches.PrUnchanged -> ()
                     | other -> failwithf "expected unchanged, got %A" other
                 | other -> failwithf "expected a snapshot, got %A" other
             }
@@ -2327,17 +2328,17 @@ let private prFetchTests =
             async {
                 let! stub = startStubGitHubApi ()
                 let fetch = GitHubPrs.fetchOver stub.Url
-                let! first = fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none None
+                let! first = fetch (Some "token-abc") prOne PrWatches.PrEtags.none None
                 let etags, seen =
                     match first with
-                    | GitHubPrs.PrChanged (s, e) -> e, Some s
+                    | PrWatches.PrChanged (s, e) -> e, Some s
                     | other -> failwithf "expected a snapshot, got %A" other
                 // A suite going from green to running touches the check runs on the head
                 // commit and nothing else — the pull request resource does not move, so it
                 // answers 304. This is what CI finishing looks like from here.
                 stub.SetCheckRuns """{"check_runs":[{"status":"in_progress","conclusion":null}]}"""
                 match! fetch (Some "token-abc") prOne etags seen with
-                | GitHubPrs.PrChanged (snapshot, _) ->
+                | PrWatches.PrChanged (snapshot, _) ->
                     Expect.equal snapshot.Checks ChecksPending "the moved rollup arrived even though the pull request did not"
                 | other -> failwithf "expected a snapshot, got %A" other
             }
@@ -2346,17 +2347,17 @@ let private prFetchTests =
             async {
                 let! stub = startStubGitHubApi ()
                 let fetch = GitHubPrs.fetchOver stub.Url
-                let! first = fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none None
+                let! first = fetch (Some "token-abc") prOne PrWatches.PrEtags.none None
                 let etags, seen =
                     match first with
-                    | GitHubPrs.PrChanged (s, e) -> e, Some s
+                    | PrWatches.PrChanged (s, e) -> e, Some s
                     | other -> failwithf "expected a snapshot, got %A" other
                 // The other half of the same rule: an edit moves the pull request while its
                 // checks answer 304 on the same head sha. Reporting pending there would
                 // invent a transition out of a title change.
                 stub.SetPr """{"state":"open","merged":false,"title":"Add feature, renamed","head":{"sha":"abc123"},"mergeable":true}"""
                 match! fetch (Some "token-abc") prOne etags seen with
-                | GitHubPrs.PrChanged (snapshot, _) ->
+                | PrWatches.PrChanged (snapshot, _) ->
                     Expect.equal snapshot.Checks ChecksGreen "the unmoved rollup was carried, not reset to pending"
                 | other -> failwithf "expected a snapshot, got %A" other
             }
@@ -2365,14 +2366,14 @@ let private prFetchTests =
             async {
                 let! stub = startStubGitHubApi ()
                 let fetch = GitHubPrs.fetchOver stub.Url
-                let! first = fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none None
+                let! first = fetch (Some "token-abc") prOne PrWatches.PrEtags.none None
                 let etags, seen =
                     match first with
-                    | GitHubPrs.PrChanged (s, e) -> e, Some s
-                    | _ -> GitHubPrs.PrEtags.none, None
+                    | PrWatches.PrChanged (s, e) -> e, Some s
+                    | _ -> PrWatches.PrEtags.none, None
                 stub.SetPr """{"state":"closed","merged":true,"title":"Add feature","head":{"sha":"abc123"},"mergeable":null}"""
                 match! fetch (Some "token-abc") prOne etags seen with
-                | GitHubPrs.PrChanged (snapshot, _) -> Expect.equal snapshot.State PrMerged "the merge arrived"
+                | PrWatches.PrChanged (snapshot, _) -> Expect.equal snapshot.State PrMerged "the merge arrived"
                 | other -> failwithf "expected a snapshot, got %A" other
             }
 
@@ -2381,12 +2382,12 @@ let private prFetchTests =
                 let! stub = startStubGitHubApi ()
                 let fetch = GitHubPrs.fetchOver stub.Url
                 stub.SetStatus 401
-                match! fetch (Some "stale") prOne GitHubPrs.PrEtags.none None with
-                | GitHubPrs.PrFetchFailed GitHubPrs.PrUnauthorized -> ()
+                match! fetch (Some "stale") prOne PrWatches.PrEtags.none None with
+                | PrWatches.PrFetchFailed PrWatches.PrUnauthorized -> ()
                 | other -> failwithf "expected unauthorized, got %A" other
                 stub.SetStatus 404
-                match! fetch (Some "token-abc") prOne GitHubPrs.PrEtags.none None with
-                | GitHubPrs.PrFetchFailed GitHubPrs.PrNotFound -> ()
+                match! fetch (Some "token-abc") prOne PrWatches.PrEtags.none None with
+                | PrWatches.PrFetchFailed PrWatches.PrNotFound -> ()
                 | other -> failwithf "expected not found, got %A" other
             }
     ]
@@ -2410,7 +2411,8 @@ let private prWatchVerbTests =
             }
         let applied = ResizeArray<PrWatch list> ()
         let service =
-            GitHubPrs.watchService
+            PrWatches.watchService
+                GitHubPrs.provider
                 (fun actor event -> async { let! _ = log.Append actor event in () })
                 watchesNow
                 (GitHubPrs.fetchOver stub.Url)

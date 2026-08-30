@@ -573,7 +573,7 @@ first's.
   - **Up to fifteen seconds of latency while a suite is in flight, and up to a minute
     otherwise** — unless a hook endpoint is declared and the App's webhook points at it
     (deployment.md §Webhooks), which drops it to seconds. There is no way to ask for less
-    from polling short of editing the two constants in `GitHubPrs`. Only the pending cadence costs anything — a settled watch is two
+    from polling short of editing the two constants in `PrWatches`. Only the pending cadence costs anything — a settled watch is two
     conditional requests that both answer 304, which GitHub does not charge for — and the
     pending one puts the ceiling around ten pull requests with live suites at once per
     credential. Lowering it again buys latency at that ceiling's expense, which is the
@@ -588,7 +588,7 @@ first's.
     green again says nothing, because entering pending is the ordinary rhythm of work and
     a notification per push is a notification nobody reads.
   - **A rate-limited watch waits out GitHub's own reset window** and says so in the
-    `github_prs` query's status column — it does not fail, and it does not retry sooner.
+    `pull_requests` query's status column — it does not fail, and it does not retry sooner.
   - **A transition wakes a turn**, which joins the wake→turn loop above as a third source.
     Flapping CI can wake once per genuine flip, and the per-session woken-turn budget is
     still deliberately unbuilt. The log-anchored baseline bounds it to one turn per

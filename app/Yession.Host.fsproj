@@ -44,9 +44,13 @@
     <!-- The `shell_profile` query (Plan 25). Beside the other two registrations, and before
          Commands, which invalidates it. -->
     <Compile Include="ShellProfile.fs" />
-    <!-- Watching a pull request: the two REST endpoints, their JSON, the poll that folds
-         one into the other, and the watch verbs. Beside the other services Commands.fs
-         runs against, and after Queries.fs, whose registration type it answers with. It
+    <!-- Watching a pull request, with nothing in it that names a forge: the cadence, the
+         ETag bookkeeping, the watch verbs and the query. Beside the other services
+         Commands.fs runs against, and after Queries.fs, whose registration type it answers
+         with. -->
+    <Compile Include="PrWatches.fs" />
+    <!-- What GitHub adds to that: the two REST endpoints, their JSON, and the field path a
+         delivery names its repo at. After PrWatch.fs, whose `FetchPr` it satisfies. It
          reaches nothing between here and GitHubConnection.fs — what it knows about GitHub
          it owns outright. -->
     <Compile Include="GitHubPrs.fs" />

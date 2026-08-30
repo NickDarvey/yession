@@ -433,10 +433,10 @@ let mutable private queryRegistry : Queries.QueryRegistry = Queries.empty
 
 /// The pull requests this session watches (Plan 14 follow-on). A cell like the others:
 /// the query surface is composed before the log exists, and the poller needs the log.
-let mutable private prWatchers : GitHubPrs.PrWatchers = GitHubPrs.PrWatchers.none
+let mutable private prWatchers : PrWatches.PrWatchers = PrWatches.PrWatchers.none
 
 /// The watch verbs over that poller, built once the log exists.
-let mutable private prWatchService : GitHubPrs.PrWatchService option = None
+let mutable private prWatchService : PrWatches.PrWatchService option = None
 
 /// What this session asks the Manager to forward: one hook subscription per watched repo.
 /// Only where there is a control channel to declare it over — without one, polling is the
@@ -788,7 +788,8 @@ Async.StartImmediate (
                             ()
                 }
             prWatchers <-
-                GitHubPrs.create
+                PrWatches.create
+                    GitHubPrs.provider
                     (fun () -> System.DateTimeOffset.UtcNow)
                     (GitHubPrs.fetchOver (Interop.envOr "YESSION_GITHUB_API_URL" "https://api.github.com"))
                     resolveGitHubToken
@@ -808,7 +809,8 @@ Async.StartImmediate (
                 }
             prWatchService <-
                 Some (
-                    GitHubPrs.watchService
+                    PrWatches.watchService
+                        GitHubPrs.provider
                         (fun actor event ->
                             async {
                                 let! _ = log.Append actor event
@@ -835,7 +837,7 @@ Async.StartImmediate (
                   ShellProfile.query (fun () -> terminals)
                   RepoSandboxes.query (fun () -> repoSandboxes)
                   McpClient.query (fun () -> mcpServers)
-                  GitHubPrs.query (fun () -> prWatchers) ]
+                  PrWatches.query (fun () -> prWatchers) ]
             match Queries.create registrations with
             | Ok registry -> queryRegistry <- registry
             | Error e -> failwithf "queries: %s" e
@@ -1005,7 +1007,7 @@ Async.StartImmediate (
                     |> List.map (fun e -> e.Event)
                     |> List.fold PrWatchesProjection.applyEvent PrWatchesProjection.empty
                 reconcileWatches projection.Watches
-                queryRegistry.Invalidate GitHubPrs.queryName
+                queryRegistry.Invalidate PrWatches.queryName
             })
         // What a look that moved something owes — whichever driver ran it. A transition
         // recorded here landed behind no block and no turn, so nothing else would notice
@@ -1014,7 +1016,7 @@ Async.StartImmediate (
         // construction rather than by two callers remembering to agree.
         let settle (moved: bool) =
             if moved then
-                queryRegistry.Invalidate GitHubPrs.queryName
+                queryRegistry.Invalidate PrWatches.queryName
                 host.Wake ()
         // A delivery the Manager forwarded says LOOK, and says it about a repo this session
         // reads off its own subscription record rather than out of the body. The poll is
@@ -1034,7 +1036,7 @@ Async.StartImmediate (
                 | None -> ())
         // ...and keep asking, because a delivery is an accelerator and not a guarantee:
         // where no hook is configured, or one is missed, the interval is the whole answer.
-        Interop.setInterval GitHubPrs.TickIntervalMs (fun () ->
+        Interop.setInterval PrWatches.TickIntervalMs (fun () ->
             Async.StartImmediate (
                 async {
                     let! moved = prWatchers.Poll ()
