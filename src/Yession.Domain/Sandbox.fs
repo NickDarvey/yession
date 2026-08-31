@@ -343,6 +343,15 @@ module SandboxVerification =
             sprintf "if ! { %s; } >/dev/null 2>&1; then echo %d; exit 1; fi" check.Probe index)
         |> String.concat "\n"
 
+    /// Whether the probe's output NAMES one of the checks — the difference between a
+    /// verdict (a check ran and failed) and noise (the shell never ran the program:
+    /// a daemon-level exec failure, an empty stream). A caller retries noise and
+    /// believes a verdict.
+    let named (checks: SandboxCheck list) (output: string) : bool =
+        match System.Int32.TryParse (output.Trim ()) with
+        | true, index -> index >= 0 && index < List.length checks
+        | _ -> false
+
     /// The sentence for a failure at `index`, or a fallback when the probe said something
     /// this code cannot place.
     ///
