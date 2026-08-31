@@ -167,7 +167,7 @@ let tryHandle
         | None ->
             onUnauthorized path
             respond res 401 "invalid control secret"
-        | Some (secret, caller) ->
+        | Some (launchSecret, caller) ->
             let decodeAnd (decode: string -> Result<'a, string>) (handle: 'a -> unit) =
                 readBody req (fun body ->
                     match decode body with
@@ -180,7 +180,7 @@ let tryHandle
                 decodeAnd (ControlWire.fromString ControlWire.sessionNameReport) (fun name ->
                     Async.StartImmediate (
                         async {
-                            match! reportName secret name with
+                            match! reportName launchSecret name with
                             | Ok () -> respond res 200 "ok"
                             | Error e -> respond res 400 e
                         }))
@@ -191,7 +191,7 @@ let tryHandle
                 decodeAnd (ControlWire.fromString ControlWire.sessionActivityReport) (fun busy ->
                     Async.StartImmediate (
                         async {
-                            match! reportActivity secret busy with
+                            match! reportActivity launchSecret busy with
                             | Ok () -> respond res 200 "ok"
                             | Error e -> respond res 400 e
                         }))
@@ -201,13 +201,13 @@ let tryHandle
                 // it is a child this Manager spawned, calling over the authenticated
                 // channel, and it already holds whatever credential it would act on.
                 decodeAnd (ControlWire.fromString ControlWire.subscribeHookRequest) (fun request ->
-                    let id = subscribeHook secret request.Filter
+                    let id = subscribeHook launchSecret request.Filter
                     respondJson
                         res
                         (ControlWire.toString ControlWire.subscribeHookResponse { ControlWire.SubscribeHookResponse.Id = id }))
             | "POST", "/control/hooks/unsubscribe" ->
                 decodeAnd (ControlWire.fromString ControlWire.unsubscribeHookRequest) (fun request ->
-                    let dropped = unsubscribeHook secret request.Id
+                    let dropped = unsubscribeHook launchSecret request.Id
                     respondJson
                         res
                         (ControlWire.toString ControlWire.unsubscribeHookResponse { Dropped = dropped }))
@@ -217,7 +217,7 @@ let tryHandle
                 // not at spawn — because the session's port is OS-assigned and only
                 // known once it listens.
                 decodeAnd (Wire.fromString Wire.registerClientRequest) (fun request ->
-                    let response = registerClient secret caller.SessionId request.RedirectUri
+                    let response = registerClient launchSecret caller.SessionId request.RedirectUri
                     respondJson res (Wire.toString Wire.registerClientResponse response))
             | "POST", ("/control/secrets/set" | "/control/secrets/list" | "/control/secrets/delete" | "/control/secrets/resolve" as secretsPath) ->
                 // Secrets (Plan 06). The arms stay thin: decode, hand the verified
@@ -342,7 +342,7 @@ let tryHandle
                     let sink =
                         Sse.stream req res
                             (ControlWire.toString ControlWire.connectionStatusList)
-                            (subscribeConnections secret)
+                            (subscribeConnections launchSecret)
                     Async.StartImmediate (
                         async {
                             let! snapshot = api.Status caller
@@ -353,7 +353,7 @@ let tryHandle
                 // down. The secret already resolved to capabilities above, so it is valid.
                 Sse.stream req res
                     (ControlWire.toString ControlWire.sessionNotification)
-                    (subscribeNotifications secret)
+                    (subscribeNotifications launchSecret)
                 |> ignore
             | "GET", "/control/mcp" ->
                 // The MCP reverse leg (Plan 17): the servers THIS session may reach, resolved
@@ -366,7 +366,7 @@ let tryHandle
                 // Reactivity is the feature, not a refinement of one.
                 Sse.stream req res
                     (ControlWire.toString Codec.mcpServerSet)
-                    (subscribeMcp caller.SessionId secret)
+                    (subscribeMcp caller.SessionId launchSecret)
                 |> ignore
             | _ -> respond res 404 "not found"
         true
