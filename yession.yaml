@@ -12,6 +12,11 @@
 # keeps this file working on any machine. (First run on a fresh container is cold; the
 # store warms via substitution, and an operator may offer a persistent store volume.)
 #
+# What is NOT here is anything the docker backend owes every container: the daemon's
+# symlinked-/etc workaround and git's safe.directory for the bind-mounted checkouts are
+# the backend's own consequences, applied by it (`Sandboxes.fs`) — a repo file that had
+# to carry them would be copied into every repo and outlive the daemon that needed them.
+#
 # The session's own `default` sandbox is srt (light confinement for the checkout and
 # small edits) and declares nothing here — no file may configure it.
 version: 2
@@ -21,14 +26,6 @@ sandboxes:
     workdir: .
     container:
       image: nixos/nix
-      # Docker 29 resolves an exec's user through Go's os.Root guard, which refuses
-      # the ABSOLUTE symlinks nix-built images use for /etc/passwd and /etc/group —
-      # so `docker run` works and every `docker exec` dies with "path escapes from
-      # parent". Materialising the two files at start (the run path, which works)
-      # makes every later exec resolve against real files. Measured on 29.2.1;
-      # remove when the daemon handles symlinked /etc again.
-      cmd: |
-        for f in passwd group shadow; do if [ -L /etc/$f ]; then cat /etc/$f > /etc/.$f && rm /etc/$f && mv /etc/.$f /etc/$f; fi; done; exec tail -f /dev/null
     forward: [ github ]              # so `git push` works from a terminal
 
     # Which nix features this repo's build needs, plus where its artifacts substitute
@@ -47,14 +44,6 @@ sandboxes:
         extra-trusted-public-keys = yession.cachix.org-1:Dj6jHWpEaqcGyrEEC3/qy/D3UQN8sZW1RXUOCRJ41oI=
         build-users-group =
         sandbox = false
-      # The checkout arrives owned by the operator's uid while the container runs as
-      # root, and git refuses to read a repository its caller does not own. These are
-      # git's own env spelling of `safe.directory` — scoped to nothing narrower because
-      # every repo this container can see is one this session put there. Without them
-      # the three devenv.lock cases error with "could not read HEAD:devenv.lock".
-      GIT_CONFIG_COUNT: "1"
-      GIT_CONFIG_KEY_0: safe.directory
-      GIT_CONFIG_VALUE_0: "*"
 
   # `verify` is minutes long. A second sandbox on the same configuration means the gate
   # runs beside interactive work instead of holding the shell.
@@ -62,9 +51,6 @@ sandboxes:
     workdir: .
     container:
       image: nixos/nix
-      # Same Docker 29 os.Root workaround as `dev`.
-      cmd: |
-        for f in passwd group shadow; do if [ -L /etc/$f ]; then cat /etc/$f > /etc/.$f && rm /etc/$f && mv /etc/.$f /etc/$f; fi; done; exec tail -f /dev/null
     forward: [ github ]
 
     # The same reasons as `dev`; `like:` does not exist yet, so both are written twice.
@@ -75,11 +61,3 @@ sandboxes:
         extra-trusted-public-keys = yession.cachix.org-1:Dj6jHWpEaqcGyrEEC3/qy/D3UQN8sZW1RXUOCRJ41oI=
         build-users-group =
         sandbox = false
-      # The checkout arrives owned by the operator's uid while the container runs as
-      # root, and git refuses to read a repository its caller does not own. These are
-      # git's own env spelling of `safe.directory` — scoped to nothing narrower because
-      # every repo this container can see is one this session put there. Without them
-      # the three devenv.lock cases error with "could not read HEAD:devenv.lock".
-      GIT_CONFIG_COUNT: "1"
-      GIT_CONFIG_KEY_0: safe.directory
-      GIT_CONFIG_VALUE_0: "*"
