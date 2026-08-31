@@ -387,6 +387,21 @@ let policyFor
     | Error e -> Error e
     | Ok (grantedReads, grantedWrites, grantedDomains, grantedSockets, grantedEnv) ->
 
+    // What every docker sandbox starts with before grants and its own spec: the
+    // backend's own consequences, said by the backend rather than copied into every
+    // repo's file (where this trio sat for a while, waiting to be cargo-culted).
+    //
+    // The trio is `safe.directory` in git's own env spelling. The session bind-mounts
+    // its checkouts into the container, so they arrive owned by the operator's uid
+    // while the container runs as the image's user — and git refuses to read a
+    // repository its caller does not own. Scoped to nothing narrower because every
+    // repository this container can see is one this session put there. Baseline, so a
+    // spec that names any of these keys still wins, like the rest of the baseline.
+    let dockerBaseline =
+        Map.ofList
+            [ "GIT_CONFIG_COUNT", "1"
+              "GIT_CONFIG_KEY_0", "safe.directory"
+              "GIT_CONFIG_VALUE_0", "*" ]
     let env =
         // The sandbox's own home replaces the inherited one IN THE BASELINE, so a spec that
         // names `HOME` still wins — the rule that the spec beats the baseline is one rule,
@@ -422,7 +437,7 @@ let policyFor
         match backend with
         | HostBackend
         | SrtBackend -> mergeEnv (mergeEnv inherited fromGrants) resolved
-        | DockerBackend -> mergeEnv fromGrants resolved
+        | DockerBackend -> mergeEnv (mergeEnv dockerBaseline fromGrants) resolved
     Ok
         { ReadPaths = grantedReads
           WritePaths =
@@ -788,6 +803,26 @@ module DockerSandbox =
             return arr.Length
         }
 
+    /// The container's own process — the declared command, or the idle that exists to be
+    /// exec'd into — wrapped in the one fix every nix-built image needs on today's
+    /// daemons. Docker 29 resolves an exec's user through Go's os.Root guard, which
+    /// refuses the ABSOLUTE symlinks such images use for /etc/passwd and /etc/group: so
+    /// `docker run` works and every `docker exec` dies with "path escapes from parent".
+    /// Materialising the files at start (the run path, which works) makes every later
+    /// exec resolve against real files. Measured on 29.2.1; drop the wrap when the
+    /// daemon handles symlinked /etc again. Harmless elsewhere — a real file is left
+    /// alone, and a missing one skipped.
+    ///
+    /// The daemon's regression, so the backend carries the workaround: it sat in
+    /// yession.yaml for a while, where every repo adopting a nix-built image would have
+    /// had to copy it and keep copying it after the daemon is fixed.
+    let startCommand (declared: string option) : string array =
+        let materialiseEtc =
+            "for f in passwd group shadow; do if [ -L /etc/$f ]; then cat /etc/$f > /etc/.$f && rm /etc/$f && mv /etc/.$f /etc/$f; fi; done"
+        [| "sh"
+           "-c"
+           sprintf "%s\n%s" materialiseEtc (declared |> Option.defaultValue "exec tail -f /dev/null") |]
+
     let create (name: string) (spec: EnvironmentSpec) (container: ContainerSpec) : CreateSandbox =
         fun policy ->
             async {
@@ -867,12 +902,9 @@ module DockerSandbox =
                                       "WorkingDir", box workspaceTarget
                                       // The sandbox's own process when it declared one, and
                                       // otherwise the idle command that has always kept the
-                                      // container up for `exec` to reach.
-                                      "Cmd",
-                                      box (
-                                          match container.Command with
-                                          | Some command -> [| "sh"; "-c"; command |]
-                                          | None -> [| "tail"; "-f"; "/dev/null" |])
+                                      // container up for `exec` to reach — either way behind
+                                      // the daemon workaround (`startCommand`).
+                                      "Cmd", box (startCommand container.Command)
                                       "HostConfig",
                                       box (
                                           createObj

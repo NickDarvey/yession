@@ -364,6 +364,45 @@ let private sandboxPolicyTests =
             Expect.isTrue (HostLimits.can HostDistinction.SocketsByPath docker) "a bind mount is per path"
             Expect.isFalse (HostLimits.can HostDistinction.EgressByHost docker) "and it filters nothing"
 
+        // The backend's own consequences ride its baseline, not every repo's file. The
+        // session bind-mounts checkouts owned by the operator's uid into a container
+        // running as the image's user, and git refuses a repository its caller does not
+        // own — so the backend says safe.directory, in git's env spelling.
+        testCase "a docker policy trusts the bind-mounted checkouts by default" <| fun () ->
+            let policy =
+                Sandboxes.policyFor
+                    DockerBackend (Sandboxes.limitsFor DockerBackend "linux") Map.empty Map.empty None None None
+                    []
+                    EnvironmentSpec.defaults
+                |> expect
+            Expect.equal (policy.Env |> Map.tryFind "GIT_CONFIG_KEY_0") (Some "safe.directory") "the key"
+            Expect.equal (policy.Env |> Map.tryFind "GIT_CONFIG_VALUE_0") (Some "*") "every path the session mounted"
+
+        testCase "a spec that names the git trio still wins over the docker baseline" <| fun () ->
+            let policy =
+                Sandboxes.policyFor
+                    DockerBackend (Sandboxes.limitsFor DockerBackend "linux") Map.empty
+                    (Map.ofList [ "GIT_CONFIG_COUNT", "0" ])
+                    None None None
+                    []
+                    EnvironmentSpec.defaults
+                |> expect
+            Expect.equal (policy.Env |> Map.tryFind "GIT_CONFIG_COUNT") (Some "0") "a baseline, not a mandate"
+
+        // The daemon workaround wraps the container's own process: a declared command
+        // runs behind it, and nothing declared idles behind it. Symlinked /etc files
+        // are materialised so Docker 29's os.Root exec-user resolution can read them.
+        testCase "a container's start command carries the /etc materialisation" <| fun () ->
+            match Sandboxes.DockerSandbox.startCommand (Some "./serve --port 80") with
+            | [| "sh"; "-c"; script |] ->
+                Expect.isTrue (script.Contains "-L /etc/$f") "fixes the symlinks first"
+                Expect.isTrue (script.EndsWith "./serve --port 80") "then runs what was declared"
+            | other -> failwithf "expected a sh -c wrap, got %A" other
+            match Sandboxes.DockerSandbox.startCommand None with
+            | [| "sh"; "-c"; script |] ->
+                Expect.isTrue (script.EndsWith "exec tail -f /dev/null") "nothing declared still idles for exec"
+            | other -> failwithf "expected a sh -c wrap, got %A" other
+
         // A granted socket on Linux is COARSENED, not lost: the policy still holds it, says so,
         // and the backend is told to do the wider thing. All three, because any two without
         // the third is a lie — a report about something that did not happen, or a widening
