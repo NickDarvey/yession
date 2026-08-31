@@ -883,7 +883,7 @@ let private uiChecklistTests =
                   Author = PeerRef ada
                   Body = "added repo octo/hello (branch main)"
                   Status = Complete
-                  Kind = ConversationItemKind.ActNote
+                  Kind = ConversationItemKind.ActNote { Detail = None }
                   Offset = EventOffset.create 1L |> expect
                   Woke = None }
             let model =
@@ -895,6 +895,51 @@ let private uiChecklistTests =
             let noteStart = html.IndexOf "data-act-note"
             let article = html.Substring (html.LastIndexOf ("<article", noteStart), 300)
             Expect.isFalse (article.Contains "data-message-body") "no message body — it is not something someone said"
+
+        // An act's particulars are on the note, under its headline — not appended to the
+        // headline, and not behind a disclosure. Both of those were how this read before:
+        // one line carrying a sandbox, a backend, a forwarded credential and a paragraph of
+        // realisation, set in the caps label voice. What is pinned is the SPLIT — that the
+        // two halves are separate elements — because that is the promise a redesign of the
+        // line must keep, whatever it ends up looking like.
+        testCase "an act with particulars says them under its headline, not along it" <| fun () ->
+            let note : ConversationItem =
+                { MessageId = MessageId.create "msg-sandbox-note" |> expect
+                  Author = PeerRef ada
+                  Body = "started sandbox work (srt)"
+                  Status = Complete
+                  Kind = ConversationItemKind.ActNote { Detail = Some "forwarding github from user:ada" }
+                  Offset = EventOffset.create 1L |> expect
+                  Woke = None }
+            let model =
+                { representativeModel with
+                    Conversation = { representativeModel.Conversation with Items = [ note ] } }
+            let html = Support.render model
+            let noteStart = html.IndexOf "data-act-note"
+            let article = html.Substring (html.LastIndexOf ("<article", noteStart), 600)
+            Expect.isTrue (article.Contains "started sandbox work (srt)") "the headline is what the act was"
+            Expect.isTrue (article.Contains "data-act-detail") "and the particulars are their own element"
+            let detail = article.Substring (article.IndexOf "data-act-detail")
+            Expect.isTrue (detail.Contains "forwarding github from user:ada") "carrying what the headline left out"
+
+        // The other half, and the reason the detail is an option rather than an empty
+        // string: an act that is already one clause must not grow a blank second line under
+        // it, which reads as something withheld.
+        testCase "an act that is one clause has nothing under it" <| fun () ->
+            let note : ConversationItem =
+                { MessageId = MessageId.create "msg-plain-note" |> expect
+                  Author = PeerRef ada
+                  Body = "removed repo octo/hello"
+                  Status = Complete
+                  Kind = ConversationItemKind.ActNote { Detail = None }
+                  Offset = EventOffset.create 1L |> expect
+                  Woke = None }
+            let model =
+                { representativeModel with
+                    Conversation = { representativeModel.Conversation with Items = [ note ] } }
+            let html = Support.render model
+            Expect.isTrue (html.Contains "removed repo octo/hello") "the act reads as its sentence"
+            Expect.isFalse (html.Contains "data-act-detail") "and no second line under it"
 
         // A turn nobody asked for (Plan 20, stage 2). The agent may now speak with nobody
         // having spoken to it, and on a shared surface that reads as the agent deciding

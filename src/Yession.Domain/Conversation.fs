@@ -16,6 +16,18 @@ type ConversationItemStatus =
     /// The turn was explicitly interrupted; the partial body streamed so far is kept.
     | Interrupted
 
+/// What an act has to say beyond its headline. The fold KNOWS which half of a sentence is
+/// the gist and which is the particulars — it built both from an event whose shape it
+/// matched — so the split is made here rather than by a renderer hunting for a punctuation
+/// mark in finished prose. A view that split on an em-dash would be re-parsing its own copy,
+/// and every rewording would silently move the seam.
+///
+/// `None` is an act that is already one clause. Most are: "removed repo octo/hello" has no
+/// second half to withhold, and inventing one would pad every short line into looking like a
+/// long one.
+type ActNoteFacts =
+    { Detail : string option }
+
 /// What an item in the timeline IS (Plan 14). A message is something someone said; a
 /// repo note is something someone DID (added/removed/switched a repo), folded into the
 /// same ordered list so humans see it where it happened and the agent's context —
@@ -29,11 +41,18 @@ type ConversationItemKind =
     /// for the category rather than for repos (Plan 15) because every command the agent
     /// gains lands here — the timeline is how a human sees what was done on their behalf,
     /// and a kind per capability would be a renderer per capability.
-    | ActNote
+    ///
+    /// It carries what only an ACT can have: a message is one body with no particulars to
+    /// hold back, so the facts ride the case rather than the item — and a message cannot be
+    /// written carrying a detail it could never show.
+    | ActNote of ActNoteFacts
 
 type ConversationItem =
     { MessageId : MessageId
       Author    : ActorRef
+      /// What a message said — and, on an act note, only its HEADLINE: the particulars are
+      /// in `ActNoteFacts.Detail` beside it. A reader that is not a screen wants both, and
+      /// `ConversationItem.said` is the one that gives both. See it for why.
       Body      : string
       Status    : ConversationItemStatus
       Kind      : ConversationItemKind
@@ -53,6 +72,26 @@ type ConversationItem =
       /// and an item does not know its turn. It rides here for the same reason `Offset` does:
       /// the fold knows something the view needs and cannot re-derive.
       Woke      : WakeReason option }
+
+module ConversationItem =
+
+    /// Everything this item says, headline and particulars, as one sentence.
+    ///
+    /// The split exists for a SCREEN: an eye needs a gist to land on, and a paragraph with no
+    /// gist is a paragraph nobody reads. A reader that is not a screen — the agent's prompt,
+    /// a digest, a log line — has no such need and must never be handed the headline alone,
+    /// because the half a headline leaves out is the half that says which credential went
+    /// into the sandbox, why the declaration was refused, and what the checkout is asking
+    /// for. That is the half somebody is being asked to decide about.
+    ///
+    /// It lives here rather than in each of those readers for the ordinary reason: a rule
+    /// about how an act's two halves compose is a rule about the act, and a caller that had
+    /// to remember to ask for the second half is a caller that will one day not.
+    let said (item: ConversationItem) : string =
+        match item.Kind with
+        | ConversationItemKind.ActNote { Detail = Some detail } -> item.Body + " — " + detail
+        | ConversationItemKind.ActNote { Detail = None }
+        | ConversationItemKind.Message -> item.Body
 
 type ConversationProjection =
     { Items : ConversationItem list
@@ -167,9 +206,10 @@ module ConversationProjection =
                     proj.Items
                     @ [ { MessageId = r.MessageId
                           Author = r.Actor
-                          Body = sprintf "added repo %s (branch %s)" (RepoRef.value r.Repo) r.Branch
+                          Body = sprintf "added repo %s" (RepoRef.value r.Repo)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote
+                          Kind =
+                            ConversationItemKind.ActNote { Detail = Some (sprintf "on branch %s" r.Branch) }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | SessionEvent.RepoRemoved r ->
@@ -180,7 +220,7 @@ module ConversationProjection =
                           Author = r.Actor
                           Body = sprintf "removed repo %s" (RepoRef.value r.Repo)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote
+                          Kind = ConversationItemKind.ActNote { Detail = None }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | SessionEvent.RepoBranchSwitched r ->
@@ -193,7 +233,7 @@ module ConversationProjection =
                             if r.Created then sprintf "created branch %s in %s" r.Branch (RepoRef.value r.Repo)
                             else sprintf "switched %s to branch %s" (RepoRef.value r.Repo) r.Branch
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote
+                          Kind = ConversationItemKind.ActNote { Detail = None }
                           Offset = envelope.Offset
                           Woke = None } ] }
         // Named WorkSandboxes (Plan 15, stage 2) fold in for the repo notes' reason and
@@ -204,32 +244,35 @@ module ConversationProjection =
         | SessionEvent.WorkSandboxStarted s ->
             let forwarded =
                 match s.Forwarded, s.CredentialOwner with
-                | [], _ -> ""
+                | [], _ -> None
                 | names, Some owner ->
-                    sprintf ", forwarding %s from %s" (String.concat ", " names) (ActorRef.token owner)
-                | names, None -> sprintf ", forwarding %s" (String.concat ", " names)
+                    Some (sprintf "forwarding %s from %s" (String.concat ", " names) (ActorRef.token owner))
+                | names, None -> Some (sprintf "forwarding %s" (String.concat ", " names))
             // And where this host could not give what the sandbox's resources named. On the
-            // start line rather than a note of its own, because it is a property of THIS
+            // start NOTE rather than a note of its own, because it is a property of THIS
             // sandbox coming up — a separate item would be a second thing to correlate, and
             // the correlation is the whole content of it.
             let realisation =
                 match s.Realisation with
-                | [] -> ""
-                | lines -> sprintf ". Where this host could not give exactly what was asked: %s" (String.concat "; " lines)
+                | [] -> None
+                | lines ->
+                    Some (
+                        sprintf
+                            "where this host could not give exactly what was asked: %s"
+                            (String.concat "; " lines))
             { proj with
                 Items =
                     proj.Items
                     @ [ { MessageId = s.MessageId
                           Author = s.Actor
-                          Body =
-                            sprintf
-                                "started sandbox %s (%s)%s%s"
-                                (SandboxRef.render s.Sandbox)
-                                s.Backend
-                                forwarded
-                                realisation
+                          Body = sprintf "started sandbox %s (%s)" (SandboxRef.render s.Sandbox) s.Backend
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote
+                          Kind =
+                            ConversationItemKind.ActNote
+                                { Detail =
+                                    match List.choose id [ forwarded; realisation ] with
+                                    | [] -> None
+                                    | parts -> Some (String.concat ". " parts) }
                           Offset = envelope.Offset
                           Woke = None } ] }
         // The other outcome of a declaration, beside the start above. Said in the refusal's
@@ -248,9 +291,19 @@ module ConversationProjection =
                           Body =
                             match c.Granted with
                             | [] -> "asks for nothing"
-                            | granted -> sprintf "asks for %s" (String.concat "; " granted)
+                            | [ one ] -> sprintf "asks for %s" one
+                            | granted -> sprintf "asks for %d capabilities" (List.length granted)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote
+                          // The whole set, never a count on its own: the detail is rendered
+                          // beside the headline rather than behind a disclosure, so what a
+                          // person has to decide about is still on the screen.
+                          Kind =
+                            ConversationItemKind.ActNote
+                                { Detail =
+                                    match c.Granted with
+                                    | []
+                                    | [ _ ] -> None
+                                    | granted -> Some (String.concat "; " granted) }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | SessionEvent.RepoCapabilitiesApproved a ->
@@ -261,7 +314,7 @@ module ConversationProjection =
                           Author = a.Actor
                           Body = sprintf "approved what %s asks for" (RepoRef.value a.Repo)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote
+                          Kind = ConversationItemKind.ActNote { Detail = None }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | SessionEvent.RepoConfigRefused r ->
@@ -272,14 +325,16 @@ module ConversationProjection =
                           Author = r.Actor
                           Body =
                             match r.Sandbox with
-                            | Some sandbox ->
-                                sprintf "could not start sandbox %s — %s" (SandboxRef.render sandbox) r.Reason
+                            | Some sandbox -> sprintf "could not start sandbox %s" (SandboxRef.render sandbox)
                             // The file itself. Its reason already names the repo and the
                             // path inside the file, so anything in front of it would be a
-                            // second copy of what it says.
+                            // second copy of what it says — which is also why it is the
+                            // headline here and not the detail under one.
                             | None -> r.Reason
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote
+                          Kind =
+                            ConversationItemKind.ActNote
+                                { Detail = r.Sandbox |> Option.map (fun _ -> r.Reason) }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | SessionEvent.WorkSandboxStopped s ->
@@ -290,7 +345,7 @@ module ConversationProjection =
                           Author = s.Actor
                           Body = sprintf "stopped sandbox %s" (SandboxRef.render s.Sandbox)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote
+                          Kind = ConversationItemKind.ActNote { Detail = None }
                           Offset = envelope.Offset
                           Woke = None } ] }
         // Where new terminals start (Plan 25) folds in for the repo notes' reason: it is a
@@ -311,7 +366,7 @@ module ConversationProjection =
                                     "new terminals in %s start where the sandbox puts them"
                                     (SandboxRef.render p.Sandbox)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote
+                          Kind = ConversationItemKind.ActNote { Detail = None }
                           Offset = envelope.Offset
                           Woke = None } ] }
         // A refusal reads in the timeline beside the acts that happened, attributed to the
@@ -324,12 +379,9 @@ module ConversationProjection =
                     proj.Items
                     @ [ { MessageId = c.MessageId
                           Author = c.RejectedBy
-                          Body =
-                            match c.Reason with
-                            | Some reason -> sprintf "refused %s — %s" c.Summary reason
-                            | None -> sprintf "refused %s" c.Summary
+                          Body = sprintf "refused %s" c.Summary
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote
+                          Kind = ConversationItemKind.ActNote { Detail = c.Reason }
                           Offset = envelope.Offset
                           Woke = None } ] }
         // The MCP set changing (Plan 17). `ActorRef.System`, because nobody in the session
@@ -344,7 +396,7 @@ module ConversationProjection =
                           Author = ActorRef.System
                           Body = sprintf "you can now use the %s tools" (McpServerName.value m.Name)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote
+                          Kind = ConversationItemKind.ActNote { Detail = None }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | SessionEvent.McpServerUnavailable m ->
@@ -355,7 +407,7 @@ module ConversationProjection =
                           Author = ActorRef.System
                           Body = sprintf "the %s tools are no longer available" (McpServerName.value m.Name)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote
+                          Kind = ConversationItemKind.ActNote { Detail = None }
                           Offset = envelope.Offset
                           Woke = None } ] }
         // Watched pull requests fold in for the repo notes' reason: a watch is a
@@ -367,14 +419,16 @@ module ConversationProjection =
                     proj.Items
                     @ [ { MessageId = p.MessageId
                           Author = p.Actor
-                          Body =
-                            sprintf
-                                "PR %s watched (%s, %s)"
-                                (PrRef.render p.Pr)
-                                (PrState.describe p.Initial.State)
-                                (ChecksRollup.describe p.Initial.Checks)
+                          Body = sprintf "PR %s watched" (PrRef.render p.Pr)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote
+                          Kind =
+                            ConversationItemKind.ActNote
+                                { Detail =
+                                    Some (
+                                        sprintf
+                                            "%s, %s"
+                                            (PrState.describe p.Initial.State)
+                                            (ChecksRollup.describe p.Initial.Checks)) }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | SessionEvent.PrUnwatched p ->
@@ -385,7 +439,7 @@ module ConversationProjection =
                           Author = p.Actor
                           Body = sprintf "PR %s unwatched" (PrRef.render p.Pr)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote
+                          Kind = ConversationItemKind.ActNote { Detail = None }
                           Offset = envelope.Offset
                           Woke = None } ] }
         // Attributed to the WATCHER rather than the envelope's System: the person whose
@@ -398,7 +452,7 @@ module ConversationProjection =
                           Author = p.Watcher
                           Body = sprintf "PR %s %s" (PrRef.render p.Pr) (PrTransition.describe p.Transition)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote
+                          Kind = ConversationItemKind.ActNote { Detail = None }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | AgentMessageStarted a ->

@@ -976,8 +976,19 @@ module Style =
 
     /// A repo note in the timeline (Plan 14): one quiet act-line, indented past the
     /// avatar gutter so the reading edge lines up with message bodies.
-    let actNote = "max-w-[46rem] pl-[32px]"
-    let actNoteText = caps + " text-ink-faint"
+    let actNote = "max-w-[46rem] pl-[32px] flex flex-col gap-0.5"
+    /// Sentence case, deliberately. This wore the caps LABEL voice, and a label voice is for
+    /// two or three words: `STARTED SANDBOX WORK (DOCKER), FORWARDING ANTHROPIC_API_KEY FROM
+    /// ADA` is a line nobody reads, because uppercase flattens the word shapes a reader scans
+    /// by and the tracking stretches one clause across the whole column. A label that has
+    /// grown into a sentence is a sentence, and the timeline is prose.
+    let actNoteText = "text-small leading-5 text-ink-dim"
+    /// Who did it, one step brighter than what they did. An act line carries no avatar, so
+    /// the name is its whole attribution and it is what the eye should land on first.
+    let actNoteWho = "text-ink"
+    /// The particulars under the headline: the same size, one step fainter, so the pair reads
+    /// as one act rather than as two lines about it.
+    let actNoteDetail = "text-small leading-5 text-ink-faint"
 
     /// History this device does not hold, standing at the top of the timeline where it would
     /// have been. An act note's voice and column, because it is the same kind of line — a
