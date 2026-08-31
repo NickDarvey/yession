@@ -100,6 +100,17 @@ type SandboxPolicy =
       /// the nix daemon socket readable and writable, with `test -S` passing, still could
       /// not talk to it: "could not connect to any lix socket".
       Sockets : string list
+      /// The granted mounts VERBATIM — from, at, mode — beside the flattened path lists
+      /// rather than instead of them, because the two backend families consume different
+      /// questions from one grant: the confining host family closes path SETS over the
+      /// host's own spellings, while a container backend materialises each mount at its
+      /// declared target. Both fields are filled from the same leaves in one place
+      /// (`Sandboxes.policyFor`), which is what keeps them one fact.
+      Binds : ResourceMount list
+      /// Granted named volumes, as (volume, target). Only a container backend can hold
+      /// one — everywhere else the leaf is withheld before a policy exists — so a backend
+      /// that ignores this field is a backend that never receives it filled.
+      Volumes : (string * string) list
       Env : Map<string, string>
       /// Where this sandbox stands: an ABSOLUTE directory, and the two things that
       /// depend on it are why it has to be.

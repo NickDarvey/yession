@@ -42,7 +42,7 @@ let private ghost = ResourceName.create "ghost" |> expect
 /// down where the reader can see it.
 let private genLeafFor (i: int) : Gen<ResourceLeaf> =
     gen {
-        let! kind = Gen.int32 (Range.linear 0 4)
+        let! kind = Gen.int32 (Range.linear 0 5)
         let! mode = Gen.int32 (Range.linear 0 2)
         return
             match kind with
@@ -58,6 +58,7 @@ let private genLeafFor (i: int) : Gen<ResourceLeaf> =
             | 1 -> Socket (sprintf "/run/%d.sock" i)
             | 2 -> Endpoint (sprintf "h%d.example.com" i)
             | 3 -> Variable (sprintf "V%d" i, sprintf "value-%d" i)
+            | 4 -> Volume (sprintf "vol%d" i, sprintf "/vol/%d" i)
             | _ -> Exec (sprintf "/bin/tool%d" i)
     }
 
@@ -67,11 +68,13 @@ let private genLimits : Gen<HostLimits> =
         let! sockets = Gen.int32 (Range.linear 0 1)
         let! egress = Gen.int32 (Range.linear 0 1)
         let! overlay = Gen.int32 (Range.linear 0 1)
+        let! volumes = Gen.int32 (Range.linear 0 1)
         return
             HostLimits.of' (
                 [ if sockets = 1 then HostDistinction.SocketsByPath
                   if egress = 1 then HostDistinction.EgressByHost
-                  if overlay = 1 then HostDistinction.OverlayMounts ])
+                  if overlay = 1 then HostDistinction.OverlayMounts
+                  if volumes = 1 then HostDistinction.NamedVolumes ])
     }
 
 let private genSensitivity : Gen<Sensitivity> =
@@ -452,6 +455,25 @@ let tests =
             | [ Mount mount ] -> Expect.equal mount.At "/nix" "the target is the source unless it is named"
             | other -> failwithf "expected one mount, got %A" other
 
+        // A named volume is host-global and persistent — the sharing is the point — so it
+        // is a thing only an operator's file may put on the table, and both halves are
+        // required: a volume with no target is a thing with nowhere to be.
+        testCase "a volume resource decodes with its name and target" <| fun () ->
+            let profile =
+                OperatorProfile.parse
+                    """{ "version": 1, "resources": { "warm-store": { "volume": { "name": "yession-nix", "at": "/nix" } } } }"""
+                |> expect
+            match ResourceProfile.resolve profile.Resources [ ResourceName.create "warm-store" |> expect ] |> expect |> ResourceClosure.leaves |> Set.toList with
+            | [ Volume (name, at) ] ->
+                Expect.equal name "yession-nix" "docker's name for it"
+                Expect.equal at "/nix" "and where the operator says it belongs"
+            | other -> failwithf "expected one volume, got %A" other
+
+        testCase "a volume with no target is refused" <| fun () ->
+            Expect.isError
+                (OperatorProfile.parse """{ "version": 1, "resources": { "v": { "volume": { "name": "x" } } } }""")
+                "the operator is the one author who knows where it belongs"
+
         testCase "a resource that grants nothing is refused, not decoded as an empty one" <| fun () ->
             // A name that reads as configuration and is none — the same failure an unknown
             // key would be, arriving by another route.
@@ -620,7 +642,8 @@ let tests =
                         Expect.equal mount.Mode ResourceMountMode.Overlay
                             "only an overlay mount can, and only because no backend has a union mount"
                     | Socket _
-                    | Endpoint _ -> ()
+                    | Endpoint _
+                    | Volume _ -> ()
             }
 
         // Every difference is one of the two directions, and which one is not a detail: a

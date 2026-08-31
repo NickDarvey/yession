@@ -55,11 +55,19 @@ type ResourceMount =
       At : string
       Mode : ResourceMountMode }
 
-/// The five primitives, and there is no sixth.
+/// The six primitives, and there is no seventh.
 type ResourceLeaf =
     | Mount of ResourceMount
     | Socket of path: string
     | Endpoint of host: string
+    /// A named volume, mounted into the sandbox at `at`. The SHARING is the point and the
+    /// hazard at once: a named volume outlives every sandbox and is the same volume in
+    /// every container on this host that holds it, so one session's writes reach the next
+    /// session's build. That is exactly the kind of grant only an operator may put on the
+    /// table — a warm store on a machine whose sessions all answer to one person — and
+    /// never something a repo's file may reach for on its own (`Config.fs` refuses it
+    /// there). Only a container backend can hold one; everywhere else it is withheld.
+    | Volume of name: string * at: string
     /// ONE variable. A declared `env` map is normalised to one leaf per entry before it
     /// reaches here, and that is load-bearing rather than tidy: a set of MAPS has no useful
     /// dedup — `{A=1}` and `{A=1,B=2}` are two elements that both grant `A` — and the
@@ -105,6 +113,9 @@ module ResourceLeaf =
         | Endpoint host -> EndpointTarget host
         | Variable (name, _) -> VariableTarget name
         | Exec path -> ExecTarget path
+        // A volume occupies the same axis a mount does — a container path — so a volume
+        // and a mount at one target collide like two mounts would.
+        | Volume (_, at) -> MountTarget at
 
     /// One line a person reads. The approval prompt is built from these, so it says what
     /// will be materialised rather than a summary of it.
@@ -122,6 +133,9 @@ module ResourceLeaf =
         | Endpoint host -> sprintf "reaches %s" host
         | Variable (name, value) -> sprintf "%s=%s" name value
         | Exec path -> sprintf "runs %s" path
+        // The sharing is what a person weighing this needs to hear, not the mechanism.
+        | Volume (name, at) ->
+            sprintf "the volume '%s' at %s — persistent, and shared with every sandbox on this host that holds it" name at
 
     /// Every colliding pair in a set of leaves.
     ///
@@ -238,6 +252,12 @@ type HostDistinction =
     | EgressByHost
     /// A writable layer over a read-only source, rather than one or the other.
     | OverlayMounts
+    /// A named volume as a thing the backend HAS, not a bound it enforces. The one
+    /// distinction on this list that is a provision rather than a confinement — which is
+    /// why the unconfining host backend, whose "everything is allowed" answers every
+    /// confinement question, still does not claim it: allowing everything does not
+    /// conjure a volume.
+    | NamedVolumes
 
 /// What this host can express. The THIRD author of a grant, after the operator who named it
 /// and the repo that selected it, and the only one that is not a person.
@@ -249,10 +269,17 @@ type HostLimits = private HostLimits of Set<HostDistinction>
 
 module HostLimits =
 
-    /// A host that can express everything. What the algebra's properties compare against, and
-    /// what an unconfining backend is: nothing is scoped because nothing is confined.
+    /// A host that can express everything. What the algebra's properties compare against.
+    /// NOT what the unconfining host backend claims any more: allowing everything answers
+    /// every confinement distinction, but `NamedVolumes` is a provision, and the host
+    /// backend has no volumes to provide — its limits are named in `Sandboxes.limitsFor`.
     let unlimited : HostLimits =
-        HostLimits (Set.ofList [ HostDistinction.SocketsByPath; HostDistinction.EgressByHost; HostDistinction.OverlayMounts ])
+        HostLimits (
+            Set.ofList
+                [ HostDistinction.SocketsByPath
+                  HostDistinction.EgressByHost
+                  HostDistinction.OverlayMounts
+                  HostDistinction.NamedVolumes ])
 
     let of' (distinctions: HostDistinction list) : HostLimits = HostLimits (Set.ofList distinctions)
 
@@ -319,6 +346,11 @@ module RealisedClosure =
                         "no backend on this host has a union mount, so declare it read or write rather than let it silently become one")
             | ResourceMountMode.Read
             | ResourceMountMode.Write -> None
+        | Volume _ ->
+            Some (
+                HostDistinction.NamedVolumes,
+                LeafRealisation.Withheld
+                    "only a container backend has named volumes — grant this where the sandbox is a container, not here")
         | Variable _
         | Exec _ -> None
 

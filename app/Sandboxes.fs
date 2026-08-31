@@ -267,12 +267,17 @@ let private platform () : string = jsNative
 /// it cannot enforce is not a degradation, it is the absence of a sandbox, said elsewhere.
 let limitsFor (backend: SandboxBackend) (platform: string) : HostLimits =
     match backend with
-    | HostBackend -> HostLimits.unlimited
+    // Every CONFINEMENT distinction and not `unlimited`: allowing everything answers a
+    // question about bounds, and `NamedVolumes` is a provision — the host backend has no
+    // volumes to provide, so a volume granted to it is withheld rather than silently
+    // held-and-never-mounted.
+    | HostBackend ->
+        HostLimits.of' [ HostDistinction.SocketsByPath; HostDistinction.EgressByHost; HostDistinction.OverlayMounts ]
     | SrtBackend ->
         if platform = "darwin" then
             HostLimits.of' [ HostDistinction.SocketsByPath; HostDistinction.EgressByHost ]
         else HostLimits.of' [ HostDistinction.EgressByHost ]
-    | DockerBackend -> HostLimits.of' [ HostDistinction.SocketsByPath ]
+    | DockerBackend -> HostLimits.of' [ HostDistinction.SocketsByPath; HostDistinction.NamedVolumes ]
 
 /// What a backend can distinguish on the host this process is running on.
 ///
@@ -282,18 +287,39 @@ let limitsFor (backend: SandboxBackend) (platform: string) : HostLimits =
 /// ever agrees with the first on the box it was written on.
 let limitsHere (backend: SandboxBackend) : HostLimits = limitsFor backend (platform ())
 
-let grantsFrom
-    (leaves: ResourceLeaf list)
-    : Result<string list * string list * string list * string list * Map<string, string>, string> =
-    let rec fold reads writes domains sockets env remaining =
+/// What one set of granted leaves comes to, each channel beside the others because they
+/// are one fact read by different consumers: the host family closes path SETS over the
+/// host's own spellings (`Reads`/`Writes`), the container backend materialises each
+/// mount at its declared target (`Binds`, `Volumes`), and both read the rest alike.
+type GrantedLeaves =
+    { Reads : string list
+      Writes : string list
+      Domains : string list
+      Sockets : string list
+      Env : Map<string, string>
+      Binds : ResourceMount list
+      Volumes : (string * string) list }
+
+let grantsFrom (leaves: ResourceLeaf list) : Result<GrantedLeaves, string> =
+    let rec fold (acc: GrantedLeaves) remaining =
         match remaining with
-        | [] -> Ok (List.rev reads, List.rev writes, List.rev domains, List.rev sockets, env)
+        | [] ->
+            Ok
+                { acc with
+                    Reads = List.rev acc.Reads
+                    Writes = List.rev acc.Writes
+                    Domains = List.rev acc.Domains
+                    Sockets = List.rev acc.Sockets
+                    Binds = List.rev acc.Binds
+                    Volumes = List.rev acc.Volumes }
         | leaf :: rest ->
             match leaf with
             | Mount mount ->
                 match mount.Mode with
-                | ResourceMountMode.Read -> fold (mount.From :: reads) writes domains sockets env rest
-                | ResourceMountMode.Write -> fold reads (mount.From :: writes) domains sockets env rest
+                | ResourceMountMode.Read ->
+                    fold { acc with Reads = mount.From :: acc.Reads; Binds = mount :: acc.Binds } rest
+                | ResourceMountMode.Write ->
+                    fold { acc with Writes = mount.From :: acc.Writes; Binds = mount :: acc.Binds } rest
                 // Unreachable, and deliberately not a second refusal. An overlay is WITHHELD
                 // by the realisation before it gets here — `HostDistinction.OverlayMounts` is
                 // a distinction no backend on this host claims — so a leaf arriving in this
@@ -312,11 +338,23 @@ let grantsFrom
             //
             // Still read and written too, because talking to one does both, and the
             // node has to be reachable before it can be connected to.
-            | Socket path -> fold (path :: reads) (path :: writes) domains (path :: sockets) env rest
-            | Endpoint host -> fold reads writes (host :: domains) sockets env rest
-            | Variable (name, value) -> fold reads writes domains sockets (Map.add name value env) rest
-            | Exec path -> fold (path :: reads) writes domains sockets env rest
-    fold [] [] [] [] Map.empty leaves
+            | Socket path ->
+                fold
+                    { acc with
+                        Reads = path :: acc.Reads
+                        Writes = path :: acc.Writes
+                        Sockets = path :: acc.Sockets }
+                    rest
+            | Endpoint host -> fold { acc with Domains = host :: acc.Domains } rest
+            | Variable (name, value) -> fold { acc with Env = Map.add name value acc.Env } rest
+            | Exec path -> fold { acc with Reads = path :: acc.Reads } rest
+            // Only the container backend can hold one — everywhere else the realisation
+            // withheld it before this fold ran — so this channel is filled exactly where
+            // it can be consumed.
+            | Volume (name, at) -> fold { acc with Volumes = (name, at) :: acc.Volumes } rest
+    fold
+        { Reads = []; Writes = []; Domains = []; Sockets = []; Env = Map.empty; Binds = []; Volumes = [] }
+        leaves
 
 /// The directories of granted executables, for PATH.
 let grantedPath (leaves: ResourceLeaf list) : string list =
@@ -385,7 +423,29 @@ let policyFor
     // will actually give it.
     match grantsFrom (RealisedClosure.held realised |> Set.toList) with
     | Error e -> Error e
-    | Ok (grantedReads, grantedWrites, grantedDomains, grantedSockets, grantedEnv) ->
+    | Ok granted' ->
+
+    // The path lists in the SANDBOX's own spelling, which differs by family: the host
+    // family confines the host's paths (a grant's `from`), while a container sees a
+    // grant only where it was mounted (its `at`) plus its granted volumes. The start-up
+    // checks probe these lists from INSIDE the sandbox, so the wrong spelling here
+    // reports a healthy container broken — or proves nothing about a broken one.
+    // (A granted executable stays host-family business: a host binary is not runnable
+    // in a container's userland, so the docker arm does not list it.)
+    let grantedReads, grantedWrites =
+        match backend with
+        | HostBackend
+        | SrtBackend -> granted'.Reads, granted'.Writes
+        | DockerBackend ->
+            let at mode =
+                granted'.Binds
+                |> List.filter (fun b -> (b.Mode = ResourceMountMode.Read) = mode)
+                |> List.map (fun b -> b.At)
+            (at true) @ granted'.Sockets,
+            (at false) @ granted'.Sockets @ (granted'.Volumes |> List.map snd)
+    let grantedDomains = granted'.Domains
+    let grantedSockets = granted'.Sockets
+    let grantedEnv = granted'.Env
 
     // What every docker sandbox starts with before grants and its own spec: the
     // backend's own consequences, said by the backend rather than copied into every
@@ -457,6 +517,11 @@ let policyFor
             | DockerBackend -> None
             | SrtBackend -> Some (List.distinct grantedDomains)
           Sockets = List.distinct grantedSockets
+          // Both container channels filled from the same fold as the lists above — one
+          // fact, several consumers. Under the host family `Volumes` is structurally
+          // empty (the leaf is withheld by realisation) and `Binds` is unread.
+          Binds = granted'.Binds
+          Volumes = granted'.Volumes
           Realisation = differences
           Env = env
           // What the sandbox ASKED to start in, RESOLVED — the workspace when it asked
@@ -803,6 +868,34 @@ module DockerSandbox =
             return arr.Length
         }
 
+    /// Every mount this container gets, decided in ONE place: what the spec declared,
+    /// what the operator granted (host binds, socket paths, named volumes), and — only
+    /// where none of those already provides the workspace path — the sandbox's own
+    /// workspace volume. The granted binds are what makes a docker grant TRUE: until
+    /// this existed the policy carried them, `limitsFor` claimed docker scopes a socket
+    /// by path, and the backend dropped every one on the floor — a grant that read as
+    /// held and reached nothing.
+    ///
+    /// A named volume mounts empty-or-warm and dockerd seeds an empty one from the
+    /// image's content at that path on first use, so a volume over /nix does not shadow
+    /// the image's own store.
+    let mountPlan (workspaceTarget: string) (declared: ContainerMount list) (policy: SandboxPolicy) : ContainerMount list =
+        let granted =
+            (policy.Binds
+             |> List.map (fun b ->
+                 { Source = HostPath b.From
+                   Target = b.At
+                   Mode = if b.Mode = ResourceMountMode.Read then ReadOnly else ReadWrite }))
+            @ (policy.Sockets
+               |> List.distinct
+               |> List.map (fun path -> { Source = HostPath path; Target = path; Mode = ReadWrite }))
+            @ (policy.Volumes |> List.map (fun (volume, at) -> { Source = NamedVolume volume; Target = at; Mode = ReadWrite }))
+        let all = declared @ granted
+        let workspaceProvided = all |> List.exists (fun m -> ContainerMount.provides m.Target workspaceTarget)
+        (if workspaceProvided then []
+         else [ { Source = SessionWorkspace; Target = workspaceTarget; Mode = ReadWrite } ])
+        @ all
+
     /// The container's own process — the declared command, or the idle that exists to be
     /// exec'd into — wrapped in the one fix every nix-built image needs on today's
     /// daemons. Docker 29 resolves an exec's user through Go's os.Root guard, which
@@ -872,18 +965,7 @@ module DockerSandbox =
                         // and by accident: docker is the backend that passes no workspace.
                         let workspaceTarget =
                             policy.WorkingDirectory |> Option.defaultValue "/workspace"
-                        // Attach the sandbox's named workspace volume only where nothing
-                        // already provides the workspace path. "Provides" is on a
-                        // directory boundary and includes containment: a repo sandbox's
-                        // workdir is its checkout under the /repos bind, and a volume
-                        // mounted at the deeper path would shadow that checkout with an
-                        // empty directory (`ContainerMount.provides`).
-                        let hasWorkspaceMount =
-                            container.Mounts |> List.exists (fun m -> ContainerMount.provides m.Target workspaceTarget)
-                        let workspaceMounts =
-                            if hasWorkspaceMount then []
-                            else [ createObj [ "Type", box "volume"; "Source", box name; "Target", box workspaceTarget; "ReadOnly", box false ] ]
-                        let mounts = workspaceMounts @ (container.Mounts |> List.map (mountObj name))
+                        let mounts = mountPlan workspaceTarget container.Mounts policy |> List.map (mountObj name)
                         let env =
                             policy.Env |> Map.toList |> List.map (fun (k, v) -> sprintf "%s=%s" k v) |> List.toArray
                         // The named volume persists across container restarts by design;
@@ -1704,6 +1786,8 @@ module AgentSandbox =
           // The agent CLI talks to no local daemon. A socket nobody named is unreachable,
           // which is what this says.
           Sockets = []
+          Binds = []
+          Volumes = []
           Realisation = []
           Env = env
           WorkingDirectory = None

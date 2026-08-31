@@ -1206,25 +1206,29 @@ let private configTests =
                 "the path and its content, as written"
 
         // `HostPath` exists and the SESSION uses it — that is how the repos directory reaches
-        // a container. A source a repo could name is arbitrary access to the machine running
-        // the session, which is the authority the reserved prefix already refuses.
-        testCase "a volume may not name a host path" <| fun () ->
+        // a container. `NamedVolume` exists and the OPERATOR grants it — a docker volume is
+        // host-global, so the same name is the same volume in every session's containers,
+        // and a file that could name one could read and seed another session's state. What
+        // a file may say is only `workspace`: the one volume that is genuinely its own.
+        testCase "a volume may name only the workspace — not a host path, not a shared name" <| fun () ->
             let volume source =
                 ConfigFile.parse (
                     sprintf
                         """{ "version": 2, "sandboxes": { "dev": { "container": { "volumes": [ { "source": "%s", "target": "/w" } ] } } } }"""
                         source)
-            match volume "/var/run/docker.sock" with
-            | Ok _ -> failwith "expected a refusal"
-            | Error e ->
-                Expect.isTrue (e.Contains "host path") "it says what the source is"
-                Expect.isTrue (e.Contains "workspace") "and what a file may say instead"
+            for source in [ "/var/run/docker.sock"; "cache" ] do
+                match volume source with
+                | Ok _ -> failwithf "'%s' was accepted, and a file may not reach it" source
+                | Error e ->
+                    Expect.isTrue (e.Contains "workspace") "it says what a file may say instead"
+            match volume "cache" with
+            | Ok _ -> failwith "unreachable"
+            | Error e -> Expect.isTrue (e.Contains "operator") "a shared volume is pointed at the operator's file"
             let mountsOf file =
                 (file |> expect : ConfigFile).Sandboxes
                 |> Map.find (sandboxName "dev")
                 |> fun decl -> (decl.Container |> Option.get).Mounts |> List.map (fun m -> m.Source)
             Expect.equal (mountsOf (volume "workspace")) [ SessionWorkspace ] "its own checkout, by name"
-            Expect.equal (mountsOf (volume "cache")) [ NamedVolume "cache" ] "or a volume the session owns"
 
         // The file's whole claim: it says nothing a command could not be told. So what a
         // declaration becomes is the ask itself, with the one thing a file cannot know —
