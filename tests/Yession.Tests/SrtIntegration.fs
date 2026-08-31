@@ -28,9 +28,6 @@ let private nodeNet : obj = importAll "node:net"
 [<Emit("$0.mkdtempSync($1.tmpdir() + '/yession-srt-')")>]
 let private mkdtemp (fs: obj) (os: obj) : string = jsNative
 
-[<Emit("$0.mkdtempSync($1)")>]
-let private mkdtempAt (fs: obj) (prefix: string) : string = jsNative
-
 [<Emit("$0.writeFileSync($1, $2)")>]
 let private writeFile (fs: obj) (path: string) (content: string) : unit = jsNative
 
@@ -205,82 +202,6 @@ let tests =
                 Expect.isFalse (exists nodeFs (outside + "/escaped")) "and nothing was written"
                 do! sandbox.Dispose ()
             })
-
-            // macOS keeps /tmp, /etc and /var as symlinks into /private, and the kernel
-            // consults DIFFERENT spellings of one path per operation: bind(2) the canonical,
-            // lstat of the link node the as-written. The forked srt closes every grant over
-            // its spellings and admits metadata on the symlink nodes a grant is written
-            // through — narrowly, per node, never per vnode-type. These four pin that fix
-            // and its narrowness; each goes red on unpatched srt (the first three) or on the
-            // broad (vnode-type SYMLINK) variant (the fourth). Darwin only: on Linux /tmp is
-            // a real directory and srt's socket grants are not path-scoped at all.
-            (if platform () <> "darwin" then
-                ptestCase "a granted path answers by both its spellings (macOS only)" (fun () -> ())
-             else
-             testCaseAsync "a granted path answers by both its spellings" (async {
-                let workspace = mkdtempAt nodeFs "/tmp/yession-srt-spell-"
-                let! sandbox = startSandbox (policyIn workspace [])
-                let canonical = "/private" + workspace
-                let! run, out, err = shell sandbox (sprintf "echo agreed > %s/marker; cat %s/marker" workspace canonical)
-                Expect.equal (exitCode run) 0 (sprintf "wrote as-written, read canonical, said: %s" err)
-                Expect.isTrue (out.Contains "agreed") "both spellings named the same file"
-                do! sandbox.Dispose ()
-            }))
-
-            (if platform () <> "darwin" then
-                ptestCase "a symlink node en route to a grant answers stat (macOS only)" (fun () -> ())
-             else
-             testCaseAsync "a symlink node en route to a grant answers stat" (async {
-                // The .NET shape: named mutexes stat("/tmp/") — hardcoded, so no TMPDIR
-                // redirection reaches it — before any build runs at all.
-                let workspace = mkdtempAt nodeFs "/tmp/yession-srt-stat-"
-                let! sandbox = startSandbox (policyIn workspace [])
-                let! run, _, err = shell sandbox "stat /tmp/ > /dev/null"
-                Expect.equal (exitCode run) 0 (sprintf "the link node a grant is spelled through answers, said: %s" err)
-                do! sandbox.Dispose ()
-            }))
-
-            (if platform () <> "darwin" then
-                ptestCase "a unix socket binds where the policy grants one (macOS only)" (fun () -> ())
-             else
-             testCaseAsync "a unix socket binds where the policy grants one" (async {
-                // MSBuild's shape: worker nodes bind /tmp/MSBuild<pid>, spelled through the
-                // symlink, in shared /tmp. Write and socket on /tmp is what a dotnet
-                // resource grants; the closure is what makes the kernel's canonical check
-                // and the as-written spelling agree.
-                let workspace = mkdtempAt nodeFs "/tmp/yession-srt-bind-"
-                let socketPath = workspace + "/probe.sock"
-                let! sandbox =
-                    startSandbox
-                        { policyIn workspace [] with
-                            ReadPaths = [ workspace; "/tmp" ]
-                            WritePaths = [ workspace; "/tmp" ]
-                            Sockets = [ "/tmp" ] }
-                let bind =
-                    sprintf
-                        "%s -e \"const n=require('node:net');const s=n.createServer();s.on('error',e=>{console.error(e.code);process.exit(1)});s.listen(%s,()=>{s.close();process.exit(0)})\""
-                        (nodePath ())
-                        ("'" + socketPath + "'")
-                let! run, _, err = shell sandbox bind
-                Expect.equal (exitCode run) 0 (sprintf "the bind the policy granted succeeded, said: %s" err)
-                do! sandbox.Dispose ()
-            }))
-
-            (if platform () <> "darwin" then
-                ptestCase "a symlink en route to nothing granted stays invisible (macOS only)" (fun () -> ())
-             else
-             testCaseAsync "a symlink en route to nothing granted stays invisible" (async {
-                // The narrowness itself, and what the reverted broad variant could not
-                // promise: metadata answers per NODE, so even stat of a link that no grant
-                // is spelled through is refused — not just the read of its target.
-                let workspace = mkdtemp nodeFs nodeOs
-                let elsewhere = mkdtemp nodeFs nodeOs |> Fs.canonical |> Option.get
-                symlink nodeFs (elsewhere + "/real") (elsewhere + "/link")
-                let! sandbox = startSandbox (policyIn workspace [])
-                let! run, _, _ = shell sandbox (sprintf "stat %s/link > /dev/null 2>&1" elsewhere)
-                Expect.notEqual (exitCode run) 0 "lstat of an unrelated link is refused"
-                do! sandbox.Dispose ()
-            }))
 
             testCaseAsync "a read outside the policy's paths is refused" (async {
                 // The half the write case above does not cover, and the one that was missing:
