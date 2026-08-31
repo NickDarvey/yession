@@ -1563,6 +1563,50 @@ let editorTests =
                 let! after = await (viewport ())
                 Expect.notEqual after before "the width the next command would claim follows the pane"
             }
+        // The landmark rail lives in the timeline's own left padding — 32px the scroller
+        // already reserves and draws nothing in — rather than in a column of its own. That is
+        // the arrangement that costs the conversation no width, and it is also the one whose
+        // failure is silent: nothing in the markup says whether a stroke has ended up on top
+        // of the words it points at, and every cheap tier reads markup. Two ways it breaks —
+        // the rail widening, or the timeline's inset narrowing — and one measurement catches
+        // both, because what is promised is the relationship and not either number.
+        //
+        // Clicking it is the other half. `revealMessage` finds an element by id and scrolls
+        // it; a hook that stopped matching would leave a rail of buttons that quietly do
+        // nothing, which no rendered string can tell from one that works.
+        editorCaseIn 1440 900 "a rail stroke stands clear of the words it points at, and takes you to them" (EDITOR_PORT + 22) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-landmark-rail] [data-landmark]")
+                let! clear =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 const stroke = document.querySelector('#shell [data-landmark] > *')
+                                 const body = document.querySelector('#shell [data-conversation] [data-message-body]')
+                                 return stroke.getBoundingClientRect().right <= body.getBoundingClientRect().left
+                               }""")
+                Expect.isTrue clear "the stroke ends before the reading column begins"
+
+                // And it is a mark somebody can SEE: a hairline that resolved to nothing, or
+                // painted the background colour onto the background, would measure as being
+                // in the right place and show as an empty gutter.
+                let! painted =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 const mark = document.querySelector('#shell [data-landmark] > *')
+                                 const box = mark.getBoundingClientRect()
+                                 const paint = getComputedStyle(mark).backgroundColor
+                                 return box.width > 0 && box.height > 0
+                                        && paint !== 'rgba(0, 0, 0, 0)' && paint !== 'transparent'
+                               }""")
+                Expect.isTrue painted "the stroke is a mark on the screen, not a box with nothing in it"
+
+                do! awaitU (page.ClickAsync "#shell [data-landmark]")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector("#shell [data-conversation] [data-message-id='msg-harness']")
+                             ?.classList.contains('animate-reveal') === true""")
+                return ()
+            }
         // The DVR (Plan 14, stage 7). What only a browser can answer: that rewinding a LIVE
         // terminal really mounts a player over what it has recorded so far — the same player
         // and the same cast a finished terminal's replay uses, which is what "rewound like

@@ -1322,6 +1322,48 @@ module ClientModel =
                 | Some presence when presence.DisplayName <> "" -> presence.DisplayName
                 | _ -> PeerId.value peer
 
+    /// What a stroke on the rail is called, for a reader who cannot see where it points.
+    ///
+    /// An act note's headline is already a short sentence and arrives whole. A message is not:
+    /// it is somebody's markdown, and a rail whose every stroke announced a paragraph would be
+    /// a rail nobody could tab through. So a message is named by its FIRST line, cut at a
+    /// length a person can hear in one breath — which is also how a person recognises their
+    /// own message in a list.
+    ///
+    /// An ellipsis marks the cut, because a sentence that simply stops reads as a sentence
+    /// that was garbled rather than one that was shortened.
+    let landmarkLabel (item: ConversationItem) : string =
+        let firstLine = (item.Body.Split '\n' |> Array.tryHead |> Option.defaultValue "").Trim ()
+        if firstLine.Length <= 72 then firstLine
+        else (firstLine.Substring (0, 71)).TrimEnd () + "…"
+
+    /// The marked items, each with where its stroke sits on the rail: a fraction of the
+    /// rail's height measured from the BOTTOM, 0 on the newest and 1 on the oldest.
+    ///
+    /// LOGARITHMIC in rank, not linear, and that is the whole of what makes the rail worth
+    /// having. A session's marks are not equally interesting: what somebody is coming back to
+    /// is nearly always recent, and forty marks spread evenly give the newest the same fortieth
+    /// of the rail as the fortieth. On a log scale the last few take most of the rail and deep
+    /// history compresses into a band at the top, which is the shape of the attention rather
+    /// than the shape of the list.
+    ///
+    /// By RANK, never by time. The rail indexes the marks; it does not map the scroll. Two
+    /// marks a week apart and two a second apart are one step either way, and a rail spaced by
+    /// timestamp would put a night's silence through the middle of it and stack a morning's
+    /// work into one line.
+    ///
+    /// Here rather than in the view for the ordinary reason: this is arithmetic, the view is a
+    /// composition root, and a bound computed there is a bound no cheap test can reach.
+    let landmarks (model: ClientModel) : (ConversationItem * float) list =
+        let marked = Landmarks.over model.Synced.Landmarks model.Conversation.Items
+        let count = List.length marked
+        // `log count` is the scale that lands the OLDEST at exactly 1: the rail is bounded by
+        // its ends rather than trailing off before them. One mark has no scale to be on and
+        // sits at the bottom, where the newest always is.
+        let span = if count <= 1 then 1.0 else log (float count)
+        marked
+        |> List.mapi (fun i item -> item, log (1.0 + float (count - 1 - i)) / span)
+
     /// What this session's pull-request watches currently stand at, read off the
     /// `pull_requests` query — the only shape a browser has them in, since the query stream
     /// is what delivers them.

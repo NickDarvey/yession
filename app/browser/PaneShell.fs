@@ -169,6 +169,22 @@ let revealBlock (terminalId: string) (blockId: string) : unit =
             reflow block
             block.classList.add [| "animate-reveal" |]))
 
+/// Scroll the conversation to one message and flash it — the rail's half of "take me back
+/// there", and deliberately the same two moves `revealBlock` makes: scroll it into view, then
+/// replay the reveal animation so the eye can find which line moved. A jump that only scrolled
+/// would leave a reader looking at a screen of text with no idea which of it they asked for.
+let revealMessage (messageId: string) : unit =
+    nextFrame (fun () ->
+        find (sprintf "[data-conversation] [data-message-id=\"%s\"]" messageId)
+        |> Option.iter (fun item ->
+            item.scrollIntoView ()
+            // Removing, forcing a reflow by READING a layout property, and adding it back is
+            // the only way to replay an animation an element has already run. See
+            // `revealBlock`, whose comment this is the other half of.
+            item.classList.remove [| "animate-reveal" |]
+            reflow item
+            item.classList.add [| "animate-reveal" |]))
+
 /// The pane's open state, as a class on the shell root — the same mechanism the sidebar uses,
 /// so a Lit re-render never fights the CSS transition. A `set` rather than a toggle, because
 /// the model holds the bit and this only reflects it: the app opens this column itself

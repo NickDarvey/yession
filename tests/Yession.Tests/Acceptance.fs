@@ -231,6 +231,38 @@ let private prRow (number: int) (state: string) (status: QueryCell) : (string * 
       PrStatus.Columns.state, CellStatus (state, ToneMuted)
       PrStatus.Columns.status, status ]
 
+/// A session with some of its timeline marked for the rail. The verdicts are what the rail
+/// reads, so this is the only shape it needs.
+let private withMarks (ids: string list) : ClientModel =
+    { representativeModel with
+        Synced =
+            { representativeModel.Synced with
+                Landmarks = ids |> List.map (fun id -> MessageId.create id |> expect, true) |> Map.ofList } }
+
+/// A conversation of `n` messages, every one of them marked — the shape the rail's spacing is
+/// about, which the representative fixture's handful of items cannot show.
+let private withMarkedRun (n: int) : ClientModel =
+    let items =
+        [ for i in 1 .. n ->
+            { MessageId = MessageId.create (sprintf "mark-%d" i) |> expect
+              Author = PeerRef ada
+              Body = sprintf "message %d" i
+              Status = Complete
+              Kind = ConversationItemKind.Message
+              Offset = EventOffset.create (int64 i) |> expect
+              Woke = None } ]
+    { representativeModel with
+        Conversation = { representativeModel.Conversation with Items = items }
+        Synced =
+            { representativeModel.Synced with
+                Landmarks = items |> List.map (fun item -> item.MessageId, true) |> Map.ofList } }
+
+/// How many times a hook appears in a rendered page. Counting MOUNTS rather than words: what
+/// these cases promise is one control per item and one stroke per mark, and a substring of
+/// somebody's prose is not either.
+let private occurrences (needle: string) (haystack: string) : int =
+    (haystack.Split ([| needle |], System.StringSplitOptions.None)).Length - 1
+
 /// The composer when a PEER is the one writing: their draft is what you are in, yours (if any)
 /// is a summary you can open, and "new message" is the way out of collaborating.
 let private joinedComposerModel : ClientModel =
@@ -917,7 +949,11 @@ let private uiChecklistTests =
                     Conversation = { representativeModel.Conversation with Items = [ note ] } }
             let html = Support.render model
             let noteStart = html.IndexOf "data-act-note"
-            let article = html.Substring (html.LastIndexOf ("<article", noteStart), 600)
+            // To the article's own END, not a fixed number of characters: an article grows
+            // every time the item gains a control, and a window sized by hand turns that into
+            // a failure of this case rather than of whatever it is watching.
+            let openedAt = html.LastIndexOf ("<article", noteStart)
+            let article = html.Substring (openedAt, html.IndexOf ("</article>", openedAt) - openedAt)
             Expect.isTrue (article.Contains "started sandbox work (srt)") "the headline is what the act was"
             Expect.isTrue (article.Contains "data-act-detail") "and the particulars are their own element"
             let detail = article.Substring (article.IndexOf "data-act-detail")
@@ -1025,6 +1061,113 @@ let private uiChecklistTests =
                         [ prRow 377 "queued" (CellStatus ("github rejected this credential", ToneBad)) ])
             Expect.isTrue (html.Contains "#377 unreachable") "the strip says nobody is driving it"
             Expect.isFalse (html.Contains "#377 queued") "and not the state it is stuck in"
+
+        // --- The landmark rail ---------------------------------------------------------
+
+        // Where a stroke sits is arithmetic, and arithmetic in a view is arithmetic no cheap
+        // test can reach — so it lives on the model and is pinned here. `landmarks` returns
+        // the marks in TIMELINE order, so the head is the oldest and the last is the newest.
+        testCase "a lone mark sits at the bottom of the rail, where the newest always is" <| fun () ->
+            let model = withMarks [ "msg-1" ]
+            Expect.equal
+                (ClientModel.landmarks model |> List.map snd)
+                [ 0.0 ]
+                "nothing to be on a scale with"
+
+        // The rail is bounded by its own ends rather than trailing off before them, whatever
+        // it is holding.
+        testCase "the newest mark is at one end of the rail and the oldest at the other" <| fun () ->
+            for count in [ 2; 5; 40 ] do
+                let places = ClientModel.landmarks (withMarkedRun count) |> List.map snd
+                Expect.equal (List.length places) count (sprintf "%d strokes" count)
+                Expect.equal (List.head places) 1.0 (sprintf "the oldest of %d is at the top" count)
+                Expect.equal (List.last places) 0.0 (sprintf "and the newest of %d at the bottom" count)
+
+        // The whole reason the rail is worth having. Spread evenly, forty marks give the one
+        // somebody is actually coming back to the same fortieth of the rail as the fortieth —
+        // and the fortieth is not what anybody is reaching for. Stated as the SHAPE rather
+        // than as numbers, so a change of base or of curve keeps it true.
+        testCase "the newest marks take more of the rail than the oldest ones" <| fun () ->
+            let places = ClientModel.landmarks (withMarkedRun 8) |> List.map snd |> List.rev
+            let gap i = places.[i + 1] - places.[i]
+            Expect.isTrue (gap 0 > gap 6) (sprintf "newest gap %f should exceed oldest gap %f" (gap 0) (gap 6))
+            Expect.isTrue (gap 0 > gap 1) "and each step is smaller than the one before it"
+
+        testCase "only what is marked is on the rail" <| fun () ->
+            Expect.equal (ClientModel.landmarks representativeModel) [] "nothing marked, nothing drawn"
+            Expect.equal
+                (ClientModel.landmarks (withMarks [ "msg-1" ]) |> List.map (fst >> fun i -> MessageId.value i.MessageId))
+                [ "msg-1" ]
+                "one mark, one stroke, on the item that carries it"
+
+        // A stroke's accessible name is where it goes. An act's headline is already a short
+        // sentence; a message is somebody's markdown, and a rail announcing a paragraph per
+        // stroke is a rail nobody can tab through.
+        testCase "a stroke is named for where it goes, cut where a person can still hear it" <| fun () ->
+            let long =
+                { MessageId = MessageId.create "msg-long" |> expect
+                  Author = PeerRef ada
+                  Body = String.replicate 20 "abcde "
+                  Status = Complete
+                  Kind = ConversationItemKind.Message
+                  Offset = EventOffset.create 1L |> expect
+                  Woke = None }
+            let label = ClientModel.landmarkLabel long
+            Expect.isTrue (label.Length <= 72) (sprintf "cut to a hearable length, got %d" label.Length)
+            Expect.isTrue (label.EndsWith "…") "and says it was cut"
+
+        testCase "a stroke on a short act is named by the whole of its headline" <| fun () ->
+            let act =
+                { MessageId = MessageId.create "msg-act" |> expect
+                  Author = PeerRef ada
+                  Body = "PR octo/hello#12 merged"
+                  Status = Complete
+                  Kind = ConversationItemKind.ActNote { Detail = None; Notable = true }
+                  Offset = EventOffset.create 1L |> expect
+                  Woke = None }
+            Expect.equal (ClientModel.landmarkLabel act) "PR octo/hello#12 merged" "nothing to cut"
+
+        testCase "the rail draws one stroke per mark, and is not there when nothing is marked" <| fun () ->
+            let bare = Support.render representativeModel
+            Expect.isFalse (bare.Contains Dom.Hooks.landmarkRail) "no marks, no rail"
+            let marked = Support.render (withMarks [ "msg-1"; "msg-agent" ])
+            Expect.isTrue (marked.Contains Dom.Hooks.landmarkRail) "a rail once something is marked"
+            Expect.equal (occurrences "data-landmark=" marked) 2 "one stroke per mark"
+
+        // "Mark any of it" is the promise, so the control is on every item that has an id —
+        // a message and an act alike. A rail whose contents were chosen for the reader would
+        // be a table of contents rather than a bookmark.
+        testCase "every item in the timeline offers a mark, said and done alike" <| fun () ->
+            // Both kinds explicitly: the representative fixture is all messages, so a case
+            // counting only it would pass with the control missing from every act note in the
+            // product — which is exactly half of what a timeline holds.
+            let item id kind : ConversationItem =
+                { MessageId = MessageId.create id |> expect
+                  Author = PeerRef ada
+                  Body = "something happened"
+                  Status = Complete
+                  Kind = kind
+                  Offset = EventOffset.create 1L |> expect
+                  Woke = None }
+            let model =
+                { representativeModel with
+                    Conversation =
+                        { representativeModel.Conversation with
+                            Items =
+                                [ item "said" ConversationItemKind.Message
+                                  item "done" (ConversationItemKind.ActNote { Detail = None; Notable = false }) ] } }
+            let html = Support.render model
+            Expect.equal (occurrences "data-message-id=" html) 2 "a message and an act"
+            Expect.equal (occurrences "data-item-mark=" html) 2 "one control per item, none left out"
+
+        // And it says whether the mark is on, to a reader who cannot see it. `aria-pressed`
+        // rather than a second name: that is what a toggle button announces its state with,
+        // and it is what a person hears before they press.
+        testCase "a mark control says whether the mark is on" <| fun () ->
+            let html = Support.render (withMarks [ "msg-1" ])
+            Expect.isTrue (html.Contains "aria-pressed=\"true\"") "the marked one is pressed"
+            Expect.isTrue (html.Contains "aria-pressed=\"false\"") "and the unmarked ones are not"
+            Expect.isTrue (html.Contains Dom.Text.markItem) "under one name either way"
 
         // The tab title is the only surface that reaches somebody who is not looking at this
         // session at all, so what it says has to survive being read out of the corner of an

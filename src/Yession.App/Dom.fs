@@ -75,6 +75,14 @@ module Dom =
         let messageAuthor = "data-message-author"
         let messageStatus = "data-message-status"
         let messageBody = "data-message-body"
+        /// The landmark rail beside the timeline, and one stroke on it valued by the message
+        /// it points at. Beside them, the per-item control that puts a mark there — valued by
+        /// the same id, and carrying whether the mark is currently on, so a test can read the
+        /// state without reading a class.
+        let landmarkRail = "data-landmark-rail"
+        let landmark = "data-landmark"
+        let itemMark = "data-item-mark"
+        let itemMarked = "data-item-marked"
         // Agent activity strip.
         let agentStream = "data-agent-stream"
         let agentTurn = "data-agent-turn"
@@ -315,6 +323,13 @@ module Dom =
         // once (the header's status and the sidebar's sync row).
         let catchingUp = "Catching up"
         let upToDate = "Up to date"
+
+        // The landmark rail. The mark control keeps ONE name and carries its state in
+        // `aria-pressed`: a toggle whose NAME flips as well announces itself twice and in two
+        // voices ("unmark this, pressed"), and a reader then has to work out which half is
+        // the state and which is the offer.
+        let markItem = "Mark this"
+        let markedMoments = "Marked moments"
 
         /// The word on every notice's disclosure. ONE word across all of them: the move is
         /// the same wherever it appears — what this costs you is on the surface, why it is
