@@ -21,6 +21,14 @@ sandboxes:
     workdir: .
     container:
       image: nixos/nix
+      # Docker 29 resolves an exec's user through Go's os.Root guard, which refuses
+      # the ABSOLUTE symlinks nix-built images use for /etc/passwd and /etc/group —
+      # so `docker run` works and every `docker exec` dies with "path escapes from
+      # parent". Materialising the two files at start (the run path, which works)
+      # makes every later exec resolve against real files. Measured on 29.2.1;
+      # remove when the daemon handles symlinked /etc again.
+      cmd: |
+        for f in passwd group shadow; do if [ -L /etc/$f ]; then cat /etc/$f > /etc/.$f && rm /etc/$f && mv /etc/.$f /etc/$f; fi; done; exec tail -f /dev/null
     forward: [ github ]              # so `git push` works from a terminal
 
     # Which nix features this repo's build needs, plus where its artifacts substitute
@@ -38,6 +46,9 @@ sandboxes:
     workdir: .
     container:
       image: nixos/nix
+      # Same Docker 29 os.Root workaround as `dev`.
+      cmd: |
+        for f in passwd group shadow; do if [ -L /etc/$f ]; then cat /etc/$f > /etc/.$f && rm /etc/$f && mv /etc/.$f /etc/$f; fi; done; exec tail -f /dev/null
     forward: [ github ]
 
     # The same reasons as `dev`; `like:` does not exist yet, so both are written twice.
