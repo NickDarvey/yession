@@ -164,24 +164,23 @@ let tests =
             let file = RepoConfig.read dir r |> expect |> Option.get
             let dev = file.Sandboxes |> Map.find (SandboxName.create "dev" |> expect)
             let gate = file.Sandboxes |> Map.find (SandboxName.create "gate" |> expect)
-            Expect.equal dev.Container None "this repo's work sandbox is srt, so it declares no container"
-            Expect.isTrue (dev.Uses |> List.map ResourceName.value |> List.contains "nix") "it selects the host's nix resource"
-            Expect.equal dev.Forward [ "github" ] "and forwards the credential `git push` needs"
-            // The gate deliberately selects LESS: it builds what is pinned and cannot move a
-            // pin, because a release gate that can silently change a dependency is not a gate.
-            Expect.isFalse
-                (gate.Uses |> List.map ResourceName.value |> List.contains "pin")
-                "the gate cannot move a dependency pin"
-            Expect.isTrue
-                (dev.Uses |> List.map ResourceName.value |> List.contains "pin")
-                "and the sandbox a person works in can"
-            // Which experimental features this repo's build needs is a fact about this
-            // repo, so it is written here rather than in an operator's profile — and a
-            // sandbox without it cannot run `nix develop`, which is the whole job.
+            // A repo's work sandbox is a container; a declaration without one is refused
+            // at start. What the container needs is exactly what a person needs locally:
+            // nix, and the checkout — the devshell does the rest.
             for name, decl in [ "dev", dev; "gate", gate ] do
+                match decl.Container with
+                | None -> failwithf "%s declares no container, and a repo work sandbox is one" name
+                | Some container ->
+                    Expect.equal
+                        (container.Image |> Option.map (fun i -> i.Name))
+                        (Some "nixos/nix")
+                        (sprintf "%s runs the nix base image" name)
+                // The whole nix configuration the devshell sees, features and substituters
+                // both — in a container there is no /etc/nix/nix.conf story to inherit.
                 Expect.isTrue
                     (decl.EnvironmentVariables |> Map.containsKey "NIX_CONFIG")
                     (sprintf "%s carries the nix settings its build needs" name)
+            Expect.equal dev.Forward [ "github" ] "dev forwards the credential `git push` needs"
 
         testCase "a repo with no file asks for nothing, and that is not an error" <| fun () ->
             // The ordinary case. Most repos will never carry one.
