@@ -667,12 +667,54 @@ let private backendTests =
             | Error reason ->
                 Expect.isTrue (reason.Contains "octo/hello") "the refusal names the repo"
                 Expect.isTrue (reason.Contains "container") "and says what to declare")
+
+        // The total half on its own, because everything that is not a start asks it: the
+        // registry's describe, the workspace, the limits a repo's ask is judged against.
+        testCase "the scope's backend needs no runtime to answer" (fun () ->
+            Expect.equal
+                (SandboxRuntime.scopedBackend SrtBackend SessionOwned)
+                SrtBackend
+                "session-owned keeps the configured confinement"
+            Expect.equal
+                (SandboxRuntime.scopedBackend SrtBackend (RepoOwned repo))
+                SandboxRuntime.repoWorkBackend
+                "repo-owned is the repo work backend, whatever the session runs")
+
+        // A repo's `workdir:` resolves against the checkout as the CONTAINER sees it —
+        // the /repos bind — never the terminal's view. Resolved against the terminal's
+        // view, `workdir: .` produced a container whose working directory wore the host
+        // checkout path: an empty volume where nothing would look, while the checkout
+        // sat under /repos (measured on a live session before this rule existed).
+        testCase "a repo's declaration resolves against the container's view of its checkout" (fun () ->
+            Expect.equal
+                (Sandboxes.workCheckoutAt "/Users/o/.yession/sessions/S1/workspace/repos" repo)
+                "/repos/octo/hello"
+                "the container view, independent of where the host keeps the clones")
+    ]
+
+let private workspaceVolumeTests =
+    // Whether a mount already provides the workspace path decides if the named workspace
+    // volume is attached there. Containment counts: a repo sandbox's workdir is its
+    // checkout UNDER the /repos bind, and a volume at the deeper path would shadow the
+    // checkout with an empty directory.
+    testList "what provides a container's workspace" [
+        testCase "a mount at the path itself provides it" (fun () ->
+            Expect.isTrue (ContainerMount.provides "/workspace" "/workspace") "exact"
+            Expect.isTrue (ContainerMount.provides "/workspace/" "/workspace") "slashes do not matter")
+
+        testCase "a mount above the path provides it" (fun () ->
+            Expect.isTrue (ContainerMount.provides "/repos" "/repos/octo/hello") "the checkout rides the bind")
+
+        testCase "a bare prefix is not containment" (fun () ->
+            Expect.isFalse (ContainerMount.provides "/repo" "/repos/octo/hello") "directory boundary only"
+            Expect.isFalse (ContainerMount.provides "/repos/octo/hello" "/repos") "and never upward")
     ]
 
 let tests =
     testList "WorkSandboxes" [
         nameTests
         backendTests
+        workspaceVolumeTests
         normaliseTests
         ensureTests
         credentialTests

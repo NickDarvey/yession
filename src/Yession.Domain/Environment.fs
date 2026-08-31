@@ -31,6 +31,20 @@ type MountMode =
 
 type ContainerMount = { Source : MountSource; Target : string; Mode : MountMode }
 
+module ContainerMount =
+
+    /// Whether a mount at `target` already provides `dir`: the directory itself, or
+    /// anything under it — on a directory boundary, never a bare prefix (`/repo` does
+    /// not provide `/repos/x`). This is what decides whether a sandbox still needs a
+    /// workspace volume at its working directory: a workdir inside a declared mount is
+    /// already backed by that mount, and a volume put on top of the deeper path would
+    /// SHADOW the very thing the mount carries — measured as an empty workspace volume
+    /// sitting over the /repos bind, hiding the checkout it existed to hold.
+    let provides (target: string) (dir: string) : bool =
+        let target = target.TrimEnd '/'
+        let dir = dir.TrimEnd '/'
+        dir = target || dir.StartsWith (target + "/")
+
 type SecretName = private SecretName of string
 
 module SecretName =
@@ -105,30 +119,45 @@ module SandboxRuntime =
             | Some command -> sprintf "%s running '%s'" what command
             | None -> what
 
-    /// The backend a WORK sandbox actually runs under, decided by its scope — and the
-    /// decision this codebase pivoted on: a repo-owned sandbox is WORK, and work runs in
-    /// a container. The session-owned `default` keeps the operator's configured light
-    /// confinement (srt/host) for the checkout and small edits; running a BUILD under
-    /// that confinement was driven end to end and died behind walls no grant can open
-    /// (GAPS: "srt work sandboxes do not run builds").
+    /// The backend every repo-owned work sandbox runs under — the decision this codebase
+    /// pivoted on: a repo-owned sandbox is WORK, and work runs in a container. Running a
+    /// BUILD under the light confinement was driven end to end and died behind walls no
+    /// grant can open (GAPS: "srt work sandboxes do not run builds").
     ///
-    /// A repo-owned declaration with no container is refused HERE, where the rule lives
-    /// and the cheap tier can reach it — not defaulted to an image that builds nothing,
-    /// which would turn a missing declaration into a sandbox that looks fine and fails
-    /// at the first command.
+    /// Named once, HERE, because several places downstream need only this half of the
+    /// decision — which workspace a sandbox gets, which view of the repos directory its
+    /// declaration resolves against, which host limits judge its asks — and each of them
+    /// re-encoding "repo-owned means docker" by hand is how the split shipped with three
+    /// seams still answering for the wrong backend.
+    let repoWorkBackend : SandboxBackend = DockerBackend
+
+    /// The backend a WORK sandbox runs under, decided by its scope alone. The
+    /// session-owned sandboxes keep the operator's configured light confinement
+    /// (srt/host) for the checkout and small edits; a repo's are `repoWorkBackend`.
+    /// Total: everything that follows from the backend (paths, views, limits,
+    /// descriptions) asks this, whether or not the sandbox can actually start.
+    let scopedBackend (configured: SandboxBackend) (scope: SandboxScope) : SandboxBackend =
+        match scope with
+        | SessionOwned -> configured
+        | RepoOwned _ -> repoWorkBackend
+
+    /// `scopedBackend`, plus the refusal only a start needs: a repo-owned declaration
+    /// with no container is refused HERE, where the rule lives and the cheap tier can
+    /// reach it — not defaulted to an image that builds nothing, which would turn a
+    /// missing declaration into a sandbox that looks fine and fails at the first
+    /// command.
     let backendFor
         (configured: SandboxBackend)
         (scope: SandboxScope)
         (runtime: SandboxRuntime)
         : Result<SandboxBackend, string> =
         match scope, runtime with
-        | SessionOwned, _ -> Ok configured
-        | RepoOwned _, Container _ -> Ok DockerBackend
         | RepoOwned repo, Confinement ->
             Error (
                 sprintf
                     "a repo's work sandbox is a container, and %s declares none — add a `container:` block (an image, or a build) to its yession.yaml"
                     (RepoRef.value repo))
+        | scope, _ -> Ok (scopedBackend configured scope)
 
 /// Where a seeded file goes: a path inside the sandbox's OWN home, and nowhere else.
 ///

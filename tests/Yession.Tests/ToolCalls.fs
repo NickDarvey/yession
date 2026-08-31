@@ -137,12 +137,12 @@ let private reposAnswering (add: RepoRef -> Async<Result<RepoListing, string>>) 
       RepoStatus = denied
       RepoLog = denied
       RepoDiff = denied
-      RemoveRepo = fun _ _ _ -> async { return Error "not part of this test" }
-      CheckoutOf = fun repo -> "/repos/" + RepoRef.relativePath repo }
+      RemoveRepo = fun _ _ _ -> async { return Error "not part of this test" } }
 
 let private servicesOver (service: Repos.ReposService) : Commands.CommandServices =
     { Repos = fun () -> Some service
       Sandboxes = fun () -> WorkSandboxes.unavailable
+      WorkCheckout = fun repo -> "/repos/" + RepoRef.relativePath repo
       Terminals = fun () -> SessionTerminals.unavailable
       Prs = fun () -> None
       Invalidate = ignore

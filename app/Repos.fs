@@ -233,16 +233,7 @@ type ReposService =
       /// `force` is required to delete a checkout with uncommitted changes. An UNREADABLE
       /// checkout needs none: clearing one is what this verb was advertised for long before
       /// it existed, and refusing there would leave no way out of an interrupted clone.
-      RemoveRepo : RepoCaller -> RepoRef -> bool -> Async<Result<string, string>>
-      /// Where a repo's checkout is, AS A TERMINAL IN THIS SESSION SEES IT — the same path
-      /// a listing answers with, for a repo that may not be checked out yet.
-      ///
-      /// Total and synchronous, because it is arithmetic over the session's layout rather
-      /// than a question about the filesystem. It is here because the layout is this
-      /// service's, and a caller that computed the path itself would be a second copy of it
-      /// — which is exactly how a relative path a repo declared and a path a repo verb
-      /// answers with come to name different directories.
-      CheckoutOf : RepoRef -> string }
+      RemoveRepo : RepoCaller -> RepoRef -> bool -> Async<Result<string, string>> }
 
 [<ImportAll("node:fs")>]
 let private fs : obj = jsNative
@@ -628,8 +619,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
           RepoStatus = inspect (fun path -> [ "-C"; path; "status"; "--porcelain=v1"; "--branch" ])
           RepoLog = inspect (fun path -> [ "-C"; path; "log"; "--oneline"; "-30" ])
           RepoDiff = inspect (fun path -> [ "-C"; path; "diff" ])
-          RemoveRepo = removeRepo
-          CheckoutOf = visiblePathOf })
+          RemoveRepo = removeRepo })
 
 /// The agent-facing capability set for one turn: events attribute the AGENT (it is
 /// the acting party), the token is the TURN HUMAN's (Plan 08 — no borrowing across
