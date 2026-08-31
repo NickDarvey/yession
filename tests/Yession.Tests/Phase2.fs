@@ -321,12 +321,12 @@ let private sandboxPolicyTests =
             let leaves = [ Socket "/nix/var/nix/daemon-socket/socket" ]
             match Sandboxes.grantsFrom leaves with
             | Error e -> failwithf "expected a grant, got %s" e
-            | Ok (reads, writes, _, sockets, _) ->
-                Expect.equal sockets [ "/nix/var/nix/daemon-socket/socket" ] "it is a socket grant"
+            | Ok granted ->
+                Expect.equal granted.Sockets [ "/nix/var/nix/daemon-socket/socket" ] "it is a socket grant"
                 // And still the file halves, because talking to one does both and the node
                 // has to be reachable before it can be connected to.
-                Expect.isTrue (List.contains "/nix/var/nix/daemon-socket/socket" reads) "readable too"
-                Expect.isTrue (List.contains "/nix/var/nix/daemon-socket/socket" writes) "and writable"
+                Expect.isTrue (List.contains "/nix/var/nix/daemon-socket/socket" granted.Reads) "readable too"
+                Expect.isTrue (List.contains "/nix/var/nix/daemon-socket/socket" granted.Writes) "and writable"
 
         // The end of that wire: what srt is actually told. A grant the config never carries
         // is a grant that does not exist, which is the whole fault this fixes.
@@ -388,6 +388,61 @@ let private sandboxPolicyTests =
                     EnvironmentSpec.defaults
                 |> expect
             Expect.equal (policy.Env |> Map.tryFind "GIT_CONFIG_COUNT") (Some "0") "a baseline, not a mandate"
+
+        // What the container backend actually DOES with a grant. Until this, the policy
+        // carried granted paths and sockets, `limitsFor` claimed docker scopes a socket
+        // by path, and `DockerSandbox` dropped every one — a grant that read as held and
+        // reached nothing.
+        testCase "a docker policy speaks the container's spelling of its grants" <| fun () ->
+            let policy =
+                Sandboxes.policyFor
+                    DockerBackend (Sandboxes.limitsFor DockerBackend "linux") Map.empty Map.empty None None None
+                    [ Mount { From = "/host/cache"; At = "/cache"; Mode = ResourceMountMode.Write }
+                      Socket "/run/thing.sock"
+                      Volume ("warm", "/nix") ]
+                    EnvironmentSpec.defaults
+                |> expect
+            // The start-up checks probe these from INSIDE the container, so the host
+            // spelling (/host/cache) would report a healthy sandbox broken.
+            Expect.isTrue (List.contains "/cache" policy.WritePaths) "a mount is checked where it was mounted"
+            Expect.isFalse (List.contains "/host/cache" policy.WritePaths) "never where the host keeps it"
+            Expect.isTrue (List.contains "/nix" policy.WritePaths) "a volume's target is a write place"
+            Expect.equal policy.Volumes [ "warm", "/nix" ] "and the volume itself is held, name and target"
+            Expect.equal (policy.Binds |> List.map (fun b -> b.At)) [ "/cache" ] "the bind rides verbatim"
+
+        testCase "the container's mounts carry its grants beside what it declared" <| fun () ->
+            let policy =
+                { Support.emptyPolicy with
+                    Binds = [ { From = "/host/cache"; At = "/cache"; Mode = ResourceMountMode.Read } ]
+                    Sockets = [ "/run/thing.sock" ]
+                    Volumes = [ "warm", "/nix" ] }
+            let mounts = Sandboxes.DockerSandbox.mountPlan "/ws" [] policy
+            Expect.equal
+                mounts
+                [ { Source = SessionWorkspace; Target = "/ws"; Mode = ReadWrite }
+                  { Source = HostPath "/host/cache"; Target = "/cache"; Mode = ReadOnly }
+                  { Source = HostPath "/run/thing.sock"; Target = "/run/thing.sock"; Mode = ReadWrite }
+                  { Source = NamedVolume "warm"; Target = "/nix"; Mode = ReadWrite } ]
+                "workspace, then declared, then binds, sockets and volumes"
+
+        testCase "a workspace already provided by any mount gets no volume over it" <| fun () ->
+            // The checkout case: the workdir sits under the /repos bind, and a workspace
+            // volume at the deeper path would shadow it with an empty directory.
+            let declared = [ { Source = HostPath "/host/repos"; Target = "/repos"; Mode = ReadWrite } ]
+            let mounts = Sandboxes.DockerSandbox.mountPlan "/repos/octo/hello" declared Support.emptyPolicy
+            Expect.equal mounts declared "the bind IS the workspace's backing"
+
+        // The other side of the same coin: a backend with no volumes to provide withholds
+        // the grant loudly instead of holding it and never mounting it.
+        testCase "a volume granted to a host-family sandbox is withheld, not dropped" <| fun () ->
+            match
+                Sandboxes.policyFor
+                    SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
+                    [ Volume ("warm", "/nix") ]
+                    EnvironmentSpec.defaults
+            with
+            | Ok _ -> failwith "expected the sandbox to be refused"
+            | Error reason -> Expect.isTrue (reason.Contains "container") (sprintf "names the fix, said: %s" reason)
 
         // The daemon workaround wraps the container's own process: a declared command
         // runs behind it, and nothing declared idles behind it. Symlinked /etc files

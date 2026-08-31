@@ -329,26 +329,31 @@ module ConfigFile =
                 Decode.fail (sprintf "%s must be inside the checkout, and '%s' climbs out of it" what path)
             else Decode.succeed path)
 
-    /// What a file may mount, and it is deliberately not a host path.
+    /// What a file may mount, and it is deliberately only the sandbox's own workspace.
     ///
     /// `HostPath` exists and the SESSION uses it — that is how the repos directory reaches a
     /// container — but a source a repo could name is arbitrary read/write access to the
     /// machine running the session, which is the same authority `YESSION_BIN_*` carries and
-    /// is refused for the same reason. A file gets its own checkout (`workspace`) and named
-    /// volumes, which are the session's to create and nobody else's to reach into.
+    /// is refused for the same reason.
+    ///
+    /// `NamedVolume` exists and the OPERATOR grants it (a `volume:` resource, selected by
+    /// `uses:`). A docker volume is host-global — the same name is the same volume in every
+    /// session's containers, persistent across all of them — so a file that could name one
+    /// could read and seed another session's state. This used to say "a named volume is the
+    /// session's to create", which was the workspace volume's property wrongly generalised:
+    /// nothing scoped an arbitrary name to a session.
     let private mountSource : Decoder<MountSource> =
         Decode.string
         |> Decode.andThen (fun raw ->
             match raw.Trim () with
             | "workspace" -> Decode.succeed SessionWorkspace
-            | source when source.StartsWith "/" || source.StartsWith "." || source.Contains "/" ->
+            | "" -> Decode.fail "a volume needs a source"
+            | source ->
                 Decode.fail (
                     sprintf
-                        "'%s' is a host path, and a %s may not name one — say 'workspace', or a named volume"
+                        "'%s' is not a source a %s may name — say 'workspace'; a shared named volume is the operator's to offer as a `volume:` resource, selected with `uses:`"
                         source
-                        FileName)
-            | "" -> Decode.fail "a volume needs a source"
-            | name -> Decode.succeed (NamedVolume name))
+                        FileName))
 
     let private mount : Decoder<ContainerMount> =
         Decode.object (fun get ->

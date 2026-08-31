@@ -77,8 +77,11 @@ let private canonicalPaths (file: ProfileFile) : Result<ProfileFile, string> =
         | Mount mount -> check "the mount" mount.From
         | Socket path -> check "the socket" path
         | Exec path -> check "the executable" path
+        // A volume's name is docker's, not a filesystem path; its `at` is a container
+        // path, which no host symlink can reach through.
         | Endpoint _
-        | Variable _ -> None)
+        | Variable _
+        | Volume _ -> None)
     |> function
         | Some reason -> Error reason
         | None -> Ok file

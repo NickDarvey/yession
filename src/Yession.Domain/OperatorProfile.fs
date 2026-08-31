@@ -48,8 +48,9 @@ module OperatorProfile =
     let Version = 1
 
     let private fileKeys = [ "version"; "resources"; "default" ]
-    let private leafKeys = [ "mount"; "socket"; "endpoint"; "env"; "exec"; "sensitive" ]
+    let private leafKeys = [ "mount"; "socket"; "endpoint"; "env"; "exec"; "volume"; "sensitive" ]
     let private mountKeys = [ "from"; "at"; "mode" ]
+    let private volumeKeys = [ "name"; "at" ]
 
     let private failIf (condition: bool) (message: string) (decoder: Decoder<'a>) : Decoder<'a> =
         if condition then Decode.fail message else decoder
@@ -96,6 +97,14 @@ module OperatorProfile =
                   At = get.Optional.Field "at" Decode.string |> Option.defaultValue from
                   Mode = get.Optional.Field "mode" mountMode |> Option.defaultValue ResourceMountMode.Read }))
 
+    /// Both halves required: a volume with no `at` is a thing with nowhere to be, and the
+    /// operator is the one author who knows where it belongs.
+    let private volume : Decoder<ResourceLeaf> =
+        noUnknownKeys volumeKeys
+        |> Decode.andThen (fun () ->
+            Decode.object (fun get ->
+                Volume (get.Required.Field "name" Decode.string, get.Required.Field "at" Decode.string)))
+
     /// A leaf declares primitives directly, and may declare several: the things that make one
     /// resource work are usually more than one — a cache is a mount and an endpoint and the
     /// variable pointing a tool at it — and none of the three means anything alone.
@@ -107,6 +116,9 @@ module OperatorProfile =
                 let sockets = get.Optional.Field "socket" stringList |> Option.defaultValue []
                 let endpoints = get.Optional.Field "endpoint" stringList |> Option.defaultValue []
                 let execs = get.Optional.Field "exec" stringList |> Option.defaultValue []
+                let volumes =
+                    get.Optional.Field "volume" (Decode.oneOf [ Decode.list volume; volume |> Decode.map List.singleton ])
+                    |> Option.defaultValue []
                 // One `Variable` leaf per entry, which is what makes a variable dedup and
                 // conflict like every other primitive instead of needing a rule of its own.
                 let variables =
@@ -122,13 +134,14 @@ module OperatorProfile =
                     @ (endpoints |> List.map Endpoint)
                     @ (variables |> List.map Variable)
                     @ (execs |> List.map Exec)
+                    @ volumes
                 leaves, sensitivity))
         |> Decode.andThen (fun (leaves, sensitivity) ->
             // A resource that grants nothing is a name that reads as configuration and is
             // none — the same failure an unknown key would be, arriving by a different route.
             failIf
                 (List.isEmpty leaves)
-                "this resource grants nothing — name at least one of mount, socket, endpoint, env or exec"
+                "this resource grants nothing — name at least one of mount, socket, endpoint, env, exec or volume"
                 (Decode.succeed (ResourceDecl.Leaf (leaves, sensitivity))))
 
     /// An ARRAY is a composition. Sensitivity is deliberately not a key here: a composite is
