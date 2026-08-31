@@ -34,6 +34,14 @@ let private newLog () : EventLog<SessionEvent> = InMemoryEventLog.create session
 
 let private sandbox (raw: string) = SandboxRef.parse raw |> expect
 
+/// What an act note said beyond its headline. A reader rather than a match at every call
+/// site: the split is the thing under test in several cases here, and a case that has to
+/// destructure a union to ask its question reads as being about the union.
+let private noteDetail (item: ConversationItem) : string option =
+    match item.Kind with
+    | ConversationItemKind.ActNote facts -> facts.Detail
+    | ConversationItemKind.Message -> None
+
 /// The ask most of these cases make: nothing in particular about the sandbox, some
 /// credentials forwarded into it. The spec half has its own cases below.
 let private forwarding (names: string list) : SandboxRequest =
@@ -507,8 +515,10 @@ let private timelineTests =
             let proj, _ = ConversationProjection.applyEvents None [ envelope ] ConversationProjection.empty
             match proj.Items with
             | [ item ] ->
-                Expect.equal item.Body "started sandbox test (srt), forwarding github from user:ada" "it reads as a sentence"
-                Expect.equal item.Kind ConversationItemKind.ActNote "and it is an act, not a message"
+                Expect.equal item.Body "started sandbox test (srt)" "it reads as a sentence"
+                Expect.equal (noteDetail item) (Some "forwarding github from user:ada") "whose credential went in is on the note"
+                Expect.isTrue (match item.Kind with ConversationItemKind.ActNote _ -> true | _ -> false)
+                    "and it is an act, not a message"
                 Expect.equal item.Author ActorRef.Agent "attributed to whoever acted"
             | other -> failwithf "expected one note, got %A" other
 
@@ -538,7 +548,7 @@ let private timelineTests =
         // the timeline is where somebody finds out what was done on their behalf, and "the
         // confinement you were shown is not the confinement you got" is the most consequential
         // thing on it.
-        testCase "a start that could not be given exactly says so on the same line" <| fun () ->
+        testCase "a start that could not be given exactly says so on the note announcing it" <| fun () ->
             let envelope : EventEnvelope<SessionEvent> =
                 { EventId = EventId.fresh ()
                   SessionId = sessionId
@@ -557,9 +567,10 @@ let private timelineTests =
             let proj, _ = ConversationProjection.applyEvents None [ envelope ] ConversationProjection.empty
             match proj.Items with
             | [ item ] ->
-                Expect.isTrue (item.Body.Contains "started sandbox test (srt)") "still says what started"
-                Expect.isTrue (item.Body.Contains "/run/docker.sock") (sprintf "the grant is named, said: %s" item.Body)
-                Expect.isTrue (item.Body.Contains "any unix socket") (sprintf "and what it became, said: %s" item.Body)
+                let said = noteDetail item |> Option.defaultValue ""
+                Expect.equal item.Body "started sandbox test (srt)" "still says what started"
+                Expect.isTrue (said.Contains "/run/docker.sock") (sprintf "the grant is named, said: %s" said)
+                Expect.isTrue (said.Contains "any unix socket") (sprintf "and what it became, said: %s" said)
             | other -> failwithf "expected one note, got %A" other
 
         // The start above and this are the two outcomes of one declaration. Until this note
@@ -583,11 +594,13 @@ let private timelineTests =
             let proj, _ = ConversationProjection.applyEvents None [ envelope ] ConversationProjection.empty
             match proj.Items with
             | [ item ] ->
+                Expect.equal item.Body "could not start sandbox test" "what failed"
                 Expect.equal
-                    item.Body
-                    "could not start sandbox test — YESSION_SESSION_WORK_NET is empty"
-                    "the refusal, whole, in the words it already used"
-                Expect.equal item.Kind ConversationItemKind.ActNote "an act, like the start it is the counterpart of"
+                    (noteDetail item)
+                    (Some "YESSION_SESSION_WORK_NET is empty")
+                    "and why, whole, in the words it already used"
+                Expect.isTrue (match item.Kind with ConversationItemKind.ActNote _ -> true | _ -> false)
+                    "an act, like the start it is the counterpart of"
                 Expect.equal item.Author (ActorRef.Configured hello) "attributed to the file that asked"
             | other -> failwithf "expected one note, got %A" other
 

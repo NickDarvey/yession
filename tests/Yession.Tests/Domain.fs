@@ -91,6 +91,14 @@ let private envelopeSerializationTests =
             Expect.equal roundTripped original "round-trip should be identical"
     ]
 
+/// What an act note said beyond its headline. A reader rather than a match at every call
+/// site: the split is the thing under test in several cases here, and a case that has to
+/// destructure a union to ask its question reads as being about the union.
+let private noteDetail (item: ConversationItem) : string option =
+    match item.Kind with
+    | ConversationItemKind.ActNote facts -> facts.Detail
+    | ConversationItemKind.Message -> None
+
 let private conversationProjectionTests =
     let sessionId = SessionId.create "session-proj" |> expect
 
@@ -516,11 +524,107 @@ let private repoTests =
                       Timestamp = DateTimeOffset(2026, 8, 8, 10, 0, 0, TimeSpan.Zero)
                       Event = event })
             let proj, _ = ConversationProjection.applyEvents None envelopes ConversationProjection.empty
-            Expect.equal (proj.Items |> List.map (fun i -> i.Kind)) [ ConversationItemKind.ActNote; ConversationItemKind.ActNote; ConversationItemKind.ActNote ] "all notes"
+            Expect.isTrue
+                (proj.Items |> List.forall (fun i -> match i.Kind with ConversationItemKind.ActNote _ -> true | _ -> false))
+                "all notes"
             Expect.equal (proj.Items |> List.map (fun i -> i.Body))
-                [ "added repo octo/hello (branch main)"; "switched octo/hello to branch fix/y"; "removed repo octo/hello" ]
+                [ "added repo octo/hello"; "switched octo/hello to branch fix/y"; "removed repo octo/hello" ]
                 "the notes read as sentences"
+            Expect.equal (proj.Items |> List.map noteDetail)
+                [ Some "on branch main"; None; None ]
+                "and the particulars a headline left out are still on the note"
             Expect.equal (proj.Items |> List.map (fun i -> i.Author)) [ PeerRef ada; ActorRef.Agent; PeerRef ada ] "attributed to the acting party"
+
+        // The split is for a screen. Every other reader — the agent's prompt above all — has
+        // to be handed both halves, because the half a headline holds back is which
+        // credential went into the sandbox and why a declaration was refused. A transcript
+        // built from headlines would tell the agent a sandbox started and not whose key it
+        // is holding.
+        testCase "what an act says is its headline and its particulars together" <| fun () ->
+            let note : ConversationItem =
+                { MessageId = MessageId.create "n1" |> expect
+                  Author = ActorRef.Agent
+                  Body = "started sandbox work (srt)"
+                  Status = Complete
+                  Kind = ConversationItemKind.ActNote { Detail = Some "forwarding github from user:ada" }
+                  Offset = EventOffset.create 1L |> expect
+                  Woke = None }
+            Expect.equal
+                (ConversationItem.said note)
+                "started sandbox work (srt) — forwarding github from user:ada"
+                "both halves, in one sentence"
+
+        // And nothing invented where there is no second half: a seam printed over an item
+        // that has one clause is punctuation standing for content that does not exist.
+        testCase "an item holding nothing back says exactly its body" <| fun () ->
+            let item kind : ConversationItem =
+                { MessageId = MessageId.create "n1" |> expect
+                  Author = ActorRef.Agent
+                  Body = "removed repo octo/hello"
+                  Status = Complete
+                  Kind = kind
+                  Offset = EventOffset.create 1L |> expect
+                  Woke = None }
+            Expect.equal
+                (ConversationItem.said (item (ConversationItemKind.ActNote { Detail = None })))
+                "removed repo octo/hello"
+                "an act with one clause"
+            Expect.equal
+                (ConversationItem.said (item ConversationItemKind.Message))
+                "removed repo octo/hello"
+                "and a message, which never has a second half at all"
+
+        // What a checkout asks for is the one act on this timeline a person has to DECIDE
+        // about, and the decision needs the whole set rather than a count of it. So the
+        // headline may count, and the detail may not summarise — it carries every grant, in
+        // the words the operator's own surface uses.
+        testCase "a set of capabilities is counted in the headline and named whole underneath" <| fun () ->
+            let asked (granted: string list) =
+                let envelope : EventEnvelope<SessionEvent> =
+                    { EventId = EventId.fresh ()
+                      SessionId = SessionId.create "caps-session" |> expect
+                      Offset = EventOffset.create 1L |> expect
+                      Actor = ActorRef.SessionProcess
+                      Timestamp = DateTimeOffset (2026, 8, 8, 10, 0, 0, TimeSpan.Zero)
+                      Event =
+                        SessionEvent.RepoCapabilitiesChanged
+                            { RepoCapabilitiesChanged.MessageId = MessageId.create "c1" |> expect
+                              RepoCapabilitiesChanged.Repo = RepoRef.create "octo/hello" |> expect
+                              RepoCapabilitiesChanged.Granted = granted
+                              RepoCapabilitiesChanged.Sensitive = false
+                              RepoCapabilitiesChanged.Actor = ActorRef.SessionProcess } }
+                let proj, _ = ConversationProjection.applyEvents None [ envelope ] ConversationProjection.empty
+                match proj.Items with
+                | [ item ] -> item.Body, noteDetail item
+                | other -> failwithf "expected one note, got %A" other
+            Expect.equal
+                (asked [ "/nix, read-only"; "reaches cache.nixos.org"; "reaches anywhere (sensitive)" ])
+                ("asks for 3 capabilities", Some "/nix, read-only; reaches cache.nixos.org; reaches anywhere (sensitive)")
+                "counted, then named — every one of them"
+
+        // The counterpart, and the reason the count is not unconditional: "asks for 1
+        // capability" over a line naming it is a headline that says less than the thing
+        // under it.
+        testCase "one capability is the headline, with nothing left to say underneath" <| fun () ->
+            let envelope : EventEnvelope<SessionEvent> =
+                { EventId = EventId.fresh ()
+                  SessionId = SessionId.create "caps-session" |> expect
+                  Offset = EventOffset.create 1L |> expect
+                  Actor = ActorRef.SessionProcess
+                  Timestamp = DateTimeOffset (2026, 8, 8, 10, 0, 0, TimeSpan.Zero)
+                  Event =
+                    SessionEvent.RepoCapabilitiesChanged
+                        { RepoCapabilitiesChanged.MessageId = MessageId.create "c1" |> expect
+                          RepoCapabilitiesChanged.Repo = RepoRef.create "octo/hello" |> expect
+                          RepoCapabilitiesChanged.Granted = [ "/nix, read-only" ]
+                          RepoCapabilitiesChanged.Sensitive = false
+                          RepoCapabilitiesChanged.Actor = ActorRef.SessionProcess } }
+            let proj, _ = ConversationProjection.applyEvents None [ envelope ] ConversationProjection.empty
+            match proj.Items with
+            | [ item ] ->
+                Expect.equal item.Body "asks for /nix, read-only" "the grant itself"
+                Expect.equal (noteDetail item) None "and no second line restating it"
+            | other -> failwithf "expected one note, got %A" other
     ]
 
 let private prWatchTests =
@@ -769,17 +873,20 @@ let private prWatchTests =
             let proj, _ = ConversationProjection.applyEvents None envelopes ConversationProjection.empty
             Expect.equal
                 (proj.Items |> List.map (fun i -> i.Body))
-                [ "PR octo/hello#12 watched (open, checks pending)"
+                [ "PR octo/hello#12 watched"
                   "PR octo/hello#12 merged"
                   "PR octo/hello#12 unwatched" ]
                 "the notes read as sentences"
             Expect.equal
+                (proj.Items |> List.map noteDetail)
+                [ Some "open, checks pending"; None; None ]
+                "and what the watch found is on the note, under the headline"
+            Expect.equal
                 (proj.Items |> List.map (fun i -> i.Author))
                 [ PeerRef ada; PeerRef ada; PeerRef ada ]
                 "a transition wears the watcher's name, not System's"
-            Expect.equal
-                (proj.Items |> List.map (fun i -> i.Kind))
-                [ ConversationItemKind.ActNote; ConversationItemKind.ActNote; ConversationItemKind.ActNote ]
+            Expect.isTrue
+                (proj.Items |> List.forall (fun i -> match i.Kind with ConversationItemKind.ActNote _ -> true | _ -> false))
                 "all notes"
 
         testCase "a PrTransitioned on the wire is the shape it will always be" <| fun () ->

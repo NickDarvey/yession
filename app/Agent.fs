@@ -219,7 +219,10 @@ let private promptOf (context: AgentContextPack) : string =
     let transcript =
         context.Conversation
         |> List.filter (fun item -> item.Status = Complete)
-        |> List.map (fun item -> sprintf "%s: %s" (label item.Author) item.Body)
+        // `said`, never `Body`: an act note's body is its headline, and a transcript built
+        // from headlines would tell the agent a sandbox started without telling it whose
+        // credential went in — the particulars are exactly what a next turn has to act on.
+        |> List.map (fun item -> sprintf "%s: %s" (label item.Author) (ConversationItem.said item))
         |> String.concat "\n"
     // The terminal digest is rendered as its own section, never folded into the
     // conversation: the model must be able to tell what someone SAID from what a machine
@@ -264,7 +267,7 @@ let private promptOf (context: AgentContextPack) : string =
             transcript
             terminals
             (label message.Author)
-            message.Body
+            (ConversationItem.said message)
     // A turn nobody asked for (Plan 20, stage 2): work this agent started finished while it
     // was not running. There is no message to reply to, and inventing one — "the system says
     // your build finished" — would put words in somebody's mouth on a shared transcript. It

@@ -1420,10 +1420,19 @@ module View =
         // no avatar and no rich body (Plan 14, repos). It rides the same timeline slot a
         // message does (both are `ConversationItem`s at an offset); `Kind` is what tells the
         // two apart at render time.
-        let actNoteItem (item: ConversationItem) =
+        // The particulars, under the headline and never instead of it. A second LINE rather
+        // than a disclosure: what an act asked for is exactly what a person has to decide
+        // about, and a decision behind a click is a decision most readers never see. The fold
+        // is what says which acts have one — see `ActNoteFacts`.
+        let actNoteDetail (facts: ActNoteFacts) =
+            match facts.Detail with
+            | None -> Lit.nothing
+            | Some detail -> html $"""<span class="{Style.actNoteDetail}" data-act-detail>{detail}</span>"""
+        let actNoteItem (facts: ActNoteFacts) (item: ConversationItem) =
             html $"""
                 <article class="{Style.actNote}" data-message-id="{MessageId.value item.MessageId}" data-act-note data-message-author="{authorLabel item.Author}">
-                  <span class="{Style.actNoteText}">{authorName model item.Author} {item.Body}</span>
+                  <span class="{Style.actNoteText}"><span class="{Style.actNoteWho}">{authorName model item.Author}</span> {item.Body}</span>
+                  {actNoteDetail facts}
                 </article>"""
         let messageItem (item: ConversationItem) =
             let isAgent = (item.Author = ActorRef.Agent)
@@ -1581,7 +1590,7 @@ module View =
             |> List.choose (function
                 | RowItem (TimelineMessage item) ->
                     match item.Kind with
-                    | ConversationItemKind.ActNote -> Some (None, actNoteItem item)
+                    | ConversationItemKind.ActNote facts -> Some (None, actNoteItem facts item)
                     | ConversationItemKind.Message -> Some (Some item.Author, messageItem item)
                 | RowItem (TimelineBlock (_, terminalId, blockId)) ->
                     // Both folds read the same page, so a chip without its block is a page
