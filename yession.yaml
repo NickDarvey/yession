@@ -1,83 +1,48 @@
 # yession.yaml — what a session working on Yession selects.
 #
-# The TOOLCHAIN is devenv.nix's business (Node 24, .NET 10, bubblewrap, uv, Chromium). This
-# file says only which of the HOST's resources the sandbox around it holds, which is the whole
-# division of labour: a repo already declares how to build itself, and repeating that here
-# would be the second live copy AGENTS.md forbids.
+# A repo's work sandbox is a CONTAINER (a repo-owned declaration without a `container:`
+# block is refused): work runs in a full Linux userland, the same environment a person
+# gets locally from this repo's flake. The TOOLCHAIN is devenv.nix's business (Node 24,
+# .NET 10, Chromium, uv); the container brings only nix, and `nix develop` assembles the
+# devshell from the checkout — one source of truth, no second copy of the toolchain here.
 #
-# Nothing below names a path or a hostname, and it cannot. Those belong to whoever runs the
-# machine — this file works the same on a laptop, in CI, and on a host that keeps its caches
-# somewhere else entirely — so it names what an operator declared and the operator owns what
-# those names come to. `resources` on the settings surface says what they are here.
+# The session bind-mounts its shared checkouts at /repos, so `workdir: .` is this repo's
+# own checkout inside the container. Substitution comes from cache.nixos.org and the
+# public yession cachix cache, named in NIX_CONFIG below: names, not paths, which is what
+# keeps this file working on any machine. (First run on a fresh container is cold; the
+# store warms via substitution, and an operator may offer a persistent store volume.)
 #
-# A name this host does not declare is refused, and the refusal lists what there is instead.
-# That refusal IS the old ceiling: a repo cannot exceed what an operator offered because it
-# can only name what an operator offered.
-#
-# No `container:` block, and that is not an omission — this repo's work sandbox is srt
-# (YESSION_SESSION_WORK_BACKEND defaults to it), which runs no container. The keys that would
-# go in one have nowhere to be written, which is what the schema is for.
+# The session's own `default` sandbox is srt (light confinement for the checkout and
+# small edits) and declares nothing here — no file may configure it.
 version: 2
 
 sandboxes:
   dev:
     workdir: .
-
-    # nix     — the store and the daemon socket. The daemon is what makes adding a dependency
-    #           work at all: it substitutes and builds, so this sandbox needs no egress of its
-    #           own to get one. `pin` is separate because MOVING a pin is a client fetch.
-    # dotnet  — the NuGet cache `restore` writes.
-    # node    — the npm cache the off-Nix fallback writes.
-    # ca      — a trust store. Without one every HTTPS fetch fails AFTER egress said yes,
-    #           which is the least legible failure this sandbox can have.
-    uses: [ nix, pin, dotnet, node, ca ]
-
+    container:
+      image: nixos/nix
     forward: [ github ]              # so `git push` works from a terminal
 
-    # This flake needs `nix develop`, which is a nix-command feature, and nix reads
-    # that setting from /etc/nix/nix.conf — a symlink, so a sandbox denying `/` cannot
-    # read it by the spelling nix uses. Stating it here is not a workaround for that:
-    # which experimental features THIS repository's build needs is a fact about this
-    # repository, not about anybody's machine, and a host that had a readable nix.conf
-    # would still be answering a question we should be asking.
-    #
-    # It names no path and no hostname, which is the whole test for what may appear in
-    # this file. `NUGET_PACKAGES` and the rest live in the operator's profile because
-    # they do name paths.
+    # Which nix features this repo's build needs, plus where its artifacts substitute
+    # from. In the container this is the whole nix configuration the devshell sees —
+    # there is no /etc/nix/nix.conf story to inherit, which is the point.
     env:
-      NIX_CONFIG: "experimental-features = nix-command flakes"
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        extra-substituters = https://yession.cachix.org
+        extra-trusted-public-keys = yession.cachix.org-1:Dj6jHWpEaqcGyrEEC3/qy/D3UQN8sZW1RXUOCRJ41oI=
 
-    # NuGet's first run takes a named mutex, and on macOS .NET puts named-mutex shared
-    # memory under /tmp — a hardcoded path, so TMPDIR does not reach it, and one no
-    # sandbox can be given without granting write to /tmp itself. It only takes the
-    # mutex when this marker is absent, so the marker is the whole fix: no build here
-    # starts without it.
-    #
-    # Not a grant, which is why it is in this file rather than an operator's profile.
-    # It is a file in the private home this session makes for this sandbox, which that
-    # sandbox already owns entirely and which reaches nothing of the host's.
-    #
-    # Nothing is skipped by writing it. `Migration1` deletes NuGet's legacy v3-cache
-    # and plugins-cache and fixes permissions on directories that already exist; a home
-    # nothing has ever used has none of that to do.
-    files:
-      ".local/share/NuGet/Migrations/1": ""
-
-
-  # `verify` is minutes long. A second sandbox on the same configuration means the gate runs
-  # beside interactive work instead of holding the shell — which is the example Plan 15 stage 2
-  # gave for why named sandboxes exist at all.
-  #
-  # It does NOT select `pin`. A release gate that can silently move a dependency pin is not a
-  # gate: it builds what is pinned, and moving the pin is somebody's deliberate act elsewhere.
+  # `verify` is minutes long. A second sandbox on the same configuration means the gate
+  # runs beside interactive work instead of holding the shell.
   gate:
     workdir: .
-    uses: [ nix, dotnet, node, ca ]
+    container:
+      image: nixos/nix
     forward: [ github ]
 
     # The same reasons as `dev`; `like:` does not exist yet, so both are written twice.
     env:
-      NIX_CONFIG: "experimental-features = nix-command flakes"
-
-    files:
-      ".local/share/NuGet/Migrations/1": ""
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        extra-substituters = https://yession.cachix.org
+        extra-trusted-public-keys = yession.cachix.org-1:Dj6jHWpEaqcGyrEEC3/qy/D3UQN8sZW1RXUOCRJ41oI=
