@@ -473,6 +473,10 @@ let private shellModel : ClientModel =
     { ClientModel.init { PeerId = peerId; DisplayName = "swift-heron" } with
         Connection = Connected
         Session = Some (SessionId.create "harness" |> expect)
+        // One marked message, so the landmark rail has a stroke to draw. Where a stroke
+        // LANDS is arithmetic a model test settles; whether it lands beside the reading
+        // column or on top of it is geometry, and only a rendered page knows that.
+        Synced = { SyncedSessionState.empty with Landmarks = Map.ofList [ messageId, true ] }
         Conversation =
             { Items =
                 [ { MessageId = messageId
@@ -681,6 +685,7 @@ do
             FocusChat = PaneShell.toChatItem
             FocusWatch = PaneShell.toWatchToggle
             RevealBlock = fun id blockId -> PaneShell.revealBlock (TerminalId.value id) (BlockId.value blockId)
+            RevealMessage = fun id -> PaneShell.revealMessage (MessageId.value id)
             TakeTerminal = fun id -> takeRef id
             TypeIntoTerminal = recordTyped }
     // The app's own player sync, so a block tab in the harness really plays its recording —

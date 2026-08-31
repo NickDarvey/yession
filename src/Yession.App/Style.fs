@@ -854,6 +854,12 @@ module Style =
     /// scroller's padding box — so a top padding here is a strip the pinned author line can
     /// never reach, and scrolled text rides up through it above the name. Carried in flow
     /// instead, the gap scrolls away with everything else and the line pins flush.
+    /// What the rail is positioned against: the chat's box, standing exactly where the
+    /// timeline used to stand in `mainColumn` (a column flex child that fills it). The
+    /// timeline keeps every class it had, so this changes no layout of its own — it exists
+    /// only to give an absolute child a box that does not scroll.
+    let timelineFrame = "relative flex-1 flex flex-col min-h-0"
+
     let timeline =
         "flex-1 overflow-y-auto px-8 pb-6 flex flex-col gap-6 [&>*:first-child]:mt-6 "
         + "max-md:px-4 max-md:pb-4 max-md:gap-5 max-md:[&>*:first-child]:mt-4 break-words"
@@ -887,7 +893,7 @@ module Style =
         "sticky top-0 z-10 bg-bg flex items-center gap-3 pb-1 -mb-1"
 
     /// One item inside a group: its (rare) meta line over its body.
-    let messageItem = "flex flex-col gap-1"
+    let messageItem = "relative group/item flex flex-col gap-1"
     /// The meta line carries only what is NEWS — streaming, failed, woke unasked. The author
     /// is the group's to say, so a settled message has no meta line at all.
     let messageMeta = "flex items-baseline gap-2.5 pl-8"
@@ -974,9 +980,89 @@ module Style =
     /// them so the glyphs sit on the text's line rather than floating above it.
     let chatTaskCounts = "flex items-baseline gap-2 shrink-0"
 
+    // --- The landmark rail ---------------------------------------------------------------
+
+    /// The rail: strokes down the left of the chat, one per marked moment.
+    ///
+    /// ABSOLUTE over the scroller's own left padding rather than a column beside it, and that
+    /// is load bearing twice. The timeline already reserves 32px there (`timeline`'s `px-8`)
+    /// and nothing is drawn in it, so the rail costs the conversation no width and moves no
+    /// geometry anything else has pinned. And it is what lets a stroke one day carry a
+    /// SUMMARY: text beside a mark has to reach over the reading column, which an absolute
+    /// layer can do on hover and a flex sibling could only do by reflowing the page.
+    ///
+    /// Outside the scroller, so it stays put while the conversation moves under it — a rail
+    /// that scrolled away would be a list, and the list is already on the screen.
+    ///
+    /// `pointer-events-none` here and `auto` on the strokes: the gutter stays as dead as it
+    /// was except exactly where a mark is, so this cannot become an invisible sheet swallowing
+    /// clicks meant for the text.
+    let landmarkRail =
+        "absolute left-0 top-6 bottom-6 w-8 max-md:w-4 max-md:top-4 max-md:bottom-4 pointer-events-none z-10"
+
+    /// Where one stroke sits, as the inline style the rail's arithmetic becomes. A utility
+    /// class cannot hold a computed number, which is the same reason a peer's cursor carries
+    /// its colour this way. From the BOTTOM, because the newest mark is the one whose place
+    /// must not move as older ones accumulate above it.
+    let landmarkAt (place: float) : string = sprintf "bottom:%.3f%%" (place * 100.0)
+
+    /// One stroke. The BUTTON is the hit area and is deliberately taller than the mark inside
+    /// it: on a log scale the oldest marks sit within a pixel or two of each other, and a
+    /// target the size of its own hairline is a target for nobody.
+    /// A finger is not a hairline, so the target grows where there is no pointer to aim
+    /// one. On a log scale the oldest marks then overlap, and the topmost of them wins —
+    /// which is the right way round: what is hard to reach up there is what nobody is
+    /// reaching for.
+    ///
+    /// `translate-y-1/2` and not a hand-tuned negative margin: `bottom` places the box's
+    /// EDGE, and the mark has to sit on the place the arithmetic named. A margin that
+    /// corrected for one height would silently miscentre at the other.
+    let landmarkStroke =
+        cls [ "absolute left-0 w-full h-3.5 max-md:h-6 translate-y-1/2"
+              "flex items-center pointer-events-auto"
+              "cursor-pointer bg-transparent group/mark"
+              focusRing ]
+
+    /// The mark itself: a hairline, dim until the pointer is on it. Length rather than colour
+    /// is what a rail this narrow has to work with, so a stroke reaching for the reading edge
+    /// is how one says "here".
+    let landmarkMark =
+        cls [ "block h-px w-3 max-md:w-2 bg-ink-faint"
+              "transition-all duration-150 ease-out"
+              "group-hover/mark:w-5 group-hover/mark:bg-ink group-hover/mark:h-0.5"
+              "group-focus-visible/mark:w-5 group-focus-visible/mark:bg-ink" ]
+
+    /// The control that puts a mark on one item, or takes it off. It sits in the item's own
+    /// left inset — the 32px every body is already indented by — so it is beside what it marks
+    /// and never inside the text.
+    ///
+    /// Present but INVISIBLE until the pointer or the keyboard reaches the item: a control on
+    /// every line of a conversation would be the loudest thing in it, and one that vanished
+    /// from the tab order would be a control keyboard readers do not have. `opacity`, never
+    /// `hidden`, is what keeps both true at once.
+    ///
+    /// A device with no pointer never hovers, so on one the control has to be on the screen or
+    /// it does not exist: invisible-and-unmarkable is worse than quiet-and-present. Half
+    /// strength there — enough to find, not enough to become the loudest thing in a
+    /// conversation.
+    let itemMark =
+        cls [ "absolute left-0 top-0.5 w-5 h-5 max-md:w-6 max-md:h-6"
+              "flex items-center justify-start bg-transparent cursor-pointer"
+              "opacity-0 group-hover/item:opacity-100 focus-visible:opacity-100"
+              "[@media(hover:none)]:opacity-50"
+              "transition-opacity duration-150 ease-out"
+              focusRing ]
+    /// Once a mark is on, it stays on the screen — an item whose mark only appeared on hover
+    /// would be an item nobody could tell was marked.
+    let itemMarked = "opacity-100"
+    /// The glyph: the rail's own hairline, so the control and the stroke it produces are
+    /// visibly the same mark rather than two vocabularies for one idea.
+    let itemMarkGlyph = "block h-px w-3 bg-ink-faint"
+    let itemMarkGlyphOn = "block h-0.5 w-4 bg-ink"
+
     /// A repo note in the timeline (Plan 14): one quiet act-line, indented past the
     /// avatar gutter so the reading edge lines up with message bodies.
-    let actNote = "max-w-[46rem] pl-[32px] flex flex-col gap-0.5"
+    let actNote = "relative group/item max-w-[46rem] pl-[32px] flex flex-col gap-0.5"
     /// Sentence case, deliberately. This wore the caps LABEL voice, and a label voice is for
     /// two or three words: `STARTED SANDBOX WORK (DOCKER), FORWARDING ANTHROPIC_API_KEY FROM
     /// ADA` is a line nobody reads, because uppercase flattens the word shapes a reader scans

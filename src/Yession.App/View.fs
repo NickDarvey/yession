@@ -141,7 +141,11 @@ type ViewActions =
       /// Scroll a terminal's history to one of its commands and mark it (Plan 25, stage 3) —
       /// the browser's half of "show in terminal". Imperative for the same reason `FocusPane`
       /// is: the model moves the reader's position, and only the document can scroll.
-      RevealBlock : TerminalId -> BlockId -> unit }
+      RevealBlock : TerminalId -> BlockId -> unit
+      /// Scroll the conversation to one message and mark it — the rail's half of "take me
+      /// back there". Imperative for the reason `RevealBlock` is: the model says which
+      /// moments are marked, and only the document can scroll to one.
+      RevealMessage : MessageId -> unit }
 
 module ViewActions =
     /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
@@ -176,7 +180,8 @@ module ViewActions =
           FocusPane = ignore
           FocusChat = ignore
           FocusWatch = ignore
-          RevealBlock = fun _ _ -> () }
+          RevealBlock = fun _ _ -> ()
+          RevealMessage = fun _ -> () }
 
 module View =
 
@@ -1416,10 +1421,25 @@ module View =
     /// copied into the timeline, which is what makes a running chip mutate in place as its
     /// block finishes — the timeline holds where it goes, the projection holds what it says.
     let private chat (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
-        // A repo note is something someone DID, not said — one quiet line, actor-attributed,
-        // no avatar and no rich body (Plan 14, repos). It rides the same timeline slot a
-        // message does (both are `ConversationItem`s at an offset); `Kind` is what tells the
-        // two apart at render time.
+        // Put a mark on this item, or take it off. It goes on every item that HAS an id — a
+        // message and an act alike — because "mark any of it" is the promise, and a rail whose
+        // contents were chosen for the reader would be a table of contents rather than a
+        // bookmark.
+        //
+        // The dispatch carries the id alone: which way the mark goes is `Landmarks.toggle`'s
+        // to work out from the item, so this control never holds a second copy of what an act
+        // defaults to (see `Landmarks`).
+        let itemMark (item: ConversationItem) =
+            let marked = Landmarks.marked model.Synced.Landmarks item
+            let dress = if marked then Style.cls [ Style.itemMark; Style.itemMarked ] else Style.itemMark
+            html $"""
+                <button type="button" class="{dress}"
+                        data-item-mark="{MessageId.value item.MessageId}"
+                        data-item-marked="{if marked then "yes" else "no"}"
+                        aria-pressed="{if marked then "true" else "false"}" aria-label="{Dom.Text.markItem}"
+                        @click={Ev(fun _ -> dispatch (ToggleLandmarkMsg item.MessageId))}>
+                  <span class="{if marked then Style.itemMarkGlyphOn else Style.itemMarkGlyph}"></span>
+                </button>"""
         // The particulars, under the headline and never instead of it. A second LINE rather
         // than a disclosure: what an act asked for is exactly what a person has to decide
         // about, and a decision behind a click is a decision most readers never see. The fold
@@ -1428,9 +1448,14 @@ module View =
             match facts.Detail with
             | None -> Lit.nothing
             | Some detail -> html $"""<span class="{Style.actNoteDetail}" data-act-detail>{detail}</span>"""
+        // A repo note is something someone DID, not said — one quiet line, actor-attributed,
+        // no avatar and no rich body (Plan 14, repos). It rides the same timeline slot a
+        // message does (both are `ConversationItem`s at an offset); `Kind` is what tells the
+        // two apart at render time.
         let actNoteItem (facts: ActNoteFacts) (item: ConversationItem) =
             html $"""
                 <article class="{Style.actNote}" data-message-id="{MessageId.value item.MessageId}" data-act-note data-message-author="{authorLabel item.Author}">
+                  {itemMark item}
                   <span class="{Style.actNoteText}"><span class="{Style.actNoteWho}">{authorName model item.Author}</span> {item.Body}</span>
                   {actNoteDetail facts}
                 </article>"""
@@ -1473,6 +1498,7 @@ module View =
                 else Lit.nothing
             html $"""
                 <article class="{Style.messageItem}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
+                  {itemMark item}
                   {meta}
                   <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
                 </article>"""
@@ -1706,7 +1732,31 @@ module View =
                 | None ->
                     [ html $"""<div class="{Style.timelineIdle}" aria-hidden="true"><span class="{Style.caretIdle}"></span></div>""" ]
             | _ -> Option.toList missing @ items
-        html $"""<section class="{Style.timeline}" data-conversation>{body}</section>"""
+        // One stroke per marked moment, standing where the rail says it stands. The position
+        // is an inline style because it is a computed number and a utility class cannot be
+        // one — the same reason a peer's cursor carries its colour that way.
+        let rail =
+            match ClientModel.landmarks model with
+            | [] -> Lit.nothing
+            | marks ->
+                let stroke (item: ConversationItem, place: float) =
+                    let label = ClientModel.landmarkLabel item
+                    html $"""
+                        <button type="button" class="{Style.landmarkStroke}"
+                                style="{Style.landmarkAt place}"
+                                data-landmark="{MessageId.value item.MessageId}" aria-label="{label}"
+                                @click={Ev(fun _ -> actions.RevealMessage item.MessageId)}>
+                          <span class="{Style.landmarkMark}"></span>
+                        </button>"""
+                html $"""
+                    <nav class="{Style.landmarkRail}" aria-label="{Dom.Text.markedMoments}" data-landmark-rail>
+                      {marks |> List.map stroke}
+                    </nav>"""
+        html $"""
+            <div class="{Style.timelineFrame}">
+              {rail}
+              <section class="{Style.timeline}" data-conversation>{body}</section>
+            </div>"""
 
     /// Everything a block printed, as TEXT — the cheap read of the same bytes the recording
     /// holds, and the one both surfaces that show a block are made of.
