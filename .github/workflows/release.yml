@@ -131,11 +131,24 @@ jobs:
   # The other parallel channel: the reproducible Nix package. Build it and boot-smoke the two
   # wrapped bins, so `nix profile install github:trinketworks/yession` stays green — and push
   # the result to the binary cache, which is what spares consumers the source build.
+  #
+  # Both Linux arches, one job each. aarch64 is not hypothetical: the repo's own work
+  # sandboxes are arm64 containers (yession.yaml runs `nix develop` in nixos/nix on an
+  # Apple-silicon operator's dockerd), and until this pushed aarch64-linux closures every
+  # fresh container compiled the from-source pieces — libdatachannel included — cold.
   package-nix:
-    name: "package:nix"
+    name: "package:nix (${{ matrix.arch }})"
     needs: verify
     if: github.ref == 'refs/heads/master'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64-linux
+            runner: ubuntu-latest
+          - arch: aarch64-linux
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v30
