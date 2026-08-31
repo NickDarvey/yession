@@ -104,7 +104,7 @@ type WorkSandboxes =
 /// CHANGE, and the second ask would be refused for no reason a caller could see.
 let normaliseForward (names: string list) : string list =
     names
-    |> List.map (fun name -> (defaultArg (Option.ofObj name) "").Trim().ToLowerInvariant ())
+    |> List.choose (Option.ofObj >> Option.map (fun name -> name.Trim().ToLowerInvariant ()))
     |> List.filter (fun name -> name <> "")
     |> List.distinct
     |> List.sort

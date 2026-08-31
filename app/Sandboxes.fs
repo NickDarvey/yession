@@ -68,11 +68,12 @@ let resolveVariables
 /// purpose: neither says anything.
 let private listFrom (raw: string option) : string list =
     raw
-    |> Option.defaultValue ""
-    |> fun raw -> raw.Split ([| ','; ' '; '\t'; '\n' |])
-    |> Array.map (fun entry -> entry.Trim ())
-    |> Array.filter (fun entry -> entry <> "")
-    |> List.ofArray
+    |> Option.map (fun text ->
+        text.Split ([| ','; ' '; '\t'; '\n' |])
+        |> Array.map (fun entry -> entry.Trim ())
+        |> Array.filter (fun entry -> entry <> "")
+        |> List.ofArray)
+    |> Option.defaultValue []
 
 /// Where a session's workspaces and its checkouts sit under its data directory.
 ///
@@ -403,10 +404,10 @@ let policyFor
             match grantedPath granted with
             | [] -> grantedEnv
             | directories ->
-                let existing = inherited |> Map.tryFind "PATH" |> Option.defaultValue ""
                 let combined =
-                    if existing = "" then String.concat ":" directories
-                    else String.concat ":" directories + ":" + existing
+                    match inherited |> Map.tryFind "PATH" with
+                    | None | Some "" -> String.concat ":" directories
+                    | Some existing -> String.concat ":" directories + ":" + existing
                 Map.add "PATH" combined grantedEnv
         match backend with
         | HostBackend
@@ -690,7 +691,7 @@ module HostSandbox =
                         let env = mergeEnv policy.Env exec.Env
                         let cwd =
                             SandboxPath.resolvedFrom policy.WorkingDirectory exec.WorkingDirectory
-                            |> Option.defaultValue ""
+                            |> Option.toObj
                         return Ok (children.Spawn (exec.Executable, exec.Arguments, cwd, env) onChunk)
                     }
                 return
@@ -705,7 +706,7 @@ module HostSandbox =
                                         let env = mergeEnv policy.Env exec.Env
                                         let cwd =
                                             SandboxPath.resolvedFrom policy.WorkingDirectory exec.WorkingDirectory
-                                            |> Option.defaultValue ""
+                                            |> Option.toObj
                                         return Pty.spawn exec.Executable exec.Arguments cwd env cols rows onOutput
                                     })
                           Dispose = fun () -> async { children.KillAll () } }
@@ -1360,9 +1361,9 @@ module SrtSandbox =
             (List.toArray config.DenyRead)
             (List.toArray config.AllowRead)
             (List.toArray config.AllowWrite)
-            (config.Bwrap |> Option.defaultValue "")
-            (config.Socat |> Option.defaultValue "")
-            (config.Ripgrep |> Option.defaultValue "")
+            (config.Bwrap |> Option.toObj)
+            (config.Socat |> Option.toObj)
+            (config.Ripgrep |> Option.toObj)
             config.WeakNesting
             config.AllowGitConfig
             config.FilesystemDisabled
@@ -1536,7 +1537,7 @@ module SrtSandbox =
                                 let env = mergeEnv policy.Env exec.Env
                                 let cwd =
                                     SandboxPath.resolvedFrom policy.WorkingDirectory exec.WorkingDirectory
-                                    |> Option.defaultValue ""
+                                    |> Option.toObj
                                 // This sandbox's own filesystem policy rides every spawn:
                                 // the manager was initialized by whichever sandbox came
                                 // first, and `customConfig` is what makes the profile this
@@ -1566,7 +1567,7 @@ module SrtSandbox =
                                                 let env = mergeEnv policy.Env exec.Env
                                                 let cwd =
                                                     SandboxPath.resolvedFrom policy.WorkingDirectory exec.WorkingDirectory
-                                                    |> Option.defaultValue ""
+                                                    |> Option.toObj
                                                 let! wrapped =
                                                     Interop.awaitPromise
                                                         (wrapArgv srt (commandLine exec.Executable exec.Arguments) (toJs config) cwd)
