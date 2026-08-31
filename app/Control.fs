@@ -156,7 +156,14 @@ let tryHandle
         // fire here (a `None` secret cannot resolve to a caller) but read as though a missing
         // secret were an empty one, and would have fed that empty launch key to the privileged
         // handlers the moment this gate's invariant drifted.
-        match secret |> Option.bind (fun s -> resolve s |> Option.map (fun caller -> s, caller)) with
+        let resolved =
+            match secret with
+            | Some launchSecret ->
+                match resolve launchSecret with
+                | Some caller -> Some (launchSecret, caller)
+                | None -> None
+            | None -> None
+        match resolved with
         | None ->
             onUnauthorized path
             respond res 401 "invalid control secret"
