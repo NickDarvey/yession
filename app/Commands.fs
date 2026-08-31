@@ -41,6 +41,12 @@ type CommandServices =
       Repos : unit -> Repos.ReposService option
       /// The session's named WorkSandboxes.
       Sandboxes : unit -> WorkSandboxes.WorkSandboxes
+      /// A repo's checkout as its OWN work sandbox will see it — the root a repo-owned
+      /// declaration's `workdir:` resolves against (`Sandboxes.workCheckoutAt`). Its own
+      /// function rather than a repo verb because it is a different fact: the verbs
+      /// answer in the view of the session's own sandboxes, where their answers are
+      /// acted on, and a repo's sandbox is a container with a view of its own.
+      WorkCheckout : RepoRef -> string
       /// The terminal manager, which owns the shell profile (Plan 25).
       Terminals : unit -> SessionTerminals.SessionTerminals
       /// Watching pull requests, absent when the session could not start the poller.
@@ -316,10 +322,13 @@ let dispatch (services: CommandServices) : CommandDispatch =
                         | Ok decl ->
                             // The checkout is DERIVED from the sandbox's scope, never
                             // carried: a gated call that could name a checkout could name
-                            // any directory on this host.
+                            // any directory on this host. And it is the checkout as the
+                            // SANDBOX will see it — a repo's sandbox is a container, so
+                            // its `workdir:` resolves against the container's view of the
+                            // checkout, not the path a terminal in `default` would use.
                             let checkout =
                                 match SandboxRef.scope name, services.Repos () with
-                                | RepoOwned repo, Some repos -> Some (repos.CheckoutOf repo)
+                                | RepoOwned repo, Some _ -> Some (services.WorkCheckout repo)
                                 | RepoOwned _, None
                                 | SessionOwned, _ -> None
                             match SandboxDecl.toRequest checkout decl with

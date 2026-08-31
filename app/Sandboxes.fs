@@ -224,6 +224,16 @@ let reposVisibleAt (backend: SandboxBackend) (hostReposDir: string) : string =
     | SrtBackend -> hostReposDir
     | DockerBackend -> "/repos"
 
+/// A repo's checkout as its OWN work sandbox will see it — the root that repo's
+/// `workdir:` resolves against (`SandboxDecl.toRequest`). Repo-owned work runs under
+/// `SandboxRuntime.repoWorkBackend`, so this is that backend's view of the repos
+/// directory, never a terminal's: resolved against the terminal's view, `workdir: .`
+/// produced a container whose working directory wore the HOST checkout path — an empty
+/// volume mounted where nothing would ever look, while the checkout sat under the
+/// /repos bind.
+let workCheckoutAt (reposDir: string) (repo: RepoRef) : string =
+    sprintf "%s/%s" (reposVisibleAt SandboxRuntime.repoWorkBackend reposDir) (RepoRef.relativePath repo)
+
 /// What an operator's granted leaves add to a policy.
 ///
 /// The operator's side of the ceiling/grant split. `YESSION_SESSION_READ` was a bound AND an
@@ -826,9 +836,14 @@ module DockerSandbox =
                         // and by accident: docker is the backend that passes no workspace.
                         let workspaceTarget =
                             policy.WorkingDirectory |> Option.defaultValue "/workspace"
-                        // Always attach the sandbox's named workspace volume, unless an
-                        // explicit mount already claims the workspace path.
-                        let hasWorkspaceMount = container.Mounts |> List.exists (fun m -> m.Target = workspaceTarget)
+                        // Attach the sandbox's named workspace volume only where nothing
+                        // already provides the workspace path. "Provides" is on a
+                        // directory boundary and includes containment: a repo sandbox's
+                        // workdir is its checkout under the /repos bind, and a volume
+                        // mounted at the deeper path would shadow that checkout with an
+                        // empty directory (`ContainerMount.provides`).
+                        let hasWorkspaceMount =
+                            container.Mounts |> List.exists (fun m -> ContainerMount.provides m.Target workspaceTarget)
                         let workspaceMounts =
                             if hasWorkspaceMount then []
                             else [ createObj [ "Type", box "volume"; "Source", box name; "Target", box workspaceTarget; "ReadOnly", box false ] ]

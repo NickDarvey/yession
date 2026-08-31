@@ -194,11 +194,17 @@ let private tmpDir = Sandboxes.SessionLayout.prepareTmpDir dataDir
 /// Where a work sandbox works. Host-family sandboxes work under the session's own data
 /// directory; a docker sandbox's workspace is the image's, which nothing here composes.
 ///
+/// By the SANDBOX's backend (`SandboxRuntime.scopedBackend`), not the session's
+/// configured one: a repo-owned sandbox is a container whatever `default` runs under,
+/// and answering with the srt workspace for one gave every repo container a working
+/// directory shaped like a host path — an empty volume mounted where nothing would
+/// look, while the checkout sat under the /repos bind.
+///
 /// Module level because two things need it and they are not near each other: the sandboxes
 /// themselves, and the path a repo verb ANSWERS with — which is relative to the terminal's
 /// working directory or it is not relative to anything.
 let private workspaceFor (sandbox: SandboxRef) =
-    match workBackend with
+    match SandboxRuntime.scopedBackend workBackend (SandboxRef.scope sandbox) with
     | HostBackend
     | SrtBackend -> Some (Sandboxes.SessionLayout.workspaceFor dataDir sandbox)
     | DockerBackend -> EnvironmentSpec.defaults.WorkingDirectory
@@ -302,12 +308,11 @@ let private makeSandboxes
                         (sprintf "env-%s" (SandboxRef.objectName sessionId sandbox)))
         match WorkSandboxes.create
                 { Backend =
-                    // Described by SCOPE, the same split `backendFor` decides on: a
-                    // repo-owned entry is docker whether or not it has started yet.
+                    // Described by SCOPE — the same rule the start goes through, minus
+                    // its refusal: a repo-owned entry is docker whether or not it has
+                    // started yet.
                     fun (ref: SandboxRef) ->
-                        match SandboxRef.scope ref with
-                        | SessionOwned -> SandboxBackend.describe workBackend
-                        | RepoOwned _ -> SandboxBackend.describe DockerBackend
+                        SandboxBackend.describe (SandboxRuntime.scopedBackend workBackend (SandboxRef.scope ref))
                   // The credentials this session knows how to forward. GitHub is the one
                   // Plan 14 left deferred, and it is what makes `git push` from a terminal
                   // work; resolution is the Plan 08 precedence, unchanged.
@@ -587,6 +592,7 @@ let private reportGitHubNetworkFailure (credentialActor: ActorRef) (_gitSaid: st
 let private commandServices : Commands.CommandServices =
     { Repos = fun () -> reposService
       Sandboxes = fun () -> workSandboxes
+      WorkCheckout = Sandboxes.workCheckoutAt reposDir
       Terminals = fun () -> terminals
       Prs = fun () -> prWatchService
       Invalidate = fun name -> queryRegistry.Invalidate name
@@ -767,11 +773,14 @@ Async.StartImmediate (
             match Repos.create
                     { Backend = agentBackend
                       ReposDir = reposDir
-                      // What the verbs SAY a checkout is at is the work sandbox's view of
-                      // it, not the git sandbox's: nobody runs a build in the git sandbox.
-                      // Relative to where a terminal starts, when it can be: `repos/…` is
-                      // what anyone here can act on, and `set_shell_profile` resolves it
-                      // against the same root. The absolute path stays the sandbox's.
+                      // What the verbs SAY a checkout is at is the view from the
+                      // session's OWN sandboxes — the agent's `default`, where these
+                      // answers are acted on. Relative to where a terminal starts, when
+                      // it can be: `repos/…` is what anyone here can act on, and
+                      // `set_shell_profile` resolves it against the same root. A repo
+                      // container's view of its own checkout is a different fact,
+                      // answered by `Sandboxes.workCheckoutAt` where a declaration is
+                      // resolved.
                       VisibleAt =
                         SandboxPath.reachedFrom
                             (workspaceFor SandboxRef.defaultRef)
@@ -956,15 +965,18 @@ Async.StartImmediate (
                 host.RunGated
                 log
                 // What a checkout asks for, as the backend its sandboxes run on will actually
-                // grant it. The work backend and not the agent's: a repo's declarations
-                // become work sandboxes, and the two backends do not scope the same things.
+                // grant it. That backend is `repoWorkBackend` — a repo's declarations
+                // become repo-owned sandboxes, which are containers whatever light
+                // confinement the session's own keep — and the backends do not scope the
+                // same things, so judging the ask against the configured one accepted
+                // asks docker cannot grant and refused ones it can.
                 //
                 // The no-profile case goes through `grantsFor` so the sentence a repo gets
                 // for selecting a name on a host that declares nothing is written once. It
                 // cannot succeed — a non-empty selection with no profile is exactly what that
                 // refusal is for — and `capabilitiesOn` has already answered the empty one.
                 (RepoSandboxes.capabilitiesOn
-                    (Sandboxes.limitsHere workBackend)
+                    (Sandboxes.limitsHere SandboxRuntime.repoWorkBackend)
                     (fun selection ->
                         match resourceProfile with
                         | None -> grantsFor selection |> Result.map (fun _ -> ResourceClosure.empty)

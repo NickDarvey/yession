@@ -245,8 +245,8 @@ let tests =
 
 // --- The fold ----------------------------------------------------------------------------
 
-/// A repos service that knows about `listed` and nothing else. Only `ListRepos` and
-/// `CheckoutOf` are the fold's business; every other verb is somebody else's suite.
+/// A repos service that knows about `listed` and nothing else. Only `ListRepos` is the
+/// fold's business; every other verb is somebody else's suite.
 let private reposOver (reposDir: string) (listed: RepoRef list) : Repos.ReposService =
     let denied _ = async { return Error "not part of this test" }
     { AddRepo = fun _ _ -> denied ()
@@ -266,8 +266,7 @@ let private reposOver (reposDir: string) (listed: RepoRef list) : Repos.ReposSer
       RepoStatus = fun _ -> denied ()
       RepoLog = fun _ -> denied ()
       RepoDiff = fun _ -> denied ()
-      RemoveRepo = fun _ _ _ -> denied ()
-      CheckoutOf = fun r -> sprintf "%s/%s" reposDir (RepoRef.relativePath r) }
+      RemoveRepo = fun _ _ _ -> denied () }
 
 /// A gate that approves everything and records what it was asked to do, so a test can see
 /// which declarations reached it and in what shape.
