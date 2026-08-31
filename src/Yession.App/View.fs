@@ -1147,38 +1147,16 @@ module View =
     ///
     /// Read off the `pull_requests` query, because that is what a browser has: the rows
     /// arrive on the stream the settings panel already draws, so the strip costs no plumbing
-    /// and cannot show a different set of watches from the table behind it. `PrStatus` turns
-    /// those rows into the line and chooses which of them is worst, so the strip, the roster
-    /// and the panel say the same words about the same session — the point of putting that
-    /// vocabulary in the Domain rather than at each surface.
+    /// and cannot show a different set of watches from the table behind it. The reading is
+    /// `ClientModel.prStandings` and the wording is `PrStatus`, so the strip, the tab title,
+    /// the roster and the panel all say the same words about the same session — the point of
+    /// putting that vocabulary below the surfaces rather than at each of them.
     ///
     /// Nothing at all when nothing is owed. A session with no watches, or whose watches have
     /// all merged, gets no strip rather than an empty one: silence is what makes a line that
     /// IS there worth looking at.
-    let private prStrip (actions: ViewActions) (queries: QueriesViewState) : TemplateResult =
-        let cell (row: (string * QueryCell) list) (key: string) =
-            row |> List.tryFind (fun (k, _) -> k = key) |> Option.map snd
-        let text row key =
-            match cell row key with
-            | Some (CellStatus (said, _)) -> Some said
-            | Some (CellText said) -> Some said
-            | _ -> None
-        let readable row =
-            match cell row PrStatus.Columns.status with
-            // The TONE and never the sentence: a health line's words are the provider's and
-            // change with it, while the tone is this repository's own verdict vocabulary.
-            | Some (CellStatus (_, ToneBad)) -> false
-            | _ -> true
-        let standings =
-            match queries.Values |> Map.tryFind PrStatus.Columns.query with
-            | Some (RowsOf rows) ->
-                rows
-                |> List.choose (fun row ->
-                    match text row PrStatus.Columns.pr with
-                    | Some named ->
-                        PrStatus.standing (PrStatus.labelOf named) (text row PrStatus.Columns.state) (readable row)
-                    | None -> None)
-            | _ -> []
+    let private prStrip (actions: ViewActions) (model: ClientModel) : TemplateResult =
+        let standings = ClientModel.prStandings model
         match PrStatus.summarize standings with
         | "" -> Lit.nothing
         | line ->
@@ -1236,7 +1214,7 @@ module View =
                 <span class="{Style.titleId}" data-session-id>{sessionIdText}</span>
               </div>
               <div class="{Style.headerAside}">
-                {prStrip actions model.Queries}
+                {prStrip actions model}
                 {agentAbsence actions model.Claude}
                 {terminalsReopen dispatch model}
               </div>
