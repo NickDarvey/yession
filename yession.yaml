@@ -34,11 +34,19 @@ sandboxes:
     # Which nix features this repo's build needs, plus where its artifacts substitute
     # from. In the container this is the whole nix configuration the devshell sees —
     # there is no /etc/nix/nix.conf story to inherit, which is the point.
+    #
+    # The last two lines are what make nix RUN in this container at all: the sandbox
+    # drops every capability, so multi-user store init (chown to nixbld) and nix's own
+    # build sandbox both die on Operation not permitted. Single-user, unsandboxed nix
+    # is the container norm — the container IS the sandbox. Measured under the exact
+    # CapDrop ALL profile: store writes and a real derivation build both pass.
     env:
       NIX_CONFIG: |
         experimental-features = nix-command flakes
         extra-substituters = https://yession.cachix.org
         extra-trusted-public-keys = yession.cachix.org-1:Dj6jHWpEaqcGyrEEC3/qy/D3UQN8sZW1RXUOCRJ41oI=
+        build-users-group =
+        sandbox = false
 
   # `verify` is minutes long. A second sandbox on the same configuration means the gate
   # runs beside interactive work instead of holding the shell.
@@ -57,3 +65,5 @@ sandboxes:
         experimental-features = nix-command flakes
         extra-substituters = https://yession.cachix.org
         extra-trusted-public-keys = yession.cachix.org-1:Dj6jHWpEaqcGyrEEC3/qy/D3UQN8sZW1RXUOCRJ41oI=
+        build-users-group =
+        sandbox = false
