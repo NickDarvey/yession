@@ -861,10 +861,19 @@ module DockerSandbox =
                                       box (
                                           createObj
                                               [ "Mounts", box (List.toArray mounts)
-                                                // The workload is agent-issued commands; nothing
-                                                // it runs legitimately needs a capability or a
-                                                // privilege escalation.
+                                                // Everything dropped, then the file-ownership
+                                                // capabilities added back. "Nothing it runs
+                                                // legitimately needs a capability" was measured
+                                                // false: a nix source build's tar unpack
+                                                // preserves the archive's uid/gid (CHOWN), later
+                                                // chmods the result (FOWNER), and root then
+                                                // reads files it just gave away (DAC_OVERRIDE).
+                                                // All three verified against a raw container;
+                                                // still far below docker's own default set — no
+                                                // NET_RAW, no SETUID/SETGID, no MKNOD — and
+                                                // no-new-privileges stays.
                                                 "CapDrop", box [| "ALL" |]
+                                                "CapAdd", box [| "CHOWN"; "FOWNER"; "DAC_OVERRIDE" |]
                                                 "SecurityOpt", box [| "no-new-privileges" |] ]) ])
                             |> Interop.awaitPromise
                         do! container.start () |> Interop.awaitPromise |> Async.Ignore
