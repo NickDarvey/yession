@@ -15,6 +15,16 @@
   -->
   <PropertyGroup>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!--
+      NU1900 is "could not FETCH vulnerability data", not "a vulnerability" — the
+      finding codes (NU1901-NU1904) stay errors. As an error it made every build
+      behind srt's authenticating proxy fail in restore: NuGet's client cannot
+      authenticate to that proxy even where curl can, so a sandboxed `check` died
+      before compiling anything, saying only that a service index would not load.
+      A build that cannot check is worth a warning; only a build that checked and
+      FOUND something is worth stopping.
+    -->
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);NU1900</WarningsNotAsErrors>
   </PropertyGroup>
 
 </Project>
