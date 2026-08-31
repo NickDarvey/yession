@@ -72,22 +72,69 @@ module PrStatus =
             | None -> List.length order
         if rank left <= rank right then left else right
 
-    /// One line a session says about its pull requests, for a surface that has room for
-    /// one line and no more — the Manager's roster, the session page's header strip.
+    /// One line about a set of pull requests, for a surface with room for one line and no
+    /// more — the Manager's roster, and the session page's header strip.
+    ///
+    /// Takes a LABEL rather than a `PrRef`, because the two callers hold the identity in
+    /// different shapes: the session has the watch, the browser has only what the
+    /// `pull_requests` query said. One function either way, because two surfaces that
+    /// computed this separately would be two surfaces that disagree in front of the same
+    /// person — which is the whole reason this module exists.
     ///
     /// Only what is still OWED is counted. A session whose watches have all merged has
     /// nothing to say, and says nothing, rather than reporting a number that is really a
     /// history. Silence here means "nothing waiting", which is what makes a line that IS
     /// there worth reading.
-    let summarize (standings: (PrRef * string) list) : string =
+    let summarize (standings: (string * string) list) : string =
         match standings |> List.filter (snd >> live) with
         | [] -> ""
-        // One is named, because with a single pull request the number IS the answer and a
+        // One is named, because with a single pull request the label IS the answer and a
         // count of one says less than the thing it counted.
-        | [ pr, word ] -> sprintf "#%d %s" pr.Number word
+        | [ label, word ] -> sprintf "%s %s" label word
         | several ->
             let worst = several |> List.map snd |> List.reduce worse
             sprintf "%d PRs · %d %s" (List.length several) (several |> List.filter (snd >> (=) worst) |> List.length) worst
+
+    /// How a pull request is named in a one-line summary: its number, because the surface
+    /// showing it belongs to one session and a session's watches are rarely spread over
+    /// enough repositories for the owner and name to be the question. Both callers go
+    /// through this so the roster and the strip name it identically.
+    let label (pr: PrRef) : string = sprintf "#%d" pr.Number
+
+    /// The same, recovered from a rendered `owner/repo#12` — what a browser has, since the
+    /// query hands it the rendering rather than the reference. Total: a label it cannot
+    /// read is passed through rather than replaced by a guess.
+    let labelOf (rendered: string) : string =
+        match rendered.LastIndexOf '#' with
+        | -1 -> rendered
+        | at -> rendered.Substring at
+
+    /// The `pull_requests` query's own column keys, so a reader of its rows names them once
+    /// rather than each surface spelling its own string. They are the wire's keys and the
+    /// browser only ever sees the query, so this is where a client learns them — the host
+    /// declares the same three in `PrWatches.queryDef`, and the round-trip suite is what
+    /// says the two agree.
+    module Columns =
+        /// The query's own name, for the same reason: a browser finds these rows by it.
+        let query = "pull_requests"
+        let pr = "pr"
+        let state = "state"
+        let status = "status"
+
+    /// What one watch contributes to a summary, from the three facts every surface has in
+    /// some shape: how it is named, the word for where it stands, and whether the session
+    /// can still READ it.
+    ///
+    /// Unreadable outranks whatever it last said — a dead credential means nobody is
+    /// driving that one, which is worse news than any state it is stuck in. The rule lives
+    /// here and not at either caller, because the session holds a `PrWatchRow` and a browser
+    /// holds a row of the `pull_requests` query, and two surfaces that decided this
+    /// separately would disagree in front of the same person.
+    ///
+    /// `None` for a watch nobody has looked at yet, which is not a standing.
+    let standing (label: string) (said: string option) (readable: bool) : (string * string) option =
+        if not readable then Some (label, unreachable)
+        else said |> Option.map (fun word -> label, word)
 
 type PrWatch =
     { Pr : PrRef

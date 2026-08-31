@@ -661,6 +661,24 @@ module Style =
     let headerAside = "ml-auto shrink-0 flex items-end gap-5 pb-[1px] max-md:items-center max-md:gap-3 max-md:pb-0"
     let headerStatus = "shrink-0"
 
+    /// What this session's pull requests amount to, in the header band: the same line the
+    /// Manager's roster shows for this session, on the page a person is actually looking at.
+    ///
+    /// A real button, because it GOES somewhere — the panel with the rows behind the line is
+    /// one press away in settings, and a line a reader cannot follow is a line that raises a
+    /// question it will not answer. Bordered like nothing else in the band on purpose: it
+    /// wears the caps voice of its neighbours and takes its colour from the tone of the worst
+    /// thing it is reporting, so the band gains a word rather than a control.
+    ///
+    /// Desktop only. The phone band is 56px and geometry-pinned (`Browser.fs` measures that
+    /// the bar never covers the header under it), so a third thing in it is a redesign of the
+    /// band rather than an addition to it — and a phone has the tab title, which is the
+    /// signal that reaches somebody who is not looking at all.
+    let private prStripBase =
+        "bg-transparent border-0 cursor-pointer " + caps + " transition-colors " + focusRing + " max-md:hidden"
+
+    let prStripIn (tone: string) = prStripBase + " " + tone
+
     /// The agent's absence, FOLLOWING the surface that normally says it: shown only when the
     /// sidebar column (which holds the real call to action) is collapsed or off-canvas — which
     /// on a phone is most of the time. Never both at once, so it is a relocation, not a repeat.

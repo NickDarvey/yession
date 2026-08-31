@@ -643,12 +643,12 @@ let private prWatchTests =
         testCase "a summary of no live pull requests says nothing at all" <| fun () ->
             // Silence is the feature. A roster line that is THERE is worth reading only
             // because a session with nothing owed does not print one.
-            let merged n = PrRef.create repo n |> expect, "merged"
+            let merged n = PrStatus.label (PrRef.create repo n |> expect), "merged"
             Expect.equal (PrStatus.summarize []) "" "nothing watched"
             Expect.equal (PrStatus.summarize [ merged 1; merged 2 ]) "" "and nothing still owed"
 
         testCase "a summary names a lone pull request and counts a crowd, worst first" <| fun () ->
-            let at n word = PrRef.create repo n |> expect, word
+            let at n word = PrStatus.label (PrRef.create repo n |> expect), word
             Expect.equal (PrStatus.summarize [ at 377 "queued" ]) "#377 queued" "one is named"
             Expect.equal
                 (PrStatus.summarize [ at 1 "queued"; at 2 "stalled"; at 3 "queued" ])
@@ -662,6 +662,28 @@ let private prWatchTests =
                 (PrStatus.summarize [ at 1 "stalled"; at 2 PrStatus.unreachable ])
                 "2 PRs · 1 unreachable"
                 "a watch that cannot be read is worse news than one that stalled"
+
+        // Both surfaces name a pull request the same way, from opposite ends: the session
+        // holds the watch, the browser holds only what the query rendered.
+        testCase "a pull request is labelled identically from a watch and from a rendering" <| fun () ->
+            let pr = PrRef.create repo 377 |> expect
+            Expect.equal (PrStatus.label pr) "#377" "the session labels it from the reference"
+            Expect.equal (PrStatus.labelOf (PrRef.render pr)) "#377" "and the browser from the rendering"
+            Expect.equal (PrStatus.labelOf "nothing like a pull request") "nothing like a pull request" "and passes through what it cannot read"
+
+        // The rule both surfaces obey about a watch nobody can read, in the one place either
+        // of them gets it from.
+        testCase "a watch that cannot be read outranks whatever it last said" <| fun () ->
+            Expect.equal
+                (PrStatus.standing "#12" (Some "queued") false)
+                (Some ("#12", PrStatus.unreachable))
+                "unreadable wins over the state it was in"
+            Expect.equal (PrStatus.standing "#12" (Some "queued") true) (Some ("#12", "queued")) "and otherwise the state stands"
+            Expect.equal (PrStatus.standing "#12" None true) None "a watch nobody has looked at yet is not a standing"
+            Expect.equal
+                (PrStatus.standing "#12" None false)
+                (Some ("#12", PrStatus.unreachable))
+                "but one that cannot be read is, whether or not it was ever read"
 
         testCase "the watches projection folds start, re-watch, transition and stop" <| fun () ->
             let folded = fold [ at 0 (started PrOpen ChecksPending) ]

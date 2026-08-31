@@ -438,7 +438,7 @@ let watchService
 // read-only tool from the same declaration. No panel, no route.
 
 let queryName : QueryName =
-    match QueryName.create "pull_requests" with
+    match QueryName.create PrStatus.Columns.query with
     | Ok name -> name
     | Error e -> failwithf "pull requests query name: %s" e
 
@@ -454,12 +454,12 @@ let private queryDef : QueryDef =
          announced on the timeline as they happen; this is the current state."
       Shape =
         Rows
-            [ QueryColumn.create "pr" "pull request"
+            [ QueryColumn.create PrStatus.Columns.pr "pull request"
               QueryColumn.create "title" "title"
-              QueryColumn.create "state" "state"
+              QueryColumn.create PrStatus.Columns.state "state"
               QueryColumn.create "checks" "checks"
               QueryColumn.create "watcher" "watched by"
-              QueryColumn.create "status" "status"
+              QueryColumn.create PrStatus.Columns.status "status"
               QueryColumn.create "since" "since" ] }
 
 /// When a watch last became what it is, as a stamp the reader subtracts from.
@@ -488,10 +488,7 @@ let word (row: PrWatchRow) : string option =
 /// those words wins, and whether the line is worth saying at all, is `PrStatus.summarize`.
 let summaryOf (rows: PrWatchRow list) : string =
     rows
-    |> List.choose (fun row ->
-        match row.Health with
-        | Some _ -> Some (row.Pr, PrStatus.unreachable)
-        | None -> word row |> Option.map (fun said -> row.Pr, said))
+    |> List.choose (fun row -> PrStatus.standing (PrStatus.label row.Pr) (word row) (Option.isNone row.Health))
     |> PrStatus.summarize
 
 /// Register the watched pull requests as a query. A GETTER for the `mcp_servers` reason:
@@ -506,7 +503,7 @@ let query (current: unit -> PrWatchers) : Queries.QueryRegistration =
                     Ok (RowsOf (
                         (current ()).Rows ()
                         |> List.map (fun row ->
-                            [ "pr", CellText (PrRef.render row.Pr)
+                            [ PrStatus.Columns.pr, CellText (PrRef.render row.Pr)
                               "title",
                               (match row.Snapshot with
                                | Some s when s.Title <> "" -> CellText s.Title
@@ -515,7 +512,7 @@ let query (current: unit -> PrWatchers) : Queries.QueryRegistration =
                               // read: the one a person is looking for is the red suite, and
                               // it should not take reading six rows to find it. The word is
                               // still the word — the tone only says how loudly.
-                              "state",
+                              PrStatus.Columns.state,
                               (match word row with
                                | Some said ->
                                    CellStatus (
@@ -546,7 +543,7 @@ let query (current: unit -> PrWatchers) : Queries.QueryRegistration =
                                        | ChecksNone -> ToneMuted)
                                | None -> CellAbsent)
                               "watcher", CellText (ActorRef.token row.Watcher)
-                              "status",
+                              PrStatus.Columns.status,
                               (match row.Health, row.Pushed with
                                // A watch that has stopped moving, and why. The one cell in
                                // the row that is a problem rather than a state.
