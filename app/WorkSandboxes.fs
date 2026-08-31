@@ -71,8 +71,11 @@ type RunningSandbox =
       Environment : SessionEnvironment.SessionEnvironment }
 
 type WorkSandboxesConfig =
-    { /// How the backend describes itself, for the event and the query.
-      Backend : string
+    { /// How a sandbox's backend describes itself, for the event and the query — a
+      /// function of the ref because the backend is decided per SCOPE (the session's
+      /// own keep the configured confinement, a repo's are containers), so one string
+      /// for the whole registry would misdescribe half of it.
+      Backend : SandboxRef -> string
       Credentials : CredentialSource list
       /// Build the environment for a sandbox: the spec it was asked to be, plus the
       /// resolved credentials as extra policy env. Synchronous and fallible — whether this
@@ -136,7 +139,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
     let mutable entries : (SandboxRef * RunningSandbox) list =
         [ SandboxRef.defaultRef,
           { Ref = SandboxRef.defaultRef
-            Backend = config.Backend
+            Backend = config.Backend SandboxRef.defaultRef
             Request = SandboxRequest.defaults
             StartedBy = None
             StartedAt = None
@@ -222,7 +225,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                             let startedAt = config.Clock ()
                             let entry =
                                 { Ref = name
-                                  Backend = config.Backend
+                                  Backend = config.Backend name
                                   Request = wanted
                                   StartedBy = Some caller.Actor
                                   StartedAt = Some startedAt
@@ -234,7 +237,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                                     (SessionEvent.WorkSandboxStarted
                                         { MessageId = mintMessageId ()
                                           Sandbox = name
-                                          Backend = config.Backend
+                                          Backend = config.Backend name
                                           Forwarded = wanted.Forward
                                           CredentialOwner =
                                             (if List.isEmpty wanted.Forward then None else Some caller.Credential)

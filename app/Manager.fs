@@ -102,7 +102,7 @@ let createFull
                                         (Sandboxes.summaryFor HostBackend spec)
                                         (sprintf "env-%s-%s" (SessionId.value request.SessionId) (SandboxRef.render name)))
                             match WorkSandboxes.create
-                                    { Backend = SandboxBackend.describe HostBackend
+                                    { Backend = fun _ -> SandboxBackend.describe HostBackend
                                       Credentials = []
                                       Create = create
                                       Log = log
