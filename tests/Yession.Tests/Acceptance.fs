@@ -980,6 +980,54 @@ let private uiChecklistTests =
             Expect.isTrue (html.Contains "#377 unreachable") "the strip says nobody is driving it"
             Expect.isFalse (html.Contains "#377 queued") "and not the state it is stuck in"
 
+        // The tab title is the only surface that reaches somebody who is not looking at this
+        // session at all, so what it says has to survive being read out of the corner of an
+        // eye. These pin the base string first: a prefix test whose red could also mean "the
+        // title broke" is a prefix test nobody can read.
+        testCase "a tab is named for its session, and says nothing more when nothing is owed" <| fun () ->
+            Expect.equal
+                (ClientModel.tabTitle representativeModel)
+                "planning the launch — yession"
+                "a quiet session wears its title and no mark"
+            Expect.equal
+                (ClientModel.tabTitle (withPullRequests [ prRow 1 "queued" (CellStatus ("ok", ToneMuted)) ]))
+                "planning the launch — yession"
+                "and a pull request merely on its way in is not an interruption"
+
+        // Checks going red is deliberately NOT a signal: the agent is already fixing that,
+        // and a mark that fires while somebody is handling it is a mark people learn to
+        // ignore before it ever means something.
+        testCase "a tab warns when a pull request has stopped moving and nobody will notice" <| fun () ->
+            Expect.equal
+                (ClientModel.tabTitle (withPullRequests [ prRow 377 "stalled" (CellStatus ("ok", ToneMuted)) ]))
+                "⚠ planning the launch — yession"
+                "a stall raises no event of its own, so the tab is where it surfaces"
+            Expect.equal
+                (ClientModel.tabTitle (
+                    withPullRequests [ prRow 377 "queued" (CellStatus ("github rejected this credential", ToneBad)) ]))
+                "⚠ planning the launch — yession"
+                "and a watch nobody can read has stopped moving too"
+
+        testCase "a tab ticks when something merged, until the watch goes away" <| fun () ->
+            Expect.equal
+                (ClientModel.tabTitle (withPullRequests [ prRow 1 "merged" (CellStatus ("ok", ToneMuted)) ]))
+                "✓ planning the launch — yession"
+                "the one thing worth telling somebody who stopped watching: stop waiting"
+            Expect.equal
+                (ClientModel.tabTitle representativeModel)
+                "planning the launch — yession"
+                "and unwatching it is what clears the tick"
+
+        // A tab says one thing. The one that needs a person is the one that has stopped.
+        testCase "a warning outranks a tick when both are true at once" <| fun () ->
+            Expect.equal
+                (ClientModel.tabTitle (
+                    withPullRequests
+                        [ prRow 1 "merged" (CellStatus ("ok", ToneMuted))
+                          prRow 2 "stalled" (CellStatus ("ok", ToneMuted)) ]))
+                "⚠ planning the launch — yession"
+                "finished work waits; stopped work does not"
+
         testCase "a cell that carries a verdict says so, and still says the word" <| fun () ->
             let html = Support.render representativeModel
             Expect.isTrue (html.Contains "data-query-tone=\"bad\"") "a row's toned cell reports its tone"

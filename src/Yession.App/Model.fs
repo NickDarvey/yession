@@ -8,6 +8,7 @@ open Yession.Domain.Terminals
 open Yession.Domain.Collab
 open Yession.Domain.Tools
 open Yession.Domain.Chat
+open Yession.Domain.Prs
 
 /// The Browser Client Elmish model and update loop shell. It holds a single typed
 /// snapshot of what the client knows: the local peer, connection state, synced
@@ -1316,6 +1317,68 @@ module ClientModel =
                 | Some presence when presence.DisplayName <> "" -> presence.DisplayName
                 | _ -> PeerId.value peer
 
+    /// What this session's pull-request watches currently stand at, read off the
+    /// `pull_requests` query — the only shape a browser has them in, since the query stream
+    /// is what delivers them.
+    ///
+    /// Here rather than at either surface because there are now two: the header strip and
+    /// the tab title. Two readers of one set of rows that parsed them separately would be
+    /// two readers that can disagree about the same session in the same window — which is
+    /// the fault `PrStatus` exists to prevent, one layer up from where it prevents it.
+    ///
+    /// Every standing, live or not. The callers want different halves — a summary counts
+    /// only what is still owed, the tab title's tick is specifically about one that is NOT
+    /// owed any more — and `PrStatus.live` is how each says which.
+    let prStandings (model: ClientModel) : (string * string) list =
+        let cell (row: (string * QueryCell) list) (key: string) =
+            row |> List.tryFind (fun (k, _) -> k = key) |> Option.map snd
+        let text row key =
+            match cell row key with
+            | Some (CellStatus (said, _)) -> Some said
+            | Some (CellText said) -> Some said
+            | _ -> None
+        // The TONE and never the sentence: a health line's words are the provider's and
+        // change with it, while the tone is this repository's own verdict vocabulary.
+        let readable row =
+            match cell row PrStatus.Columns.status with
+            | Some (CellStatus (_, ToneBad)) -> false
+            | _ -> true
+        match model.Queries.Values |> Map.tryFind PrStatus.Columns.query with
+        | Some (RowsOf rows) ->
+            rows
+            |> List.choose (fun row ->
+                match text row PrStatus.Columns.pr with
+                | Some named ->
+                    PrStatus.standing (PrStatus.labelOf named) (text row PrStatus.Columns.state) (readable row)
+                | None -> None)
+        | _ -> []
+
+    /// What a pull-request watch puts in front of the tab name, for somebody who is not
+    /// looking at this tab at all — the only surface that reaches them there.
+    ///
+    /// Two signals and deliberately not three. A red suite is the AGENT's to fix and it is
+    /// already fixing it, so interrupting a person with one trains them to ignore the mark
+    /// by the time it means something. What reaches them is the two facts nobody else is
+    /// acting on:
+    ///
+    /// - `⚠` — a live watch stalled, or one nobody can read any more. Both mean the same
+    ///   thing to the person waiting: this pull request has stopped being on its way in and
+    ///   no machine is going to notice.
+    /// - `✓` — something merged and the watch is still there. Stop waiting; the watch going
+    ///   away is what clears it.
+    ///
+    /// The warning wins, because a tab can only say one thing and the one that needs a
+    /// person is the one that has stopped moving.
+    let private tabSignal (model: ClientModel) : string =
+        let standings = prStandings model
+        // No `live` filter on these two: a watch that stalled or cannot be read is by
+        // construction still owed, so asking would be asking a question with one answer.
+        let stopped =
+            standings |> List.exists (fun (_, word) -> word = "stalled" || word = PrStatus.unreachable)
+        if stopped then "⚠ "
+        elif standings |> List.exists (fun (_, word) -> word = "merged") then "✓ "
+        else ""
+
     /// What the browser tab is called: the session's own title, falling back to its id, and
     /// always saying which product it belongs to. Every session shell served the constant
     /// "Yession", so a person with three of them open had three identical tabs and no way to
@@ -1334,9 +1397,10 @@ module ClientModel =
         let subject =
             if named <> "" then Some named
             else model.Session |> Option.map SessionId.value
+        let signal = tabSignal model
         match subject with
-        | Some subject -> sprintf "%s — yession" subject
-        | None -> "yession"
+        | Some subject -> sprintf "%s%s — yession" signal subject
+        | None -> signal + "yession"
 
     /// Fold a message into the model.
     let update (msg: ClientMsg) (model: ClientModel) : ClientModel =
