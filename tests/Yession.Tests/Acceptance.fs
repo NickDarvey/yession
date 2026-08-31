@@ -92,7 +92,8 @@ let private representativeModel : ClientModel =
                     Background = false
                     // An agent command, so no viewport and no claim about width.
                     Size = None } ]
-          Model = Some pickedModel }
+          Model = Some pickedModel
+          Landmarks = Map.empty }
       Conversation =
         { Items =
             [ { MessageId = MessageId.create "msg-1" |> expect
@@ -883,7 +884,7 @@ let private uiChecklistTests =
                   Author = PeerRef ada
                   Body = "added repo octo/hello (branch main)"
                   Status = Complete
-                  Kind = ConversationItemKind.ActNote { Detail = None }
+                  Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                   Offset = EventOffset.create 1L |> expect
                   Woke = None }
             let model =
@@ -908,7 +909,7 @@ let private uiChecklistTests =
                   Author = PeerRef ada
                   Body = "started sandbox work (srt)"
                   Status = Complete
-                  Kind = ConversationItemKind.ActNote { Detail = Some "forwarding github from user:ada" }
+                  Kind = ConversationItemKind.ActNote { Detail = Some "forwarding github from user:ada"; Notable = false }
                   Offset = EventOffset.create 1L |> expect
                   Woke = None }
             let model =
@@ -931,7 +932,7 @@ let private uiChecklistTests =
                   Author = PeerRef ada
                   Body = "removed repo octo/hello"
                   Status = Complete
-                  Kind = ConversationItemKind.ActNote { Detail = None }
+                  Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                   Offset = EventOffset.create 1L |> expect
                   Woke = None }
             let model =

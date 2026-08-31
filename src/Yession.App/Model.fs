@@ -646,6 +646,11 @@ type ClientMsg =
     /// provider. One register, written like a gate: the reducer sets it and the Ylmish
     /// binding carries it to every peer.
     | SetModelMsg of ModelId option
+    /// Mark this message for the rail, or take its mark off — one message, because there is
+    /// one act. Which way it goes is `Landmarks.toggle`'s to decide, from the item and the
+    /// verdicts already recorded: a message carrying the desired state would be a message
+    /// whose sender had to know what an unmarked-by-nature act defaults to.
+    | ToggleLandmarkMsg of MessageId
     /// One frame off the multiplexed query stream (Plan 15) — the declarations, or one
     /// query's current value. ONE message for the whole read surface, however many
     /// queries there are: a message per query would be a message per FUTURE query too.
@@ -1782,3 +1787,12 @@ module ClientModel =
             | None -> model
         | ModelCatalogueMsg catalogue -> { model with Models = catalogue }
         | SetModelMsg choice -> model |> withSynced { model.Synced with Model = choice }
+        // An id this client's window does not hold is a page boundary, not a bug — and
+        // there is nothing to toggle, because what the mark would default to is on the item.
+        | ToggleLandmarkMsg messageId ->
+            match model.Conversation.Items |> List.tryFind (fun item -> item.MessageId = messageId) with
+            | Some item ->
+                model
+                |> withSynced
+                    { model.Synced with Landmarks = Landmarks.toggle item model.Synced.Landmarks }
+            | None -> model

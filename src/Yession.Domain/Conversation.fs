@@ -26,7 +26,16 @@ type ConversationItemStatus =
 /// second half to withhold, and inventing one would pad every short line into looking like a
 /// long one.
 type ActNoteFacts =
-    { Detail : string option }
+    { Detail : string option
+      /// Whether this act is a landmark BY NATURE — worth a stroke on the rail without
+      /// anybody having marked it.
+      ///
+      /// It is the fold's to say, for the same reason `Detail` is: the fold matched the
+      /// event, and a renderer deciding this would be deciding it by reading the finished
+      /// sentence. What is notable is deliberately a short list — a rail that marks
+      /// everything marks nothing — and `Landmarks` is where a person's own verdict
+      /// overrides it in either direction.
+      Notable : bool }
 
 /// What an item in the timeline IS (Plan 14). A message is something someone said; a
 /// repo note is something someone DID (added/removed/switched a repo), folded into the
@@ -90,8 +99,43 @@ module ConversationItem =
     let said (item: ConversationItem) : string =
         match item.Kind with
         | ConversationItemKind.ActNote { Detail = Some detail } -> item.Body + " — " + detail
-        | ConversationItemKind.ActNote { Detail = None }
+        | ConversationItemKind.ActNote _
         | ConversationItemKind.Message -> item.Body
+
+/// Which items in a conversation wear a mark on the rail.
+///
+/// Two sources, and the order between them is the whole design. Some acts are landmarks by
+/// NATURE — a pull request's news is one, because a watch is the reason somebody is waiting
+/// — and nobody should have to mark those by hand. But a default nobody can refuse becomes
+/// noise the first time it is wrong, so a person's own verdict, recorded per message, wins
+/// over it in either direction: it can take a mark off an act that wears one, and put one on
+/// anything else that was said.
+///
+/// The verdict is stored, not the difference from the default. What is notable by nature is a
+/// rule this repository will change, and a stored difference would silently flip every
+/// message somebody had already decided about the moment it did.
+module Landmarks =
+
+    /// Whether this item is marked, as the rail draws it.
+    let marked (verdicts: Map<MessageId, bool>) (item: ConversationItem) : bool =
+        match verdicts |> Map.tryFind item.MessageId with
+        | Some said -> said
+        | None ->
+            match item.Kind with
+            | ConversationItemKind.ActNote facts -> facts.Notable
+            | ConversationItemKind.Message -> false
+
+    /// Mark this item, or unmark it.
+    ///
+    /// ONE verb, and it takes the item rather than the answer. A caller that read the current
+    /// state and wrote the opposite would be a caller holding the only copy of the rule about
+    /// what an unmarked-by-nature act defaults to — and the second caller has not read it.
+    let toggle (item: ConversationItem) (verdicts: Map<MessageId, bool>) : Map<MessageId, bool> =
+        verdicts |> Map.add item.MessageId (not (marked verdicts item))
+
+    /// The marked items of a conversation, in the order the conversation holds them.
+    let over (verdicts: Map<MessageId, bool>) (items: ConversationItem list) : ConversationItem list =
+        items |> List.filter (marked verdicts)
 
 type ConversationProjection =
     { Items : ConversationItem list
@@ -209,7 +253,8 @@ module ConversationProjection =
                           Body = sprintf "added repo %s" (RepoRef.value r.Repo)
                           Status = Complete
                           Kind =
-                            ConversationItemKind.ActNote { Detail = Some (sprintf "on branch %s" r.Branch) }
+                            ConversationItemKind.ActNote
+                                { Detail = Some (sprintf "on branch %s" r.Branch); Notable = false }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | SessionEvent.RepoRemoved r ->
@@ -220,7 +265,7 @@ module ConversationProjection =
                           Author = r.Actor
                           Body = sprintf "removed repo %s" (RepoRef.value r.Repo)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote { Detail = None }
+                          Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | SessionEvent.RepoBranchSwitched r ->
@@ -233,7 +278,7 @@ module ConversationProjection =
                             if r.Created then sprintf "created branch %s in %s" r.Branch (RepoRef.value r.Repo)
                             else sprintf "switched %s to branch %s" (RepoRef.value r.Repo) r.Branch
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote { Detail = None }
+                          Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
                           Woke = None } ] }
         // Named WorkSandboxes (Plan 15, stage 2) fold in for the repo notes' reason and
@@ -272,7 +317,8 @@ module ConversationProjection =
                                 { Detail =
                                     match List.choose id [ forwarded; realisation ] with
                                     | [] -> None
-                                    | parts -> Some (String.concat ". " parts) }
+                                    | parts -> Some (String.concat ". " parts)
+                                  Notable = false }
                           Offset = envelope.Offset
                           Woke = None } ] }
         // The other outcome of a declaration, beside the start above. Said in the refusal's
@@ -303,7 +349,8 @@ module ConversationProjection =
                                     match c.Granted with
                                     | []
                                     | [ _ ] -> None
-                                    | granted -> Some (String.concat "; " granted) }
+                                    | granted -> Some (String.concat "; " granted)
+                                  Notable = false }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | SessionEvent.RepoCapabilitiesApproved a ->
@@ -314,7 +361,7 @@ module ConversationProjection =
                           Author = a.Actor
                           Body = sprintf "approved what %s asks for" (RepoRef.value a.Repo)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote { Detail = None }
+                          Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | SessionEvent.RepoConfigRefused r ->
@@ -334,7 +381,7 @@ module ConversationProjection =
                           Status = Complete
                           Kind =
                             ConversationItemKind.ActNote
-                                { Detail = r.Sandbox |> Option.map (fun _ -> r.Reason) }
+                                { Detail = r.Sandbox |> Option.map (fun _ -> r.Reason); Notable = false }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | SessionEvent.WorkSandboxStopped s ->
@@ -345,7 +392,7 @@ module ConversationProjection =
                           Author = s.Actor
                           Body = sprintf "stopped sandbox %s" (SandboxRef.render s.Sandbox)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote { Detail = None }
+                          Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
                           Woke = None } ] }
         // Where new terminals start (Plan 25) folds in for the repo notes' reason: it is a
@@ -366,7 +413,7 @@ module ConversationProjection =
                                     "new terminals in %s start where the sandbox puts them"
                                     (SandboxRef.render p.Sandbox)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote { Detail = None }
+                          Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
                           Woke = None } ] }
         // A refusal reads in the timeline beside the acts that happened, attributed to the
@@ -381,7 +428,7 @@ module ConversationProjection =
                           Author = c.RejectedBy
                           Body = sprintf "refused %s" c.Summary
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote { Detail = c.Reason }
+                          Kind = ConversationItemKind.ActNote { Detail = c.Reason; Notable = false }
                           Offset = envelope.Offset
                           Woke = None } ] }
         // The MCP set changing (Plan 17). `ActorRef.System`, because nobody in the session
@@ -396,7 +443,7 @@ module ConversationProjection =
                           Author = ActorRef.System
                           Body = sprintf "you can now use the %s tools" (McpServerName.value m.Name)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote { Detail = None }
+                          Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | SessionEvent.McpServerUnavailable m ->
@@ -407,7 +454,7 @@ module ConversationProjection =
                           Author = ActorRef.System
                           Body = sprintf "the %s tools are no longer available" (McpServerName.value m.Name)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote { Detail = None }
+                          Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
                           Woke = None } ] }
         // Watched pull requests fold in for the repo notes' reason: a watch is a
@@ -428,7 +475,12 @@ module ConversationProjection =
                                         sprintf
                                             "%s, %s"
                                             (PrState.describe p.Initial.State)
-                                            (ChecksRollup.describe p.Initial.Checks)) }
+                                            (ChecksRollup.describe p.Initial.Checks))
+                                  // Where the waiting began. A landmark by nature, like the
+                                  // news that follows it — and unlike the unwatch below,
+                                  // which is where the story stops being told rather than a
+                                  // place worth coming back to.
+                                  Notable = true }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | SessionEvent.PrUnwatched p ->
@@ -439,7 +491,7 @@ module ConversationProjection =
                           Author = p.Actor
                           Body = sprintf "PR %s unwatched" (PrRef.render p.Pr)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote { Detail = None }
+                          Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
                           Woke = None } ] }
         // Attributed to the WATCHER rather than the envelope's System: the person whose
@@ -452,7 +504,7 @@ module ConversationProjection =
                           Author = p.Watcher
                           Body = sprintf "PR %s %s" (PrRef.render p.Pr) (PrTransition.describe p.Transition)
                           Status = Complete
-                          Kind = ConversationItemKind.ActNote { Detail = None }
+                          Kind = ConversationItemKind.ActNote { Detail = None; Notable = true }
                           Offset = envelope.Offset
                           Woke = None } ] }
         | AgentMessageStarted a ->
