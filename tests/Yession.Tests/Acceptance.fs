@@ -20,6 +20,7 @@ open Yession.Domain.Link
 open Yession.Domain.Terminals
 open Yession.Domain.Collab
 open Yession.Domain.Repos
+open Yession.Domain.Prs
 open Yession.Domain.Chat
 open Yession.Domain.Tools
 open Yession.Domain.Chat
@@ -215,6 +216,19 @@ let private representativeModel : ClientModel =
                           "dirty", CellFlag true ] ]
                   "work_environment",
                   FieldsOf [ "backend", CellText "srt"; "state", CellStatus ("running", ToneBusy) ] ] } }
+
+/// A session with watched pull requests, as the `pull_requests` query reports them — the
+/// only shape a browser has of them, and so the only shape the header strip can read.
+let private withPullRequests (rows: (string * QueryCell) list list) : ClientModel =
+    { representativeModel with
+        Queries =
+            { representativeModel.Queries with
+                Values = representativeModel.Queries.Values |> Map.add PrStatus.Columns.query (RowsOf rows) } }
+
+let private prRow (number: int) (state: string) (status: QueryCell) : (string * QueryCell) list =
+    [ PrStatus.Columns.pr, CellText (sprintf "octo/hello#%d" number)
+      PrStatus.Columns.state, CellStatus (state, ToneMuted)
+      PrStatus.Columns.status, status ]
 
 /// The composer when a PEER is the one writing: their draft is what you are in, yours (if any)
 /// is a summary you can open, and "new message" is the way out of collaborating.
@@ -935,6 +949,37 @@ let private uiChecklistTests =
         // A tone is how loudly a value is said, never what it says. What is pinned is the
         // HOOK and the word — not the ink, which is how the surface is built and what a
         // redesign is allowed to change.
+        // The header strip (the roster summary's twin, on the page a person is looking at).
+        // What it promises is that a session which owes something SAYS SO where the eye
+        // already is, and that pressing it reaches the rows behind the line.
+        testCase "a session that owes something says so in its header, and the line leads somewhere" <| fun () ->
+            let html = Support.render (withPullRequests [ prRow 377 "queued" (CellStatus ("ok", ToneMuted)) ])
+            let strip =
+                let start = html.IndexOf "data-pr-strip"
+                Expect.isTrue (start > 0) "the strip renders"
+                html.Substring (start, html.IndexOf ("</button>", start) - start)
+            Expect.isTrue (strip.Contains "#377 queued") "wearing the line the query's rows amount to"
+            Expect.isTrue (html.Contains "aria-label=\"Pull requests\"") "and it is a control with a name"
+
+        // Silence is the feature, here as on the roster: a strip that was always there would
+        // be a thing to stop seeing, and the point is that its presence means something.
+        testCase "a session with nothing owed has no header strip at all" <| fun () ->
+            let quiet = Support.render (withPullRequests [ prRow 1 "merged" (CellStatus ("ok", ToneMuted)) ])
+            Expect.isFalse (quiet.Contains "data-pr-strip") "watches that have all merged owe nothing"
+            let none = Support.render representativeModel
+            Expect.isFalse (none.Contains "data-pr-strip") "and a session watching nothing says nothing"
+
+        // The one rule the strip applies that the rows do not state outright, and the reason
+        // it reads the status cell's TONE rather than its sentence: the words in a health
+        // line belong to a provider and change with it.
+        testCase "a watch the session cannot read is said to be unreachable, over what it last said" <| fun () ->
+            let html =
+                Support.render (
+                    withPullRequests
+                        [ prRow 377 "queued" (CellStatus ("github rejected this credential", ToneBad)) ])
+            Expect.isTrue (html.Contains "#377 unreachable") "the strip says nobody is driving it"
+            Expect.isFalse (html.Contains "#377 queued") "and not the state it is stuck in"
+
         testCase "a cell that carries a verdict says so, and still says the word" <| fun () ->
             let html = Support.render representativeModel
             Expect.isTrue (html.Contains "data-query-tone=\"bad\"") "a row's toned cell reports its tone"
