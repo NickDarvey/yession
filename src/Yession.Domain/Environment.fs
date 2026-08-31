@@ -105,6 +105,31 @@ module SandboxRuntime =
             | Some command -> sprintf "%s running '%s'" what command
             | None -> what
 
+    /// The backend a WORK sandbox actually runs under, decided by its scope — and the
+    /// decision this codebase pivoted on: a repo-owned sandbox is WORK, and work runs in
+    /// a container. The session-owned `default` keeps the operator's configured light
+    /// confinement (srt/host) for the checkout and small edits; running a BUILD under
+    /// that confinement was driven end to end and died behind walls no grant can open
+    /// (GAPS: "srt work sandboxes do not run builds").
+    ///
+    /// A repo-owned declaration with no container is refused HERE, where the rule lives
+    /// and the cheap tier can reach it — not defaulted to an image that builds nothing,
+    /// which would turn a missing declaration into a sandbox that looks fine and fails
+    /// at the first command.
+    let backendFor
+        (configured: SandboxBackend)
+        (scope: SandboxScope)
+        (runtime: SandboxRuntime)
+        : Result<SandboxBackend, string> =
+        match scope, runtime with
+        | SessionOwned, _ -> Ok configured
+        | RepoOwned _, Container _ -> Ok DockerBackend
+        | RepoOwned repo, Confinement ->
+            Error (
+                sprintf
+                    "a repo's work sandbox is a container, and %s declares none — add a `container:` block (an image, or a build) to its yession.yaml"
+                    (RepoRef.value repo))
+
 /// Where a seeded file goes: a path inside the sandbox's OWN home, and nowhere else.
 ///
 /// Private, so the refusals below are the only way to hold one. A sandbox's home is a

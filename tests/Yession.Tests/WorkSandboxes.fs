@@ -70,7 +70,7 @@ let private registryWithSpecs (log: EventLog<SessionEvent>) (credentials: WorkSa
     let specs = ResizeArray<string * string option> ()
     let sandboxes =
         WorkSandboxes.create
-            { Backend = "fake"
+            { Backend = fun _ -> "fake"
               Credentials = credentials
               Create =
                 fun name spec env ->
@@ -86,7 +86,7 @@ let private registryWithSpecs (log: EventLog<SessionEvent>) (credentials: WorkSa
 /// what a host that could not scope a grant hands back.
 let private registryHolding (log: EventLog<SessionEvent>) (realisation: string list) =
     WorkSandboxes.create
-        { Backend = "fake"
+        { Backend = fun _ -> "fake"
           Credentials = []
           Create = fun _ _ _ -> Ok (fakeEnvironmentHolding realisation)
           Log = log
@@ -637,9 +637,42 @@ let private timelineTests =
                 Expect.equal (Codec.fromString Codec.sessionEventEnvelope json |> expect) envelope "unchanged by the wire"
     ]
 
+let private backendTests =
+    // The scope decides the backend (`SandboxRuntime.backendFor`): the session's own
+    // sandboxes keep whatever light confinement the operator configured; a repo's are
+    // WORK, and work runs in a container. Pinned here because everything downstream —
+    // the registry's describe, the composition's create — only ASKS.
+    let repo = RepoRef.create "octo/hello" |> expect
+    let container = Container { ContainerSpec.defaults with Image = Some { Name = "nixos/nix"; Tag = None } }
+    testList "the backend a scope gets" [
+        testCase "the session's own sandbox keeps the configured backend" (fun () ->
+            Expect.equal
+                (SandboxRuntime.backendFor SrtBackend SessionOwned Confinement)
+                (Ok SrtBackend)
+                "the default sandbox is the operator's light confinement"
+            Expect.equal
+                (SandboxRuntime.backendFor HostBackend SessionOwned container)
+                (Ok HostBackend)
+                "scope decides; the runtime is reconciled downstream")
+
+        testCase "a repo's sandbox is a container, whatever the session runs" (fun () ->
+            Expect.equal
+                (SandboxRuntime.backendFor SrtBackend (RepoOwned repo) container)
+                (Ok DockerBackend)
+                "repo-owned work runs under docker")
+
+        testCase "a repo's sandbox with no container is refused, naming the fix" (fun () ->
+            match SandboxRuntime.backendFor SrtBackend (RepoOwned repo) Confinement with
+            | Ok backend -> failwithf "started under %A instead of refusing" backend
+            | Error reason ->
+                Expect.isTrue (reason.Contains "octo/hello") "the refusal names the repo"
+                Expect.isTrue (reason.Contains "container") "and says what to declare")
+    ]
+
 let tests =
     testList "WorkSandboxes" [
         nameTests
+        backendTests
         normaliseTests
         ensureTests
         credentialTests

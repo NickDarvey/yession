@@ -222,8 +222,8 @@ let private makeSandboxes
     /// Host-family backends share it by write path instead (`sharedRepos`). The runtime
     /// union makes this branch structural rather than incidental: only the docker arm can
     /// name a mount, because only it has a container to mount into.
-    let withSessionRepos (requested: EnvironmentSpec) =
-        match workBackend with
+    let withSessionRepos (backend: SandboxBackend) (requested: EnvironmentSpec) =
+        match backend with
         | DockerBackend ->
             let container =
                 match requested.Runtime with
@@ -236,23 +236,30 @@ let private makeSandboxes
                             Mounts =
                                 container.Mounts
                                 @ [ { Source = HostPath reposDir
-                                      Target = Sandboxes.reposVisibleAt workBackend reposDir
+                                      Target = Sandboxes.reposVisibleAt backend reposDir
                                       Mode = ReadWrite } ] } }
         | HostBackend
         | SrtBackend -> requested
-    let sharedRepos =
-        match workBackend with
+    let sharedRepos (backend: SandboxBackend) =
+        match backend with
         | HostBackend
         | SrtBackend -> Some reposDir
         | DockerBackend -> None
     fun log ->
         let create (sandbox: SandboxRef) (requested: EnvironmentSpec) (credentialEnv: Map<string, string>) =
-            let workSpec = withSessionRepos requested
+            // The scope decides the backend (`SandboxRuntime.backendFor`): the session's
+            // own sandboxes keep the operator's configured light confinement; a repo's
+            // are work, and work runs in a container.
+            match SandboxRuntime.backendFor workBackend (SandboxRef.scope sandbox) requested.Runtime with
+            | Error e -> Error e
+            | Ok backend ->
+
+            let workSpec = withSessionRepos backend requested
             // The backend's own container/volume namespace has to differ per sandbox, or two
             // of them under docker would fight over one container name — and now that a repo
             // can declare its own, two REPOS' same-named sandboxes would too. The rule lives
             // on `SandboxRef`, where a cheap test reaches it; this composition only asks.
-            match Sandboxes.forBackend workBackend (SandboxRef.objectName sessionId sandbox) workSpec with
+            match Sandboxes.forBackend backend (SandboxRef.objectName sessionId sandbox) workSpec with
             | Error e -> Error e
             | Ok createSandbox ->
                 let workspace = workspaceFor sandbox
@@ -260,7 +267,7 @@ let private makeSandboxes
                 // Its own HOME, created here beside its workspace. Docker's image brings a
                 // home this process did not make, so only the host-family backends get one.
                 let home =
-                    match workBackend with
+                    match backend with
                     | HostBackend
                     | SrtBackend -> Some (Sandboxes.SessionLayout.homeFor dataDir sandbox)
                     | DockerBackend -> None
@@ -269,10 +276,10 @@ let private makeSandboxes
                 home |> Option.iter (fun path -> Sandboxes.SessionLayout.prepareHome path workSpec.Files)
                 let prepare =
                     Sandboxes.preparePolicy
-                        workBackend
+                        backend
                         resolveSecretRef
                         workspace
-                        sharedRepos
+                        (sharedRepos backend)
                         home
                         grantsFor
                         workSpec
@@ -291,10 +298,16 @@ let private makeSandboxes
                                 | Ok policy ->
                                     return Ok { policy with Env = Sandboxes.mergeEnv policy.Env credentialEnv }
                             })
-                        (Sandboxes.summaryFor workBackend workSpec)
+                        (Sandboxes.summaryFor backend workSpec)
                         (sprintf "env-%s" (SandboxRef.objectName sessionId sandbox)))
         match WorkSandboxes.create
-                { Backend = SandboxBackend.describe workBackend
+                { Backend =
+                    // Described by SCOPE, the same split `backendFor` decides on: a
+                    // repo-owned entry is docker whether or not it has started yet.
+                    fun (ref: SandboxRef) ->
+                        match SandboxRef.scope ref with
+                        | SessionOwned -> SandboxBackend.describe workBackend
+                        | RepoOwned _ -> SandboxBackend.describe DockerBackend
                   // The credentials this session knows how to forward. GitHub is the one
                   // Plan 14 left deferred, and it is what makes `git push` from a terminal
                   // work; resolution is the Plan 08 precedence, unchanged.

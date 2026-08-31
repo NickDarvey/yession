@@ -216,7 +216,7 @@ let tests =
                       Realisation = fun () -> [] }
                 let makeSandboxes log =
                     WorkSandboxes.create
-                        { Backend = "scripted"
+                        { Backend = fun _ -> "scripted"
                           Credentials = []
                           Create = fun name _ _ -> Ok (environmentNamed (SandboxRef.render name))
                           Log = log
