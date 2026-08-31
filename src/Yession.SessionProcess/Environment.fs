@@ -71,22 +71,43 @@ module SessionEnvironment =
             match SandboxVerification.plan policy with
             | [] -> return Ok ()
             | checks ->
-                let said = System.Text.StringBuilder ()
-                let exec =
-                    { Executable = "/bin/sh"
-                      Arguments = [ "-c"; SandboxVerification.program checks ]
-                      Env = Map.empty
-                      WorkingDirectory = None }
-                match! sandbox.Spawn exec (fun (_, chunk) -> said.Append chunk |> ignore) with
-                | Error reason ->
-                    return Error (sprintf "this sandbox cannot run a command at all: %s" reason)
-                | Ok handle ->
-                    match! handle.Exited with
-                    | SandboxExited 0 -> return Ok ()
-                    | SandboxExited _ ->
-                        return Error (SandboxVerification.explain checks (said.ToString ()))
-                    | SandboxRunFailed reason ->
-                        return Error (sprintf "this sandbox cannot run a command at all: %s" reason)
+                // A container's "started" is not its "ready": its own start command may
+                // still be running when the first exec lands, and a docker exec that
+                // races it fails with daemon-level garbage rather than a check's index
+                // (measured: the same sandbox start won or lost this race per coin flip
+                // while its cmd was still materialising /etc). So a failure that NAMES a
+                // check is final — the sandbox is up and the grant is not held — and a
+                // failure that names nothing is retried briefly before it is believed.
+                let attempt () =
+                    async {
+                        let said = System.Text.StringBuilder ()
+                        let exec =
+                            { Executable = "/bin/sh"
+                              Arguments = [ "-c"; SandboxVerification.program checks ]
+                              Env = Map.empty
+                              WorkingDirectory = None }
+                        match! sandbox.Spawn exec (fun (_, chunk) -> said.Append chunk |> ignore) with
+                        | Error reason ->
+                            return Error (true, sprintf "this sandbox cannot run a command at all: %s" reason)
+                        | Ok handle ->
+                            match! handle.Exited with
+                            | SandboxExited 0 -> return Ok ()
+                            | SandboxExited _ ->
+                                let output = said.ToString ()
+                                return Error (SandboxVerification.named checks output, SandboxVerification.explain checks output)
+                            | SandboxRunFailed reason ->
+                                return Error (true, sprintf "this sandbox cannot run a command at all: %s" reason)
+                    }
+                let rec go (left: int) =
+                    async {
+                        match! attempt () with
+                        | Ok () -> return Ok ()
+                        | Error (final, reason) when final || left <= 1 -> return Error reason
+                        | Error _ ->
+                            do! Async.Sleep 500
+                            return! go (left - 1)
+                    }
+                return! go 6
         }
 
     let create
