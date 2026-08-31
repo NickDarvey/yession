@@ -31,6 +31,18 @@ open Yession.Tests.Support
 // and the slot owner in the collaboration tests.
 let private ada = PeerId.create "ada" |> expect
 
+/// One page holding one thing Ada said. The client folds its conversation from event pages,
+/// and a mark needs an item to sit on — `Landmarks.toggle` reads the item's own default.
+let private said (messageId: MessageId) (body: string) : EventPage<SessionEvent> =
+    let envelope : EventEnvelope<SessionEvent> =
+        { EventId = EventId.fresh ()
+          SessionId = SessionId.create "sync-session" |> expect
+          Offset = EventOffset.zero
+          Actor = PeerRef ada
+          Timestamp = DateTimeOffset.UtcNow
+          Event = MessageSent { MessageId = messageId; QueueId = None; Author = PeerRef ada; Body = body } }
+    { Events = [ envelope ]; LastOffset = Some envelope.Offset; IsEnd = true }
+
 let private syncBoth (a: Y.Doc) (b: Y.Doc) =
     Y.applyUpdate (b, Y.encodeStateAsUpdate a)
     Y.applyUpdate (a, Y.encodeStateAsUpdate b)
@@ -216,6 +228,31 @@ let private codecTests =
             match decoded.Pending |> Map.tryFind queueId with
             | Some entry -> Expect.isNone entry.Size "no viewport, no claim"
             | None -> failwith "the command was not queued at all"
+
+        // A landmark is a property of the SESSION, so it has to reach the doc: a mark one
+        // person could not see would be a bookmark in a shared book that only opens for one
+        // reader.
+        testCase "a mark crosses the sync boundary" <| fun () ->
+            let doc = Y.Doc.Create ()
+            let p = Harness.run (Client.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            let messageId = MessageId.create "msg-1" |> expect
+            p.Dispatch (user (EventsPageMsg (said messageId "ship it")))
+            p.Dispatch (user (ToggleLandmarkMsg messageId))
+            let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
+            Expect.equal (Map.tryFind messageId decoded.Landmarks) (Some true) "the doc carries what was marked"
+
+        // And the answer that a set could not have carried. Taking the mark off an act that
+        // wears one by nature has to reach the doc as a NO — as an absence it would read as
+        // "nobody has decided", and the act's own default would put the mark straight back.
+        testCase "taking a mark off crosses as a no, never as an absence" <| fun () ->
+            let doc = Y.Doc.Create ()
+            let p = Harness.run (Client.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            let messageId = MessageId.create "msg-1" |> expect
+            p.Dispatch (user (EventsPageMsg (said messageId "ship it")))
+            p.Dispatch (user (ToggleLandmarkMsg messageId))
+            p.Dispatch (user (ToggleLandmarkMsg messageId))
+            let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
+            Expect.equal (Map.tryFind messageId decoded.Landmarks) (Some false) "an answer, not a gap"
 
         testCase "the collaborative title round-trips through the codec" <| fun () ->
             let doc = Y.Doc.Create ()

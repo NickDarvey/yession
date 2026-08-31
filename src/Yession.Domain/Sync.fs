@@ -27,7 +27,8 @@ type AdaptiveSyncedState =
       SharedBrief : cval<SharedBrief option>
       TerminalDrafts : cmap<string, TerminalDraft>
       Pending : cmap<string, PendingAct>
-      Model : cval<ModelId option> }
+      Model : cval<ModelId option>
+      Landmarks : cmap<string, bool> }
 
 module SyncedStateSync =
 
@@ -63,6 +64,9 @@ module SyncedStateSync =
     let private pendingByKey (m: SyncedSessionState) : HashMap<string, PendingAct> =
         m.Pending |> Map.toSeq |> Seq.map (fun (k, v) -> QueueId.value k, v) |> HashMap.ofSeq
 
+    let private landmarksByKey (m: SyncedSessionState) : HashMap<string, bool> =
+        m.Landmarks |> Map.toSeq |> Seq.map (fun (k, v) -> MessageId.value k, v) |> HashMap.ofSeq
+
     /// `Create` for Ylmish's options: build the adaptive companion from a model.
     let create (m: SyncedSessionState) : AdaptiveSyncedState =
         { Drafts = cmap (draftsByKey m)
@@ -71,7 +75,8 @@ module SyncedStateSync =
           SharedBrief = cval m.SharedBrief
           TerminalDrafts = cmap (terminalDraftsByKey m)
           Pending = cmap (pendingByKey m)
-          Model = cval m.Model }
+          Model = cval m.Model
+          Landmarks = cmap (landmarksByKey m) }
 
     /// `Update` for Ylmish's options: fold the next model into the companion. Setting
     /// `cmap.Value` yields keyed deltas, so only changed entries re-encode.
@@ -83,6 +88,7 @@ module SyncedStateSync =
         a.TerminalDrafts.Value <- terminalDraftsByKey m
         a.Pending.Value <- pendingByKey m
         a.Model.Value <- m.Model
+        a.Landmarks.Value <- landmarksByKey m
 
     /// Per-draft encoding: the map key *is* the author (one draft per client), so `author` is
     /// re-stated only because an empty object would write no Yjs key at all (Ylmish creates a
@@ -142,6 +148,15 @@ module SyncedStateSync =
               Encode.string
                   (AVal.constant (q.Size |> Option.map Size.format |> Option.defaultValue "")) ]
 
+    /// One person's verdict about one message. The map key IS the message, so the entry
+    /// exists to carry the verdict alone — and it is written as a WORD rather than as the
+    /// presence of a key, because "nobody has decided" and "somebody decided no" are
+    /// different answers and only the second overrides an act that is notable by nature.
+    /// A string like every other field here: the doc carries text, and the domain type is
+    /// where it becomes a value.
+    let private encodeLandmark (marked: bool) : Encoded =
+        Encode.object [ "marked", Encode.string (AVal.constant (if marked then "yes" else "no")) ]
+
     /// The session's model choice: one optional top-level REGISTER, which Ylmish lays out as
     /// a key in the argless root map rather than as a named root type (`Binding.attach`'s
     /// LAYOUT note — only structural containers get named roots). A plain string rather than
@@ -167,7 +182,8 @@ module SyncedStateSync =
               // Named for what they hold rather than for the one subject kind that used to
               // be the only one (Plan 15, stage 3).
               "pending", Encode.map encodePendingAct (a.Pending :> amap<_, _>)
-              "model", Encode.option encodeModel a.Model ]
+              "model", Encode.option encodeModel a.Model
+              "landmarks", Encode.map encodeLandmark (a.Landmarks :> amap<_, _>) ]
 
     /// The doc-side field shapes, before identifier validation. Bodies are omitted here: they
     /// are top-level `Y.XmlFragment` roots the app resolves via the `BodyRegistry`, never part
@@ -237,6 +253,12 @@ module SyncedStateSync =
                   Size = defaultArg size "" }
         }
 
+    let private decodeLandmark<'m> : Decoder<'m, string> =
+        Decode.object {
+            let! marked = Decode.object.optional "marked" Decode.string
+            return defaultArg marked ""
+        }
+
     /// A model register the smart constructor refuses reads back as ABSENT — the provider's
     /// default — rather than as a model nothing can run: the fallback is always something a
     /// turn can actually do.
@@ -292,6 +314,19 @@ module SyncedStateSync =
             | Error _ -> None
         else None
 
+    /// Anything that is not one of the two words is DROPPED rather than read as a no: an
+    /// entry nobody can interpret must leave the act's own answer standing, and reading it as
+    /// "unmarked" would silently strip the mark off every notable act a garbled write touched.
+    /// Same totality rule as every other entry here — the doc is shared with peers we don't
+    /// control.
+    let private landmarksToDomain (h: HashMap<string, string>) : Map<MessageId, bool> =
+        (Map.empty, HashMap.toSeq h)
+        ||> Seq.fold (fun acc (key, raw) ->
+            match MessageId.create key, raw with
+            | Ok id, "yes" -> acc |> Map.add id true
+            | Ok id, "no" -> acc |> Map.add id false
+            | _ -> acc)
+
     let private pendingToDomain (h: HashMap<string, PendingFields>) : Map<QueueId, PendingAct> =
         (Map.empty, HashMap.toSeq h)
         ||> Seq.fold (fun acc (key, f) ->
@@ -332,6 +367,7 @@ module SyncedStateSync =
             let! terminalDrafts = Decode.object.optional "terminalDrafts" (Decode.map decodeTerminalDraft)
             let! pending = Decode.object.optional "pending" (Decode.map decodePendingAct)
             let! model = Decode.object.optional "model" Decode.string
+            let! landmarks = Decode.object.optional "landmarks" (Decode.map decodeLandmark)
             return
                 { Drafts = drafts |> Option.map draftsToDomain |> Option.defaultValue Map.empty
                   Queue = queue |> Option.map queueToDomain |> Option.defaultValue Map.empty
@@ -340,7 +376,8 @@ module SyncedStateSync =
                   TerminalDrafts =
                     terminalDrafts |> Option.map terminalDraftsToDomain |> Option.defaultValue Map.empty
                   Pending = pending |> Option.map pendingToDomain |> Option.defaultValue Map.empty
-                  Model = modelToDomain model }
+                  Model = modelToDomain model
+                  Landmarks = landmarks |> Option.map landmarksToDomain |> Option.defaultValue Map.empty }
         }
 
     open Fable.Core
@@ -365,6 +402,7 @@ module SyncedStateSync =
         if shareHas doc "sharedBrief" then (doc.getMap "sharedBrief" : Yjs.Y.Map<obj>) |> ignore
         if shareHas doc "terminalDrafts" then (doc.getMap "terminalDrafts" : Yjs.Y.Map<obj>) |> ignore
         if shareHas doc "pending" then (doc.getMap "pending" : Yjs.Y.Map<obj>) |> ignore
+        if shareHas doc "landmarks" then (doc.getMap "landmarks" : Yjs.Y.Map<obj>) |> ignore
 
     /// Read one string field off a keyed-map entry, `""` when absent — the shape every
     /// structural read below repeats.
@@ -435,6 +473,7 @@ module SyncedStateSync =
                   Order = entry.get "order" |> Option.map (unbox<float>) |> Option.defaultValue 0.0
                   Background = entryString entry "background"
                   Size = entryString entry "size" })
+        let landmarksH = foldRoot doc "landmarks" (fun entry -> entryString entry "marked")
         // Off the ARGLESS root map, not off a named root: a top-level register lives there
         // (see `encodeModel`), so `doc.getMap "model"` would silently mint an empty map and
         // read back as "nobody has chosen" for ever.
@@ -449,7 +488,8 @@ module SyncedStateSync =
               SharedBrief = brief
               TerminalDrafts = terminalDraftsToDomain terminalDraftsH
               Pending = pendingToDomain pendingH
-              Model = modelToDomain model }
+              Model = modelToDomain model
+              Landmarks = landmarksToDomain landmarksH }
 
     /// The origin tag on the Session Process's own doc writes (the drain's removals),
     /// distinct from the remote-apply origin so they broadcast like any local update.

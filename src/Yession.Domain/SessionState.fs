@@ -141,7 +141,18 @@ type SyncedSessionState =
       /// `None` — the absence of the register — is "the provider's own default". The
       /// default is the absence again, so a session nobody has configured carries nothing
       /// restating what the provider already decides.
-      Model       : ModelId option }
+      Model       : ModelId option
+      /// Which messages somebody has marked for the rail, and which they have unmarked.
+      ///
+      /// Collaborative because a landmark is a property of the SESSION: the rail is the same
+      /// rail for everybody reading it, and a mark one person could not see would be a
+      /// bookmark in a shared book that only opens for one reader. Keyed by message, so two
+      /// peers marking different things — even across a partition — never conflict.
+      ///
+      /// A VERDICT rather than a set of marked ids: `false` is how somebody takes the mark
+      /// off an act that wears one by nature (`Landmarks`), which a set cannot say. Absent
+      /// is "nobody has decided", which is not the same as "no".
+      Landmarks   : Map<MessageId, bool> }
 
 module SyncedSessionState =
 
@@ -154,7 +165,8 @@ module SyncedSessionState =
           SharedBrief = None
           TerminalDrafts = Map.empty
           Pending = Map.empty
-          Model = None }
+          Model = None
+          Landmarks = Map.empty }
 
 /// The queue's total order. `Order` is a float register; ties (possible when two peers
 /// mint concurrently) are broken by `QueueId`, so the order is always a total,

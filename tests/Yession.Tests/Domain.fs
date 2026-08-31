@@ -546,7 +546,7 @@ let private repoTests =
                   Author = ActorRef.Agent
                   Body = "started sandbox work (srt)"
                   Status = Complete
-                  Kind = ConversationItemKind.ActNote { Detail = Some "forwarding github from user:ada" }
+                  Kind = ConversationItemKind.ActNote { Detail = Some "forwarding github from user:ada"; Notable = false }
                   Offset = EventOffset.create 1L |> expect
                   Woke = None }
             Expect.equal
@@ -566,7 +566,7 @@ let private repoTests =
                   Offset = EventOffset.create 1L |> expect
                   Woke = None }
             Expect.equal
-                (ConversationItem.said (item (ConversationItemKind.ActNote { Detail = None })))
+                (ConversationItem.said (item (ConversationItemKind.ActNote { Detail = None; Notable = false })))
                 "removed repo octo/hello"
                 "an act with one clause"
             Expect.equal
@@ -625,6 +625,58 @@ let private repoTests =
                 Expect.equal item.Body "asks for /nix, read-only" "the grant itself"
                 Expect.equal (noteDetail item) None "and no second line restating it"
             | other -> failwithf "expected one note, got %A" other
+    ]
+
+let private landmarkTests =
+    let item id kind : ConversationItem =
+        { MessageId = MessageId.create id |> expect
+          Author = ActorRef.Agent
+          Body = "something happened"
+          Status = Complete
+          Kind = kind
+          Offset = EventOffset.create 1L |> expect
+          Woke = None }
+    let notable = item "n" (ConversationItemKind.ActNote { Detail = None; Notable = true })
+    let ordinary = item "o" (ConversationItemKind.ActNote { Detail = None; Notable = false })
+    let said = item "s" ConversationItemKind.Message
+    testList "Landmarks (the rail's marks)" [
+        // The default half. A watch is the reason somebody is waiting, so its news is worth a
+        // stroke without anybody having asked for one.
+        testCase "an act that is notable by nature is marked with nobody having said anything" <| fun () ->
+            Expect.isTrue (Landmarks.marked Map.empty notable) "marked"
+            Expect.isFalse (Landmarks.marked Map.empty ordinary) "and an ordinary act is not"
+
+        // The half that makes the default affordable. A default nobody can refuse becomes
+        // noise the first time it is wrong.
+        testCase "a person's no takes the mark off an act that wears one by nature" <| fun () ->
+            let verdicts = Map.ofList [ notable.MessageId, false ]
+            Expect.isFalse (Landmarks.marked verdicts notable) "their answer, not the act's"
+
+        // And the other direction: anything said can be marked, which is what makes the rail
+        // a bookmark rather than a feed of what this repository thinks is important.
+        testCase "a person's yes marks something nothing would have marked" <| fun () ->
+            let verdicts = Map.ofList [ said.MessageId, true ]
+            Expect.isTrue (Landmarks.marked verdicts said) "a message somebody chose"
+
+        // `toggle` takes the ITEM, so the caller never has to know what it defaulted to —
+        // which is the whole reason the default and the verdict are read in one place.
+        testCase "toggling an act that is notable by nature records the no" <| fun () ->
+            let verdicts = Landmarks.toggle notable Map.empty
+            Expect.equal (Map.tryFind notable.MessageId verdicts) (Some false) "recorded, not merely absent"
+
+        // Absence and no are different answers, so coming back from a no is a yes rather
+        // than a delete — and a later change to what is notable by nature cannot silently
+        // reverse a decision somebody has already made.
+        testCase "toggling it back records the yes, rather than forgetting the answer" <| fun () ->
+            let verdicts = Map.empty |> Landmarks.toggle notable |> Landmarks.toggle notable
+            Expect.equal (Map.tryFind notable.MessageId verdicts) (Some true) "an answer either way"
+
+        testCase "the marked items keep the order the conversation holds them in" <| fun () ->
+            let verdicts = Map.ofList [ said.MessageId, true ]
+            Expect.equal
+                (Landmarks.over verdicts [ said; ordinary; notable ] |> List.map (fun i -> i.MessageId))
+                [ said.MessageId; notable.MessageId ]
+                "both marks, in timeline order"
     ]
 
 let private prWatchTests =
@@ -888,6 +940,36 @@ let private prWatchTests =
             Expect.isTrue
                 (proj.Items |> List.forall (fun i -> match i.Kind with ConversationItemKind.ActNote _ -> true | _ -> false))
                 "all notes"
+
+        // Which acts arrive on the rail without anybody asking. Deliberately a short list:
+        // a rail that marks everything marks nothing. A watch and its news are on it because
+        // a watch is the reason somebody is waiting; the unwatch is not, because it is where
+        // the story stops being told rather than a place worth coming back to.
+        testCase "a watch and its news are landmarks; letting it go is not" <| fun () ->
+            let notable (item: ConversationItem) =
+                match item.Kind with
+                | ConversationItemKind.ActNote facts -> facts.Notable
+                | ConversationItemKind.Message -> false
+            let envelopes =
+                [ SessionEvent.PrWatched
+                    { MessageId = msg "w1"; Pr = pr; Initial = snapshotOf PrOpen ChecksPending false; Actor = PeerRef ada }
+                  SessionEvent.PrTransitioned
+                    { MessageId = msg "w2"
+                      Pr = pr
+                      Transition = PrTransition.Merged
+                      State = PrMerged
+                      Checks = ChecksGreen
+                      Watcher = PeerRef ada }
+                  SessionEvent.PrUnwatched { MessageId = msg "w3"; Pr = pr; Actor = PeerRef ada } ]
+                |> List.mapi (fun i event ->
+                    { EventId = EventId.fresh ()
+                      SessionId = SessionId.create "pr-session" |> expect
+                      Offset = EventOffset.create (int64 (i + 1)) |> expect
+                      Actor = ActorRef.SessionProcess
+                      Timestamp = DateTimeOffset (2026, 8, 27, 10, 0, 0, TimeSpan.Zero)
+                      Event = event })
+            let proj, _ = ConversationProjection.applyEvents None envelopes ConversationProjection.empty
+            Expect.equal (proj.Items |> List.map notable) [ true; true; false ] "watched, its news, then let go"
 
         testCase "a PrTransitioned on the wire is the shape it will always be" <| fun () ->
             // Pinned as a literal, not round-tripped: what a durable log needs is that the
@@ -1624,6 +1706,7 @@ let tests =
         envelopeSerializationTests
         conversationProjectionTests
         repoTests
+        landmarkTests
         prWatchTests
         deliveryFilterTests
         shellProfileTests
