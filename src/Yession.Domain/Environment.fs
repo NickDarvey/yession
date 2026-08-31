@@ -323,10 +323,26 @@ module SandboxRequest =
                     (list (running.Spec.Wants |> List.map ResourceName.value))
                     (list (wanted.Spec.Wants |> List.map ResourceName.value))
               if running.Spec.EnvironmentVariables <> wanted.Spec.EnvironmentVariables then
-                sprintf
-                    "its environment sets %s, not %s"
-                    (names running.Spec.EnvironmentVariables)
-                    (names wanted.Spec.EnvironmentVariables)
+                // Names, never values — a value is the one thing a refusal must not
+                // print. But when the two asks name the SAME variables and differ only
+                // in what they say, listing the names twice produced "sets NIX_CONFIG,
+                // not NIX_CONFIG" on a live session: a sentence that reads as a bug in
+                // the refusal rather than a difference in the ask. Say which variables
+                // moved instead.
+                let runningNames = running.Spec.EnvironmentVariables |> Map.toList |> List.map fst
+                let wantedNames = wanted.Spec.EnvironmentVariables |> Map.toList |> List.map fst
+                if runningNames = wantedNames then
+                    let moved =
+                        runningNames
+                        |> List.filter (fun name ->
+                            Map.tryFind name running.Spec.EnvironmentVariables
+                            <> Map.tryFind name wanted.Spec.EnvironmentVariables)
+                    sprintf "its environment sets a different value for %s" (list moved)
+                else
+                    sprintf
+                        "its environment sets %s, not %s"
+                        (names running.Spec.EnvironmentVariables)
+                        (names wanted.Spec.EnvironmentVariables)
               // The runtime is a union, so a difference in it can be the CASE as well as a
               // field — which is why it is described rather than compared field by field.
               if SandboxRuntime.describe running.Spec.Runtime <> SandboxRuntime.describe wanted.Spec.Runtime then

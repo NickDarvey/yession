@@ -1645,6 +1645,25 @@ let private sandboxRequestTests =
                     (SandboxRequest.differences variant SandboxRequest.defaults)
                     (sprintf "and so is a '%s' difference the other way round" name)
 
+        // Names, never values — but two asks naming the SAME variables used to refuse
+        // with "sets NIX_CONFIG, not NIX_CONFIG", a sentence that reads as a bug in the
+        // refusal rather than a difference in the ask (measured on a live session, on
+        // exactly that variable). The clause now says WHICH variable moved, and still
+        // never what either side set it to.
+        testCase "a value-only environment difference names the variable, not the value" <| fun () ->
+            let asking value =
+                { SandboxRequest.defaults with
+                    Spec =
+                        { EnvironmentSpec.defaults with
+                            EnvironmentVariables = Map.ofList [ "NIX_CONFIG", PlainValue value ] } }
+            match SandboxRequest.differences (asking "a") (asking "b") with
+            | [ clause ] ->
+                Expect.isTrue (clause.Contains "NIX_CONFIG") (sprintf "names the variable, said: %s" clause)
+                Expect.isTrue (clause.Contains "different value") (sprintf "and says what kind of difference, said: %s" clause)
+                Expect.isFalse (clause.Contains "not NIX_CONFIG") (sprintf "never the name against itself, said: %s" clause)
+                Expect.isFalse (clause.Contains "\"a\"" || clause.Contains "= a") (sprintf "and never a value, said: %s" clause)
+            | other -> failwithf "expected one clause, got %A" other
+
         // The backstop, on the case that reaches it: two asks that describe the same way and
         // still are not the same ask. It says less, and that is the point — a refusal that
         // said nothing here would let the registry treat them as one sandbox.
