@@ -583,6 +583,17 @@ module ResourceProfile =
         |> List.map (fun name -> ResourceClosure.leaves (closureOf declarations name))
         |> List.fold Set.union Set.empty
 
+    /// What a sandbox's two-posture selection comes to on THIS profile: everything it
+    /// USES — a name missing from the profile refuses in `resolve`, and that refusal is
+    /// the ceiling — plus whatever it WANTS that the profile declares. A want is an
+    /// optimisation by declaration: selected where offered, silently absent where not,
+    /// which is what lets a repo name a warm cache without breaking on every host that
+    /// offers none. Written HERE because two callers resolve selections (the policy and
+    /// the approval prompt), and a filter they each wrote is a filter that drifts.
+    let selected (ResourceProfile declarations) (uses: ResourceName list) (wants: ResourceName list) : ResourceName list =
+        uses @ (wants |> List.filter (fun name -> Map.containsKey name declarations))
+        |> List.distinct
+
     /// A repo's selection, flattened.
     ///
     /// Total after `load` but for the two things load could not see: a name the repo

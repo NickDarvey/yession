@@ -53,6 +53,12 @@ type SandboxDecl =
       /// never obtain anything, and an operator could not offer a path without forcing it on
       /// every sandbox.
       Uses : ResourceName list
+      /// Resources selected IF the host offers them — `EnvironmentSpec.Wants` carries the
+      /// posture: an optimisation the same file can name everywhere, warm where the
+      /// operator made it so and silently absent where not. A misspelled want is
+      /// therefore never caught, which is the cost of the posture; a thing the sandbox
+      /// NEEDS goes in `uses`, where a missing name refuses.
+      Wants : ResourceName list
       /// Files to write into the sandbox's own home before anything runs in it.
       ///
       /// The one thing here a repo may write freely that is not a name, and it is not an
@@ -75,6 +81,7 @@ module SandboxDecl =
           WorkingDirectory = None
           EnvironmentVariables = Map.empty
           Uses = []
+          Wants = []
           Files = Map.empty
           Forward = [] }
 
@@ -135,6 +142,7 @@ module SandboxDecl =
                   if decl.WorkingDirectory.IsSome then "workdir", Encode.string decl.WorkingDirectory.Value
                   if not (Map.isEmpty decl.EnvironmentVariables) then "env", Encode.object env
                   if not (List.isEmpty decl.Uses) then "uses", strings (decl.Uses |> List.map ResourceName.value)
+                  if not (List.isEmpty decl.Wants) then "wants", strings (decl.Wants |> List.map ResourceName.value)
                   if not (Map.isEmpty decl.Files) then
                     "files",
                     Encode.object (
@@ -198,6 +206,7 @@ module SandboxDecl =
                 { WorkingDirectory = workingDirectory
                   EnvironmentVariables = decl.EnvironmentVariables
                   Uses = decl.Uses
+                  Wants = decl.Wants
                   Files = decl.Files
                   Runtime =
                     match decl.Container with
@@ -377,7 +386,7 @@ module ConfigFile =
                   Mounts = get.Optional.Field "volumes" (Decode.list mount) |> Option.defaultValue []
                   Command = get.Optional.Field "cmd" Decode.string }))
 
-    let private sandboxKeys = [ "container"; "workdir"; "env"; "uses"; "files"; "forward" ]
+    let private sandboxKeys = [ "container"; "workdir"; "env"; "uses"; "wants"; "files"; "forward" ]
 
     /// `files:` — a path inside the sandbox's home to the content written there.
     ///
@@ -405,6 +414,7 @@ module ConfigFile =
                   EnvironmentVariables =
                     get.Optional.Field "env" environment |> Option.defaultValue Map.empty
                   Uses = get.Optional.Field "uses" resourceNames |> Option.defaultValue []
+                  Wants = get.Optional.Field "wants" resourceNames |> Option.defaultValue []
                   Files = get.Optional.Field "files" seededFiles |> Option.defaultValue Map.empty
                   Forward = get.Optional.Field "forward" stringList |> Option.defaultValue [] }))
 

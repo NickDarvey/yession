@@ -578,7 +578,7 @@ let preparePolicy
     // sandbox itself selected. ONE function rather than a list and a resolver, because the
     // two are the same question asked about different names, and a caller that could resolve
     // one without the other would be a caller that could forget half.
-    (grantsFor: ResourceName list -> Result<ResourceLeaf list, string>)
+    (grantsFor: ResourceName list -> ResourceName list -> Result<ResourceLeaf list, string>)
     (spec: EnvironmentSpec)
     : unit -> Async<Result<SandboxPolicy, string>> =
     fun () ->
@@ -586,7 +586,7 @@ let preparePolicy
             match! resolveVariables resolveSecret spec.EnvironmentVariables with
             | Error e -> return Error e
             | Ok resolved ->
-                match grantsFor spec.Uses with
+                match grantsFor spec.Uses spec.Wants with
                 | Error e -> return Error e
                 | Ok granted ->
                     return policyFor backend (limitsHere backend) (ambientEnv ()) resolved workspace reposDir home granted spec

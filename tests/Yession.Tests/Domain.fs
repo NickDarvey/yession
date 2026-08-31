@@ -1230,6 +1230,34 @@ let private configTests =
                 |> fun decl -> (decl.Container |> Option.get).Mounts |> List.map (fun m -> m.Source)
             Expect.equal (mountsOf (volume "workspace")) [ SessionWorkspace ] "its own checkout, by name"
 
+        // The two postures a selection has. `uses` is a need — a missing name refuses,
+        // that refusal is the ceiling — and `wants` is an optimisation by declaration:
+        // selected where the host offers it, silently absent where not, so one file
+        // works cold anywhere and warm where the operator chose.
+        testCase "a wants selection decodes and rides the request beside uses" <| fun () ->
+            let file =
+                ConfigFile.parse
+                    """{ "version": 2,
+                         "sandboxes": { "dev": { "uses": [ "npm" ], "wants": [ "warm-store" ] } } }"""
+                |> expect
+            let decl = file.Sandboxes |> Map.find (sandboxName "dev")
+            let request = SandboxDecl.toRequest (Some "/repos/octo/hello") decl |> expect
+            Expect.equal (request.Spec.Uses |> List.map ResourceName.value) [ "npm" ] "the need"
+            Expect.equal (request.Spec.Wants |> List.map ResourceName.value) [ "warm-store" ] "and the wish, apart"
+
+        testCase "a want is selected where offered and absent where not, uses untouched" <| fun () ->
+            // Built through the real loader so `selected` is exercised against the one
+            // shape it ever sees in production.
+            let profile =
+                OperatorProfile.parse
+                    """{ "version": 1, "resources": { "offered": { "endpoint": "example.com" } } }"""
+                |> expect
+            let name raw = ResourceName.create raw |> expect
+            Expect.equal
+                (ResourceProfile.selected profile.Resources [ name "needed" ] [ name "offered"; name "absent" ])
+                [ name "needed"; name "offered" ]
+                "the offered want joins the selection; the absent one vanishes; the need stays whether or not it resolves later"
+
         // The file's whole claim: it says nothing a command could not be told. So what a
         // declaration becomes is the ask itself, with the one thing a file cannot know —
         // where the session put the checkout — filled in.

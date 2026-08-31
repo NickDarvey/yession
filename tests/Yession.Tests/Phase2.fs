@@ -1534,7 +1534,7 @@ let private hostEnvironment (log: Yession.SessionProcess.EventLog<SessionEvent>)
     Yession.SessionProcess.SessionEnvironment.create
         log
         createSandbox
-        (Sandboxes.preparePolicy HostBackend noSecrets None None None (fun _ -> Ok []) EnvironmentSpec.defaults)
+        (Sandboxes.preparePolicy HostBackend noSecrets None None None (fun _ _ -> Ok []) EnvironmentSpec.defaults)
         (Sandboxes.summaryFor HostBackend EnvironmentSpec.defaults)
         (sprintf "env-%s" name)
 

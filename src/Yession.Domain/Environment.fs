@@ -212,6 +212,14 @@ type EnvironmentSpec =
       /// ceiling and an unconditional grant — so a repo's `read:` could never obtain
       /// anything, and an operator could not offer a path without forcing it on everything.
       Uses : ResourceName list
+      /// Resources this sandbox selects IF this host offers them, by name — an
+      /// optimisation by declaration. `Uses` refuses when a name is not offered, and
+      /// that refusal is the ceiling; a warm cache written there would break the repo on
+      /// every host that offers none. A want is the other posture: selected where
+      /// offered, silently absent where not, so the same file works cold anywhere and
+      /// warm where the operator chose to make it so. Everything else about a granted
+      /// want — sensitivity, approval, realisation — is exactly a granted use.
+      Wants : ResourceName list
       /// Files written into the sandbox's own home before anything runs in it, by path
       /// and content.
       ///
@@ -239,6 +247,7 @@ module EnvironmentSpec =
         { WorkingDirectory = None
           EnvironmentVariables = Map.empty
           Uses = []
+          Wants = []
           Files = Map.empty
           Runtime = Confinement }
 
@@ -308,6 +317,11 @@ module SandboxRequest =
                     "it uses %s, not %s"
                     (list (running.Spec.Uses |> List.map ResourceName.value))
                     (list (wanted.Spec.Uses |> List.map ResourceName.value))
+              if running.Spec.Wants <> wanted.Spec.Wants then
+                sprintf
+                    "it wants %s, not %s"
+                    (list (running.Spec.Wants |> List.map ResourceName.value))
+                    (list (wanted.Spec.Wants |> List.map ResourceName.value))
               if running.Spec.EnvironmentVariables <> wanted.Spec.EnvironmentVariables then
                 sprintf
                     "its environment sets %s, not %s"

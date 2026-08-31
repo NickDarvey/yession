@@ -804,8 +804,8 @@ let tests =
             let asked =
                 RepoSandboxes.capabilitiesOn
                     (Sandboxes.limitsFor SrtBackend "linux")
-                    (ResourceProfile.resolve profile.Resources)
-                    selection
+                    (fun uses wants -> ResourceProfile.resolve profile.Resources (uses @ wants))
+                    (selection, [])
                 |> expect
             Expect.notEqual asked.Granted named "the words the operator wrote are not the offer"
             match asked.Granted, named with
@@ -827,8 +827,8 @@ let tests =
             let asked =
                 RepoSandboxes.capabilitiesOn
                     (Sandboxes.limitsFor SrtBackend "darwin")
-                    (ResourceProfile.resolve profile.Resources)
-                    selection
+                    (fun uses wants -> ResourceProfile.resolve profile.Resources (uses @ wants))
+                    (selection, [])
                 |> expect
             Expect.equal
                 asked.Granted
@@ -842,8 +842,8 @@ let tests =
             let asked =
                 RepoSandboxes.capabilitiesOn
                     (Sandboxes.limitsFor SrtBackend "linux")
-                    (fun _ -> failwith "nothing should have been resolved")
-                    []
+                    (fun _ _ -> failwith "nothing should have been resolved")
+                    ([], [])
                 |> expect
             Expect.equal asked.Granted [] "nothing to show"
             Expect.isFalse asked.Sensitive "and nobody to ask"
@@ -861,8 +861,8 @@ let tests =
             let asked =
                 RepoSandboxes.capabilitiesOn
                     (Sandboxes.limitsFor SrtBackend "linux")
-                    (ResourceProfile.resolve profile.Resources)
-                    [ ResourceName.create "docker" |> expect ]
+                    (fun uses wants -> ResourceProfile.resolve profile.Resources (uses @ wants))
+                    ([ ResourceName.create "docker" |> expect ], [])
                 |> expect
             Expect.isTrue asked.Sensitive "still worth asking about"
     ]

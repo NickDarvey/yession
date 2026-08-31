@@ -133,13 +133,16 @@ let private lastApproved (events: SessionEvent list) (repo: RepoRef) : string li
 /// through a host that declares no profile would turn silence into a refusal.
 let capabilitiesOn
     (limits: HostLimits)
-    (resolve: ResourceName list -> Result<ResourceClosure, string>)
-    (selection: ResourceName list)
+    (resolve: ResourceName list -> ResourceName list -> Result<ResourceClosure, string>)
+    ((uses, wants): ResourceName list * ResourceName list)
     : Result<RepoCapabilities, string> =
-    match selection with
-    | [] -> Ok { Granted = []; Sensitive = false }
-    | selection ->
-        resolve selection
+    match uses, wants with
+    | [], [] -> Ok { Granted = []; Sensitive = false }
+    | uses, wants ->
+        // Both postures reach the same resolution, so a sensitive resource is exactly as
+        // sensitive wanted as used: the approval prompt shows whatever will be GRANTED,
+        // and a want this host does not offer is not granted and not shown.
+        resolve uses wants
         |> Result.map (fun closure ->
             { Granted = RealisedClosure.describeOn limits closure
               // Read off the closure, never off the lines above: sensitivity is the
@@ -160,7 +163,7 @@ let create
     // Sensitivity is REPORTED rather than inferred from the words: reading it back out of a
     // rendered description would make the prompt depend on the wording of a sentence, and the
     // wording is a design that will move.
-    (capabilitiesOf: ResourceName list -> Result<RepoCapabilities, string>)
+    (capabilitiesOf: ResourceName list * ResourceName list -> Result<RepoCapabilities, string>)
     : RepoSandboxes =
 
     let mintMessageId () : MessageId =
@@ -216,9 +219,8 @@ let create
                     for _, entries in byRepo do
                         let repo = entries |> List.head |> fst
                         let asked =
-                            entries
-                            |> List.collect (fun (_, decl) -> decl.Uses)
-                            |> List.distinct
+                            (entries |> List.collect (fun (_, decl) -> decl.Uses) |> List.distinct),
+                            (entries |> List.collect (fun (_, decl) -> decl.Wants) |> List.distinct)
                         match capabilitiesOf asked with
                         // A selection that does not resolve is already a refusal further
                         // down, said per declaration and with the reason. Saying it twice
@@ -246,7 +248,9 @@ let create
                         byRepo
                         |> List.choose (fun (_, entries) ->
                             let repo = entries |> List.head |> fst
-                            let asked = entries |> List.collect (fun (_, decl) -> decl.Uses) |> List.distinct
+                            let asked =
+                                (entries |> List.collect (fun (_, decl) -> decl.Uses) |> List.distinct),
+                                (entries |> List.collect (fun (_, decl) -> decl.Wants) |> List.distinct)
                             match capabilitiesOf asked with
                             | Ok capabilities when
                                 capabilities.Sensitive && lastApproved told repo <> Some capabilities.Granted ->
@@ -338,15 +342,16 @@ let create
 
     /// What this repo asks for right now, or nothing when its selection does not resolve.
     let askedBy (declared: Map<SandboxRef, SandboxDecl>) (repo: RepoRef) =
-        declared
-        |> Map.toList
-        |> List.choose (fun (ref, decl) ->
-            match SandboxRef.scope ref with
-            | RepoOwned owner when RepoRef.value owner = RepoRef.value repo -> Some decl.Uses
-            | _ -> None)
-        |> List.collect id
-        |> List.distinct
-        |> capabilitiesOf
+        let mine =
+            declared
+            |> Map.toList
+            |> List.choose (fun (ref, decl) ->
+                match SandboxRef.scope ref with
+                | RepoOwned owner when RepoRef.value owner = RepoRef.value repo -> Some decl
+                | _ -> None)
+        capabilitiesOf
+            ((mine |> List.collect (fun decl -> decl.Uses) |> List.distinct),
+             (mine |> List.collect (fun decl -> decl.Wants) |> List.distinct))
         |> Result.toOption
         |> Option.map (fun capabilities -> capabilities.Granted)
 
