@@ -47,6 +47,14 @@ sandboxes:
         extra-trusted-public-keys = yession.cachix.org-1:Dj6jHWpEaqcGyrEEC3/qy/D3UQN8sZW1RXUOCRJ41oI=
         build-users-group =
         sandbox = false
+      # The checkout arrives owned by the operator's uid while the container runs as
+      # root, and git refuses to read a repository its caller does not own. These are
+      # git's own env spelling of `safe.directory` — scoped to nothing narrower because
+      # every repo this container can see is one this session put there. Without them
+      # the three devenv.lock cases error with "could not read HEAD:devenv.lock".
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: "*"
 
   # `verify` is minutes long. A second sandbox on the same configuration means the gate
   # runs beside interactive work instead of holding the shell.
@@ -67,3 +75,11 @@ sandboxes:
         extra-trusted-public-keys = yession.cachix.org-1:Dj6jHWpEaqcGyrEEC3/qy/D3UQN8sZW1RXUOCRJ41oI=
         build-users-group =
         sandbox = false
+      # The checkout arrives owned by the operator's uid while the container runs as
+      # root, and git refuses to read a repository its caller does not own. These are
+      # git's own env spelling of `safe.directory` — scoped to nothing narrower because
+      # every repo this container can see is one this session put there. Without them
+      # the three devenv.lock cases error with "could not read HEAD:devenv.lock".
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: "*"
