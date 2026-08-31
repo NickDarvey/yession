@@ -153,11 +153,24 @@ let tryHandle
     if not (path.StartsWith "/control/") then false
     else
         let secret = headerOf req "x-yession-control"
-        match secret |> Option.bind resolve with
+        // Resolve carries the secret STRING out beside the caller, so the branch below holds a
+        // `string`, not a `string option`. The old shape kept the option and wrote
+        // `Option.defaultValue "" secret` at each keyed handler — a default that could never
+        // fire here (a `None` secret cannot resolve to a caller) but read as though a missing
+        // secret were an empty one, and would have fed that empty launch key to the privileged
+        // handlers the moment this gate's invariant drifted.
+        let resolved =
+            match secret with
+            | Some launchSecret ->
+                match resolve launchSecret with
+                | Some caller -> Some (launchSecret, caller)
+                | None -> None
+            | None -> None
+        match resolved with
         | None ->
             onUnauthorized path
             respond res 401 "invalid control secret"
-        | Some caller ->
+        | Some (launchSecret, caller) ->
             let decodeAnd (decode: string -> Result<'a, string>) (handle: 'a -> unit) =
                 readBody req (fun body ->
                     match decode body with
@@ -170,7 +183,7 @@ let tryHandle
                 decodeAnd (ControlWire.fromString ControlWire.sessionNameReport) (fun name ->
                     Async.StartImmediate (
                         async {
-                            match! reportName (Option.defaultValue "" secret) name with
+                            match! reportName launchSecret name with
                             | Ok () -> respond res 200 "ok"
                             | Error e -> respond res 400 e
                         }))
@@ -192,7 +205,7 @@ let tryHandle
                 decodeAnd (ControlWire.fromString ControlWire.sessionActivityReport) (fun busy ->
                     Async.StartImmediate (
                         async {
-                            match! reportActivity (Option.defaultValue "" secret) busy with
+                            match! reportActivity launchSecret busy with
                             | Ok () -> respond res 200 "ok"
                             | Error e -> respond res 400 e
                         }))
@@ -202,13 +215,13 @@ let tryHandle
                 // it is a child this Manager spawned, calling over the authenticated
                 // channel, and it already holds whatever credential it would act on.
                 decodeAnd (ControlWire.fromString ControlWire.subscribeHookRequest) (fun request ->
-                    let id = subscribeHook (Option.defaultValue "" secret) request.Filter
+                    let id = subscribeHook launchSecret request.Filter
                     respondJson
                         res
                         (ControlWire.toString ControlWire.subscribeHookResponse { ControlWire.SubscribeHookResponse.Id = id }))
             | "POST", "/control/hooks/unsubscribe" ->
                 decodeAnd (ControlWire.fromString ControlWire.unsubscribeHookRequest) (fun request ->
-                    let dropped = unsubscribeHook (Option.defaultValue "" secret) request.Id
+                    let dropped = unsubscribeHook launchSecret request.Id
                     respondJson
                         res
                         (ControlWire.toString ControlWire.unsubscribeHookResponse { Dropped = dropped }))
@@ -218,7 +231,7 @@ let tryHandle
                 // not at spawn — because the session's port is OS-assigned and only
                 // known once it listens.
                 decodeAnd (Wire.fromString Wire.registerClientRequest) (fun request ->
-                    let response = registerClient (Option.defaultValue "" secret) caller.SessionId request.RedirectUri
+                    let response = registerClient launchSecret caller.SessionId request.RedirectUri
                     respondJson res (Wire.toString Wire.registerClientResponse response))
             | "POST", ("/control/secrets/set" | "/control/secrets/list" | "/control/secrets/delete" | "/control/secrets/resolve" as secretsPath) ->
                 // Secrets (Plan 06). The arms stay thin: decode, hand the verified
@@ -343,7 +356,7 @@ let tryHandle
                     let sink =
                         Sse.stream req res
                             (ControlWire.toString ControlWire.connectionStatusList)
-                            (subscribeConnections (Option.defaultValue "" secret))
+                            (subscribeConnections launchSecret)
                     Async.StartImmediate (
                         async {
                             let! snapshot = api.Status caller
@@ -354,7 +367,7 @@ let tryHandle
                 // down. The secret already resolved to capabilities above, so it is valid.
                 Sse.stream req res
                     (ControlWire.toString ControlWire.sessionNotification)
-                    (subscribeNotifications (Option.defaultValue "" secret))
+                    (subscribeNotifications launchSecret)
                 |> ignore
             | "GET", "/control/mcp" ->
                 // The MCP reverse leg (Plan 17): the servers THIS session may reach, resolved
@@ -367,7 +380,7 @@ let tryHandle
                 // Reactivity is the feature, not a refinement of one.
                 Sse.stream req res
                     (ControlWire.toString Codec.mcpServerSet)
-                    (subscribeMcp caller.SessionId (Option.defaultValue "" secret))
+                    (subscribeMcp caller.SessionId launchSecret)
                 |> ignore
             | _ -> respond res 404 "not found"
         true
