@@ -1349,7 +1349,10 @@ module ClientModel =
     /// An ellipsis marks the cut, because a sentence that simply stops reads as a sentence
     /// that was garbled rather than one that was shortened.
     let landmarkLabel (item: ConversationItem) : string =
-        let firstLine = (item.Body.Split '\n' |> Array.tryHead |> Option.defaultValue "").Trim ()
+        let firstLine =
+            match item.Body.IndexOf '\n' with
+            | -1 -> item.Body.Trim ()
+            | n -> (item.Body.Substring (0, n)).Trim ()
         if firstLine.Length <= 72 then firstLine
         else (firstLine.Substring (0, 71)).TrimEnd () + "…"
 

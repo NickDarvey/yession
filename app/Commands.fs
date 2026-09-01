@@ -376,25 +376,29 @@ let dispatch (services: CommandServices) : CommandDispatch =
           setShellProfileTool,
           fun (invocation: GatedInvocation) ->
             async {
-                match decodeArgs invocation.Args with
-                | [ name; cwd ] ->
-                    match SandboxRef.parse name with
-                    | Error e -> return Error (sprintf "not a sandbox: %s" e)
-                    | Ok name ->
-                        // The empty string is the CLEAR. The argument list is strings, so the
-                        // absence has to be encoded as one — and it is encoded HERE and read
-                        // here, which is the whole reason both halves of a gated command live
-                        // in one file.
-                        let cwd = if cwd = "" then None else Some cwd
-                        return!
-                            andPublish services ShellProfile.queryName (
-                                (services.Terminals ()).SetProfile (Authority.author invocation.Authority) name cwd)
-                | other ->
+                // A directory is present or it is not, and the ARITY carries that — one arg
+                // clears the profile, two sets it. The absence is a shorter list, never an
+                // empty string standing in for a value; both halves of this gated command
+                // live in one file so the encode above and this decode stay the one shape.
+                let parsed =
+                    match decodeArgs invocation.Args with
+                    | [ name ] -> Ok (name, None)
+                    | [ name; cwd ] -> Ok (name, Some cwd)
+                    | other -> Error other
+                match parsed with
+                | Error other ->
                     return
                         Error (
                             sprintf
-                                "set_shell_profile takes a sandbox name and a directory, got %d arguments"
+                                "set_shell_profile takes a sandbox name and an optional directory, got %d arguments"
                                 (List.length other))
+                | Ok (rawName, cwd) ->
+                    match SandboxRef.parse rawName with
+                    | Error e -> return Error (sprintf "not a sandbox: %s" e)
+                    | Ok name ->
+                        return!
+                            andPublish services ShellProfile.queryName (
+                                (services.Terminals ()).SetProfile (Authority.author invocation.Authority) name cwd)
             } ]
 
 /// The turn's repo verbs (Plan 14), bound to the acting party. The MUTATING ones are three
@@ -485,7 +489,7 @@ let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCap
                       match cwd with
                       | Some cwd -> sprintf "set_shell_profile %s -> %s" (SandboxRef.render name) cwd
                       | None -> sprintf "set_shell_profile %s -> wherever the sandbox puts them" (SandboxRef.render name)
-                  gated setShellProfileTool [ SandboxRef.render name; defaultArg cwd "" ] summary } }
+                  gated setShellProfileTool (SandboxRef.render name :: Option.toList cwd) summary } }
 
 /// Every command verb bound to ONE turn's actor: the acting party on the events is the agent,
 /// the credential is the turn human's (Plan 08). The Host leaves these as denials because

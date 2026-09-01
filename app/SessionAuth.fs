@@ -106,9 +106,12 @@ let create (sessionId: SessionId) (mount: string) : Auth =
                 match configuration with
                 | None -> return Error (503, "session is still registering with its manager")
                 | Some (config, redirectUri) ->
-                    match queryOf requestUrl "state" |> Option.bind pendingLogins.Take with
+                    match queryOf requestUrl "state" with
                     | None -> return Error (400, "unknown or expired login; reopen the session URL")
-                    | Some verifier ->
+                    | Some state ->
+                      match pendingLogins.Take state with
+                      | None -> return Error (400, "unknown or expired login; reopen the session URL")
+                      | Some verifier ->
                         try
                             // The certified client redeems the code AND validates the ID
                             // token (signature via the discovered JWKS, iss, aud, exp)
@@ -119,7 +122,7 @@ let create (sessionId: SessionId) (mount: string) : Auth =
                                     (newUrlWithBase requestUrl redirectUri)
                                     (createObj
                                         [ "pkceCodeVerifier" ==> verifier
-                                          "expectedState" ==> (queryOf requestUrl "state" |> Option.defaultValue "") ])
+                                          "expectedState" ==> state ])
                                 |> Interop.awaitPromise
                             let claims = tokens.claims ()
                             // The attribution rides the validated ID token: only the
