@@ -1600,11 +1600,34 @@ let editorTests =
                                }""")
                 Expect.isTrue painted "the stroke is a mark on the screen, not a box with nothing in it"
 
+                // Away from the marked message first, so the click has a real scroll to make
+                // and the author line is pinned over the top of the column when it lands.
+                let! _ =
+                    await (page.EvaluateAsync<bool>
+                            """() => { const t = document.querySelector('#shell [data-conversation]')
+                                       t.scrollTop = t.scrollHeight
+                                       return t.scrollTop > 0 }""")
                 do! awaitU (page.ClickAsync "#shell [data-landmark]")
                 let! _ =
                     await (page.WaitForFunctionAsync
                         """document.querySelector("#shell [data-conversation] [data-message-id='msg-harness']")
                              ?.classList.contains('animate-reveal') === true""")
+
+                // And it lands somewhere a person can READ it. A jump that scrolls to the top
+                // of this scrollport puts its target under the author line pinned there — the
+                // flash above fires either way, so the mark says "here" about something off
+                // the screen. Hit-tested rather than measured against the header's box: what
+                // matters is that the message is what is PAINTED where it claims to be, and a
+                // rect stays honest under anything drawn over it.
+                let! reached =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 const item = document.querySelector("#shell [data-conversation] [data-message-id='msg-harness']")
+                                 const box = item.getBoundingClientRect()
+                                 const at = document.elementFromPoint(box.left + box.width / 2, box.top + 4)
+                                 return item.contains(at)
+                               }""")
+                Expect.isTrue reached "the message a stroke points at is on the screen, not under what covers the top of it"
                 return ()
             }
         // The DVR (Plan 14, stage 7). What only a browser can answer: that rewinding a LIVE

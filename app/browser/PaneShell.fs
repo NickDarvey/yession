@@ -52,6 +52,7 @@ let private focusOn (element: HTMLElement option) : unit =
 /// property access may be a getter, so it is never assumed pure.)
 let private reflow (element: HTMLElement) : unit = element.offsetWidth |> ignore
 
+
 /// A CSS length as a number, with the unit dropped. `getPropertyValue` answers `"420px"` for a
 /// property set in pixels and `""` for one that is not set at all, and both have to become "no
 /// number I can use" rather than a parse that quietly succeeds at zero.
@@ -177,7 +178,10 @@ let revealMessage (messageId: string) : unit =
     nextFrame (fun () ->
         find (sprintf "[data-conversation] [data-message-id=\"%s\"]" messageId)
         |> Option.iter (fun item ->
-            item.scrollIntoView ()
+            // To the MIDDLE, unlike `revealBlock` above: this scrollport pins the author
+            // line at its top, so aligning to the start puts the message under the very line
+            // that says who said it. `Scrolling.scrollIntoMiddle` carries the rest of why.
+            scrollIntoMiddle item
             // Removing, forcing a reflow by READING a layout property, and adding it back is
             // the only way to replay an animation an element has already run. See
             // `revealBlock`, whose comment this is the other half of.
