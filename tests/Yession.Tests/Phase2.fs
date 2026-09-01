@@ -975,6 +975,24 @@ let private sandboxPolicyTests =
                 Expect.isTrue (e.Contains "/h/.npm") (sprintf "the refusal names the path, said: %s" e)
                 Expect.isTrue (e.Contains "read or write") (sprintf "and what to do instead, said: %s" e)
 
+        // The same rule on the backend that briefly forgot it: the host backend CLAIMED
+        // `OverlayMounts` while its own comment said no backend does, so an overlay grant
+        // realised as-asked and died downstream with an internal-bug sentence — "reached a
+        // policy without being realised" — where the operator's mistake deserved the
+        // withheld one. A union mount is a provision, like a named volume: not something
+        // an unconfined backend can permit into existence.
+        testCase "the host backend withholds an overlay with the operator-facing refusal" <| fun () ->
+            match
+                Sandboxes.policyFor
+                    HostBackend (Sandboxes.limitsFor HostBackend "darwin") Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
+                    [ Mount { From = "/h/.npm"; At = "/h/.npm"; Mode = ResourceMountMode.Overlay } ]
+                    EnvironmentSpec.defaults
+            with
+            | Ok _ -> failwith "expected a refusal"
+            | Error e ->
+                Expect.isTrue (e.Contains "read or write") (sprintf "what to write instead, said: %s" e)
+                Expect.isFalse (e.Contains "without being realised") (sprintf "never the internal-bug sentence, said: %s" e)
+
         // A toolchain the operator named is the one that answers, so its directory goes in
         // FRONT. This is the first step away from the toolchain being present by accident.
         testCase "a granted executable's directory leads PATH" <| fun () ->
