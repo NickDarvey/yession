@@ -816,7 +816,16 @@ let private requireCapabilities (caps: string list) =
           if List.contains "Srt" caps && not (srtAvailable ()) then
             "Srt: no working confinement (bubblewrap, socat, ripgrep, and — under the strict "
             + "profile — a nested user namespace; an unprivileged container needs "
-            + "YESSION_NESTED_SANDBOX=weak)" ]
+            + "YESSION_NESTED_SANDBOX=weak)"
+          // Egress, because the self-hosting run's container substitutes a whole devshell
+          // closure before a single test runs — a box that cannot reach the cache would sit
+          // silent for the length of a source build and then fail on something unrelated.
+          // The daemon half is `Docker`'s own probe; asking for Dogfood without Docker gets
+          // Docker's refusal when the suite's tag goes unmet — no second copy here.
+          if List.contains "Dogfood" caps
+             && not (probeSucceeds "curl" [ "-fsSI"; "https://cache.nixos.org/nix-cache-info" ]) then
+            "Dogfood: cache.nixos.org is unreachable — the in-container devshell substitutes "
+            + "from it, so this run would be a source build measured in hours" ]
     if not (List.isEmpty missing) then
         failwithf
             "check: this box cannot host every capability it was asked for:\n  - %s\nRun a tier it can host, or install what is missing."
@@ -851,6 +860,11 @@ let private nodeBudgetMs (caps: Set<string>) =
     + allowing "Pty" 45_000
     + allowing "Serial" 45_000
     + allowing "Jumpstarter" 90_000
+    // The self-hosting run substitutes a devshell closure and then runs this whole suite
+    // again inside the container: ~11 minutes measured warm on the machine it was built
+    // for, and cold CI is bounded by substitution rather than compute. An hour is the
+    // hang detector's line, not an expectation.
+    + allowing "Dogfood" 3_600_000
 
 // Build the installable from the WORKING TREE and boot it.
 //

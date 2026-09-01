@@ -79,6 +79,8 @@ let all =
         Tag.needs "Client shell E2E" [ Tag.Ports; Tag.Native ] (fun () -> Client.tests)
         Tag.needs "Phase2" [] (fun () -> Phase2.tests)
         Tag.needs "Docker integration" [ Tag.Docker ] (fun () -> DockerIntegration.tests)
+        Tag.needs "The declared dev container" [ Tag.Docker ] (fun () -> DevContainer.tests)
+        Tag.needs "The dev container, self-hosting" [ Tag.Docker; Tag.Dogfood ] (fun () -> DevContainer.dogfood)
         Tag.needs "Srt integration" [ Tag.Srt ] (fun () -> SrtIntegration.tests)
         Tag.needs "Git integration" [] (fun () -> GitIntegration.tests)
         Tag.needs "Pty integration" [ Tag.Pty ] (fun () -> PtyIntegration.tests)

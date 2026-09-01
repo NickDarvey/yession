@@ -290,6 +290,12 @@ check Nix                    # + the build-source contract, then builds the inst
                              #   the WORKING TREE and boots it. Minutes; the only gate on it.
 check Jumpstarter            # + our MCP client driven against the Python example's provider,
                              #   over two real child processes. Needs uv and a CPython.
+check Docker Dogfood         # + the self-hosting run: this repo's whole suite inside the
+                             #   dev container its own yession.yaml declares (`nix develop
+                             #   --command check`, in the container, through the real docker
+                             #   backend). ~11 min warm, up to an hour cold; in NO scheduled
+                             #   tier — run it when the container environment story changes,
+                             #   locally or via a verify.yml dispatch naming both caps.
 verify                       # == check Browser Ports Native Docker LiveAgent Keyring Nix Srt
                              #    Pty Serial Jumpstarter. Release gate; what CI runs on master.
                              #    Takes check's trailing args, so `verify --only "<text>"` works.
@@ -548,6 +554,14 @@ Capabilities:
   and "this box can assemble that environment" are different questions and only the second
   one is the suite's. devenv provides uv and a CPython, and pins the interpreter through
   `UV_PYTHON`/`UV_PYTHON_DOWNLOADS=never` so uv never fetches a second, unpinned toolchain.
+- `Dogfood` — consent to the LONG self-hosting case (`tests/Yession.Tests/DevContainer.fs`):
+  the suite re-running itself inside the dev container this repo declares. Needs `Docker`
+  beside it; its own probe is egress to cache.nixos.org, because the in-container devshell
+  substitutes from there and a box that cannot reach it would source-build for hours.
+  Deliberately outside `verify` — the gate already proves each seam piecewise, and the
+  fast per-seam probes in the same file run in the ordinary `Docker` tier. On a macOS
+  host whose daemon is Colima, the suite's fixtures live under `$HOME` because Colima
+  shares only `$HOME` into its VM — a bind source outside it mounts empty.
 - `Nix` — the nix CLI (probed like Docker). Covers the ONE thing no CI job can: the
   derivations built against the WORKING TREE.
   Every CI route (`nix build .#yession`, darwin-package, package-nix) evaluates a flake, whose

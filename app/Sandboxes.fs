@@ -912,9 +912,22 @@ module DockerSandbox =
     let startCommand (declared: string option) : string array =
         let materialiseEtc =
             "for f in passwd group shadow; do if [ -L /etc/$f ]; then cat /etc/$f > /etc/.$f && rm /etc/$f && mv /etc/.$f /etc/$f; fi; done"
+        // The OTHER reader of the bind-mounted checkouts' ownership. The docker policy's
+        // GIT_CONFIG env trio covers the git CLI, which reads git's env spelling —
+        // libgit2 does not, and nix's flake fetcher IS libgit2, so `nix develop` in a
+        // checkout died with "repository path … is not owned by current user (libgit2
+        // error code = 7)" on any daemon that does not mask ownership (a real Linux
+        // dockerd; Colima presents everything as root, which is how every Mac lap was
+        // green while CI's Dogfood run went straight to the wall). NOT belt-and-braces:
+        // the two mechanisms have disjoint readers, each measured — libgit2 honours
+        // /etc/gitconfig and ignores the env; the nixpkgs-built git CLI honours the env
+        // and never reads /etc/gitconfig, because its compiled sysconfdir is in the
+        // store. Delete either and one reader goes back to refusing.
+        let trustMounts =
+            "grep -qs 'directory = \\*' /etc/gitconfig 2>/dev/null || printf '[safe]\\n\\tdirectory = *\\n' >> /etc/gitconfig"
         [| "sh"
            "-c"
-           sprintf "%s\n%s" materialiseEtc (declared |> Option.defaultValue "exec tail -f /dev/null") |]
+           sprintf "%s\n%s\n%s" materialiseEtc trustMounts (declared |> Option.defaultValue "exec tail -f /dev/null") |]
 
     let create (name: string) (spec: EnvironmentSpec) (container: ContainerSpec) : CreateSandbox =
         fun policy ->
