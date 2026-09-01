@@ -710,6 +710,15 @@ do
     // rewound cast that plays off its end jumps back to live) and dispatch's render needs
     // the syncer.
     let mutable dispatchRef : ClientMsg -> unit = ignore
+    // The same gesture the client wires, on the same terms: what only a browser can answer
+    // here is that a hold on a message opens its menu and a tap does not, which is a real
+    // pointer sequence against a real listener. AFTER `dispatchRef` exists, and reading it
+    // through the closure rather than capturing it — the loop below is what assigns it, and a
+    // gesture bound to the `ignore` it starts as would report to nothing for ever.
+    LongPress.watch (fun messageId ->
+        match MessageId.create messageId with
+        | Ok id -> dispatchRef (ToggleItemMenuMsg id)
+        | Error _ -> ())
     let replays = PaneReplays.create (fun msg -> dispatchRef msg)
     // …and the app's own screen composition, for the same reason: the emulator, the
     // serialization and the fold are the client's, and only a browser runs them.

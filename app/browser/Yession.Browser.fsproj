@@ -25,6 +25,10 @@
     <!-- The live terminal screen: the emulator this client folds output into, and the
          serialization the model renders. -->
     <Compile Include="Screens.fs" />
+    <!-- Hold a finger on a message to open its actions (the touch counterpart of hovering
+         it). Before Browser.fs, which wires it to dispatch, and before the harness, which
+         wires the same gesture to its own. -->
+    <Compile Include="LongPress.fs" />
     <Compile Include="Browser.fs" />
     <!-- Host-free harness for the rich-editor browser E2E; bundled only by the test build,
          never imported by the app entry (Browser.fs), so it does not ship. -->
