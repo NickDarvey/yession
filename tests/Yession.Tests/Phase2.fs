@@ -451,6 +451,9 @@ let private sandboxPolicyTests =
             match Sandboxes.DockerSandbox.startCommand (Some "./serve --port 80") with
             | [| "sh"; "-c"; script |] ->
                 Expect.isTrue (script.Contains "-L /etc/$f") "fixes the symlinks first"
+                // libgit2's copy of the checkout trust: nix's flake fetcher ignores the
+                // policy env's GIT_CONFIG spelling, so the file half exists for it.
+                Expect.isTrue (script.Contains "/etc/gitconfig") "then trusts the mounted checkouts for libgit2"
                 Expect.isTrue (script.EndsWith "./serve --port 80") "then runs what was declared"
             | other -> failwithf "expected a sh -c wrap, got %A" other
             match Sandboxes.DockerSandbox.startCommand None with
