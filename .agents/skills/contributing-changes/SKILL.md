@@ -43,6 +43,14 @@ master.
   call, not a question. But a split that DROPS or defers something the user asked for is a
   scope change, and that goes through the Step 1 gate instead: say so and wait.
 
+**Independent pieces run in parallel, not queued behind each other.** When the split yields
+pieces that touch disjoint code with no ordering between them, put each on its own branch off
+master and enable auto-merge on all of them at once: the queue re-tests each against real
+master, so none waits for another to land. Keep a strict order only where one piece would break
+without another already in — a rule and the sites it would reject, a protocol change and its
+only caller, an analyzer and the tree it judges. Serialising independent PRs behind a single
+branch buys nothing the queue does not already give, and costs a merge cycle apiece.
+
 If you find yourself with several finished pieces on one branch anyway, do not bundle them
 out of sympathy for the work already done — open the PR for what is there, and split the
 NEXT request properly.

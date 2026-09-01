@@ -434,6 +434,18 @@ free with the type-check every rule depends on, so this reports the first error 
 `lint` exits 2 rather than 1: "these rules did not read this" must not arrive looking like
 "these rules found nothing", and the next step is `build`, not a rule to go and fix.
 
+There is a second way to earn a YES000, and it is stranger: CI's whole-solution `lint` has
+reported one — a phantom type mismatch, anchored at a column past the end of the line it names —
+on a file that compiles cleanly under `build`, `fsharp-analyzers`, Fable, and even a from-scratch
+`lint` on this box, none of which reproduce it. Every case so far has been a name shadowed across
+an option boundary: a `secret : string option` read from a header and rebound as `secret :
+string` in the branch that resolved it cost three commits before renaming the inner one to
+`launchSecret` cleared CI, changing nothing a test could see. So a YES000 whose location is
+impossible and whose error will not reproduce is a shadow to find, not a mismatch to fix as
+written — the tell is one name meaning an option in the outer scope and its contents in the
+inner. Do not give a binding two types under one name; why CI's checker minds when nothing here
+does is not yet known, and until it is, the rename is the fix.
+
 Every rule carries a fixture — `analyzers/fixtures/<Rule>Fixture` — whose source says in
 `// YES00n` markers which of its cases must be reported (across several files where the rule is
 about how many files do something, since one file could then neither break it nor prove the rule
