@@ -186,7 +186,10 @@ let create (def: ServerDef) : ServerHandler =
     let mutable onSessionEnded : string -> unit = ignore
 
     let handle (req: IncomingMessage) (res: ServerResponse) : unit =
-        let sent = headerOf req "mcp-session-id" |> Option.defaultValue ""
+        // The session this request names, but only if it is one we minted — an absent header
+        // and an unknown id are the same answer (no session), so they collapse to `None` here
+        // rather than to a `""` the dispatch would have to test for later.
+        let session = headerOf req "mcp-session-id" |> Option.filter sessions.Contains
         readBody req (fun body ->
             let body = if String.IsNullOrWhiteSpace body then "{}" else body
             match Decode.fromString requestDecoder body with
@@ -212,7 +215,7 @@ let create (def: ServerDef) : ServerHandler =
                                     "version", Encode.string def.Version ] ]
                     respond res 200 (result request.Id payload) [ "mcp-session-id", box id ]
                 // Every other method needs a session we minted.
-                | _ when sent = "" || not (sessions.Contains sent) ->
+                | _ when Option.isNone session ->
                     respond res 404 """{"error":"no such session"}""" []
                 | "tools/list" ->
                     let payload = Encode.object [ "tools", def.Tools |> List.map toolJson |> Encode.list ]
@@ -229,7 +232,13 @@ let create (def: ServerDef) : ServerHandler =
                     | Ok (name, arguments) ->
                         Async.StartImmediate (
                             async {
-                                let! outcome = def.Invoke sent { Name = name; Arguments = arguments }
+                                let sessionId =
+                                    // Guaranteed by the `no such session` guard above: only a
+                                    // request bearing a session this server minted reaches here.
+                                    match session with
+                                    | Some sessionId -> sessionId
+                                    | None -> failwith "a tools/call reached the invoker without a session"
+                                let! outcome = def.Invoke sessionId { Name = name; Arguments = arguments }
                                 match outcome with
                                 // A tool that RAN and went badly is a RESULT with `isError`,
                                 // not a JSON-RPC error: the model is meant to read it and
@@ -270,8 +279,9 @@ let create (def: ServerDef) : ServerHandler =
                 | "DELETE" ->
                     // The spec's session teardown, and the only orderly way a claim is
                     // released when a client is finished rather than crashed.
-                    let sent = headerOf req "mcp-session-id" |> Option.defaultValue ""
-                    if sessions.Remove sent then onSessionEnded sent
+                    match headerOf req "mcp-session-id" with
+                    | Some sent when sessions.Remove sent -> onSessionEnded sent
+                    | _ -> ()
                     respond res 200 """{"ok":true}""" []
                     true
                 | _ ->
