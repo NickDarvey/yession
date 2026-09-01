@@ -479,7 +479,13 @@ let startFull
                 // button an hour later should reach whatever servers this session has, not
                 // the snapshot some turn was given.
                 (fun () -> mcpConnections.Registries ())
-                { Open = fun offer -> terminals.Open ActorRef.Agent (Attached offer) (TerminalTitle.fromProse offer.Ticket.Label)
+                { Open =
+                    fun offer ->
+                        let title =
+                            match offer.Ticket.Label with
+                            | Some label -> TerminalTitle.fromProse label
+                            | None -> TerminalTitle.fromProse ""
+                        terminals.Open ActorRef.Agent (Attached offer) title
                   IsOpen = terminals.IsOpen }
 
         let capabilitiesFor (turnId: AgentTurnId) (turnActor: ActorRef) : AgentCapabilities =
