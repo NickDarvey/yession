@@ -27,9 +27,10 @@ let private nodeOs : obj = importAll "node:os"
 [<Emit("$0.mkdtempSync($1.tmpdir() + '/yession-')")>]
 let private mkdtemp (fs: obj) (os: obj) : string = jsNative
 
-// World-writable, because the hardened container (CapDrop ALL) has no
-// CAP_DAC_OVERRIDE: its root cannot write into a 0700 host dir owned by another
-// uid. The mount-mode test asserts rw-vs-ro mount semantics, not DAC override.
+// World-writable, so the mount-mode test asserts rw-vs-ro MOUNT semantics and nothing
+// about capabilities. The container keeps CAP_DAC_OVERRIDE these days (a nix build needs
+// it — see the CapAdd site in Sandboxes.fs), so its root could write into a 0700 dir
+// anyway; the chmod stays because the test must hold whether or not that grant does.
 [<Emit("$0.chmodSync($1, 0o777)")>]
 let private makeWorldWritable (fs: obj) (path: string) : unit = jsNative
 
