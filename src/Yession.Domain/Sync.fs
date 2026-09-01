@@ -218,15 +218,21 @@ module SyncedStateSync =
     /// The doc-side pending entry, before validation.
     type private PendingFields =
         { Subject : string
-          OnBehalfOf : string
+          /// The delegated credential owner, when the entry named one. `None` is the doc
+          /// having said nothing — an act that runs on its author alone — kept distinct from
+          /// a token that failed to parse, which `pendingToDomain` drops to `None` for a
+          /// different reason and records as such.
+          OnBehalfOf : string option
           Author : string
           Order : float
           /// Whether the author is waiting on this one (Plan 20, stage 2). A string on the
           /// doc side like every other field here — the doc carries text, and the domain
-          /// type is where it becomes a bool.
-          Background : string
-          /// The author's terminal width, `"120x40"`, or empty for an act with no viewport.
-          Size : string }
+          /// type is where it becomes a bool. `None` when the field is absent, which reads
+          /// as foreground.
+          Background : string option
+          /// The author's terminal width, `"120x40"`. `None` for an act with no viewport —
+          /// the doc said nothing rather than said a blank.
+          Size : string option }
 
     /// A terminal draft entry: the queue key it becomes when sent. Both ids come from the
     /// map key, so only this crosses.
@@ -246,17 +252,17 @@ module SyncedStateSync =
             let! size = Decode.object.optional "size" Decode.string
             return
                 { Subject = subject
-                  OnBehalfOf = defaultArg onBehalfOf ""
+                  OnBehalfOf = onBehalfOf
                   Author = author
                   Order = defaultArg order 0.0
-                  Background = defaultArg background ""
-                  Size = defaultArg size "" }
+                  Background = background
+                  Size = size }
         }
 
-    let private decodeLandmark<'m> : Decoder<'m, string> =
+    let private decodeLandmark<'m> : Decoder<'m, string option> =
         Decode.object {
             let! marked = Decode.object.optional "marked" Decode.string
-            return defaultArg marked ""
+            return marked
         }
 
     /// A model register the smart constructor refuses reads back as ABSENT — the provider's
@@ -319,12 +325,12 @@ module SyncedStateSync =
     /// "unmarked" would silently strip the mark off every notable act a garbled write touched.
     /// Same totality rule as every other entry here — the doc is shared with peers we don't
     /// control.
-    let private landmarksToDomain (h: HashMap<string, string>) : Map<MessageId, bool> =
+    let private landmarksToDomain (h: HashMap<string, string option>) : Map<MessageId, bool> =
         (Map.empty, HashMap.toSeq h)
         ||> Seq.fold (fun acc (key, raw) ->
             match MessageId.create key, raw with
-            | Ok id, "yes" -> acc |> Map.add id true
-            | Ok id, "no" -> acc |> Map.add id false
+            | Ok id, Some "yes" -> acc |> Map.add id true
+            | Ok id, Some "no" -> acc |> Map.add id false
             | _ -> acc)
 
     let private pendingToDomain (h: HashMap<string, PendingFields>) : Map<QueueId, PendingAct> =
@@ -346,14 +352,14 @@ module SyncedStateSync =
                       Authority =
                         Authority.rehydrate
                             author
-                            (if f.OnBehalfOf = "" then None else ActorRef.ofToken f.OnBehalfOf)
+                            (f.OnBehalfOf |> Option.bind ActorRef.ofToken)
                       // Absent reads as foreground, which is what every entry a person
                       // writes is and what every entry written before Plan 20 was.
-                      Background = (f.Background = "true")
+                      Background = (f.Background = Some "true")
                       // Unreadable or absent is NO claim rather than a guessed one: an entry
                       // written before the field existed, or by something that put nonsense
                       // there, leaves the terminal at the width it had.
-                      Size = Size.parse f.Size }
+                      Size = f.Size |> Option.bind Size.parse }
             | _ -> acc)
 
     /// Decode the synced state out of a doc. Total, and decode-empty = init: on an empty
@@ -408,6 +414,11 @@ module SyncedStateSync =
     /// structural read below repeats.
     let private entryString (entry: Yjs.Y.Map<obj>) (field: string) : string =
         entry.get field |> Option.map (unbox<string>) |> Option.defaultValue ""
+
+    /// The same read for a field whose absence is a fact the domain keeps: `None` when the
+    /// entry has no such key, rather than a `""` a reader would have to tell from a real one.
+    let private entryStringOpt (entry: Yjs.Y.Map<obj>) (field: string) : string option =
+        entry.get field |> Option.map (unbox<string>)
 
     /// Fold every entry of a named root map through `read`. Absent root = empty.
     let private foldRoot (doc: Yjs.Y.Doc) (root: string) (read: Yjs.Y.Map<obj> -> 'a) : HashMap<string, 'a> =
@@ -468,12 +479,12 @@ module SyncedStateSync =
         let pendingH =
             foldRoot doc "pending" (fun entry ->
                 { Subject = entryString entry "subject"
-                  OnBehalfOf = entryString entry "onBehalfOf"
+                  OnBehalfOf = entryStringOpt entry "onBehalfOf"
                   Author = entryString entry "author"
                   Order = entry.get "order" |> Option.map (unbox<float>) |> Option.defaultValue 0.0
-                  Background = entryString entry "background"
-                  Size = entryString entry "size" })
-        let landmarksH = foldRoot doc "landmarks" (fun entry -> entryString entry "marked")
+                  Background = entryStringOpt entry "background"
+                  Size = entryStringOpt entry "size" })
+        let landmarksH = foldRoot doc "landmarks" (fun entry -> entryStringOpt entry "marked")
         // Off the ARGLESS root map, not off a named root: a top-level register lives there
         // (see `encodeModel`), so `doc.getMap "model"` would silently mint an empty map and
         // read back as "nobody has chosen" for ever.
