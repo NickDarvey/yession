@@ -1582,6 +1582,15 @@ let private start () =
               RevealMessage = fun id -> PaneShell.revealMessage (MessageId.value id)
               FocusItemActions = fun id -> PaneShell.toItemActions (MessageId.value id) }
 
+        // Hold a finger on a message and its actions open — the gesture a device with no
+        // pointer has instead of hover. Attached once, to the document, for the whole life of
+        // the client: the conversation it watches is re-rendered constantly, and a listener
+        // bound to anything inside it would be bound and unbound with every frame.
+        LongPress.watch (fun messageId ->
+            match MessageId.create messageId with
+            | Ok id -> dispatchRef (ToggleItemMenuMsg id)
+            | Error _ -> ())
+
         let el = appRoot ()
         // Take over the server-rendered shell (see `clearChildren`): from here Lit owns it.
         clearChildren el
