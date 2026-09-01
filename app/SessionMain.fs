@@ -599,7 +599,7 @@ let private reportGitHubNetworkFailure (credentialActor: ActorRef) (_gitSaid: st
 let private commandServices : Commands.CommandServices =
     { Repos = fun () -> reposService
       Sandboxes = fun () -> workSandboxes
-      WorkCheckout = Sandboxes.workCheckoutAt reposDir
+      WorkCheckout = Sandboxes.checkoutViewsAt reposDir
       Terminals = fun () -> terminals
       Prs = fun () -> prWatchService
       Invalidate = fun name -> queryRegistry.Invalidate name

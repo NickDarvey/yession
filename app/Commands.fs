@@ -41,12 +41,13 @@ type CommandServices =
       Repos : unit -> Repos.ReposService option
       /// The session's named WorkSandboxes.
       Sandboxes : unit -> WorkSandboxes.WorkSandboxes
-      /// A repo's checkout as its OWN work sandbox will see it — the root a repo-owned
-      /// declaration's `workdir:` resolves against (`Sandboxes.workCheckoutAt`). Its own
-      /// function rather than a repo verb because it is a different fact: the verbs
-      /// answer in the view of the session's own sandboxes, where their answers are
-      /// acted on, and a repo's sandbox is a container with a view of its own.
-      WorkCheckout : RepoRef -> string
+      /// A repo's checkout in both its addresses (`Sandboxes.checkoutViewsAt`) — the
+      /// sandbox's own view, which a repo-owned declaration's `workdir:` resolves
+      /// against, and the host's, which its `build:` context does. Its own function
+      /// rather than a repo verb because it is a different fact: the verbs answer in
+      /// the view of the session's own sandboxes, where their answers are acted on,
+      /// and a repo's sandbox is a container with a view of its own.
+      WorkCheckout : RepoRef -> CheckoutViews
       /// The terminal manager, which owns the shell profile (Plan 25).
       Terminals : unit -> SessionTerminals.SessionTerminals
       /// Watching pull requests, absent when the session could not start the poller.

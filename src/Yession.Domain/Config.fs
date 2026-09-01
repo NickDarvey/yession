@@ -158,20 +158,23 @@ module SandboxDecl =
     /// second policy engine here and nothing this can express that a command could not.
     ///
     /// The checkout is the one thing a file cannot know — a path in it is relative to a
-    /// directory the SESSION chose — so it is supplied. `workdir` is already guaranteed to
-    /// be inside the checkout by the decoder, which is where a path a person can fix is
-    /// refused; resolving is all that is left.
+    /// directory the SESSION chose — so it is supplied, in BOTH its views (`CheckoutViews`):
+    /// `workdir` resolves against the sandbox's own view, because it is where the sandbox
+    /// starts; a `build:` context resolves against the host's, because the daemon client
+    /// reads it from this filesystem before the container exists. Each is already
+    /// guaranteed inside the checkout by the decoder, which is where a path a person can
+    /// fix is refused; resolving is all that is left.
     ///
     /// `None` is a sandbox NOBODY'S repo declared: the session's own, which has no checkout
     /// for a relative path to be relative to. A `workdir` there is refused rather than
     /// resolved against something invented, and the refusal says which verb does move where
-    /// a session sandbox's terminals start.
+    /// a session sandbox's terminals start; a `build:` there is refused for the same reason.
     ///
     /// `Container = None` becomes `Confinement`, and that is not the file saying "confine
     /// me". It is the file saying nothing, and what nothing means is the BACKEND's answer:
     /// docker starts its defaults, srt and host confine. `Sandboxes.forBackend` is where the
     /// two authors meet.
-    let toRequest (checkout: string option) (decl: SandboxDecl) : Result<SandboxRequest, string> =
+    let toRequest (checkout: CheckoutViews option) (decl: SandboxDecl) : Result<SandboxRequest, string> =
         // Resolved rather than concatenated, and CLAMPED at the checkout. The decoder
         // already refuses a path that climbs out — that is the upstream fix, made where a
         // person can correct their file — and this is the downstream guard: a declaration
@@ -194,25 +197,44 @@ module SandboxDecl =
         let workingDirectory =
             match decl.WorkingDirectory, checkout with
             | None, _ -> Ok None
-            | Some dir, Some checkout -> Ok (Some (under checkout dir))
+            | Some dir, Some views -> Ok (Some (under views.InSandbox dir))
             | Some dir, None ->
                 Error (
                     sprintf
                         "'%s' is relative to a checkout, and this sandbox is the session's own rather than a repo's                          — set_shell_profile moves where its terminals start"
                         dir)
-        workingDirectory
-        |> Result.map (fun workingDirectory ->
-            { Spec =
-                { WorkingDirectory = workingDirectory
-                  EnvironmentVariables = decl.EnvironmentVariables
-                  Uses = decl.Uses
-                  Wants = decl.Wants
-                  Files = decl.Files
-                  Runtime =
-                    match decl.Container with
-                    | Some container -> Container container
-                    | None -> Confinement }
-              Forward = decl.Forward })
+        // The context leaves here HOST-absolute — the address the daemon client will
+        // actually read — under the same clamp as `workdir`: nothing this arithmetic can
+        // produce sits above the checkout, whatever reached it.
+        let runtime =
+            match decl.Container with
+            | None -> Ok Confinement
+            | Some container ->
+                match container.Build, checkout with
+                | None, _ -> Ok (Container container)
+                | Some build, Some views ->
+                    Ok (
+                        Container
+                            { container with
+                                Build = Some { build with ContextPath = under views.OnHost build.ContextPath } })
+                | Some build, None ->
+                    Error (
+                        sprintf
+                            "a build context ('%s') is relative to a checkout, and this sandbox is the session's own rather than a repo's"
+                            build.ContextPath)
+        match workingDirectory, runtime with
+        | Error e, _ -> Error e
+        | _, Error e -> Error e
+        | Ok workingDirectory, Ok runtime ->
+            Ok
+                { Spec =
+                    { WorkingDirectory = workingDirectory
+                      EnvironmentVariables = decl.EnvironmentVariables
+                      Uses = decl.Uses
+                      Wants = decl.Wants
+                      Files = decl.Files
+                      Runtime = runtime }
+                  Forward = decl.Forward }
 
 /// One repo's whole file.
 type ConfigFile =
@@ -312,13 +334,6 @@ module ConfigFile =
             | [| name; tag |] -> { Name = name; Tag = Some tag }
             | _ -> { Name = raw; Tag = None })
 
-    let private build : Decoder<ContainerBuildSpec> =
-        Decode.oneOf
-            [ Decode.string |> Decode.map (fun path -> { ContextPath = path; DockerfilePath = None })
-              Decode.object (fun get ->
-                  { ContextPath = get.Required.Field "context" Decode.string
-                    DockerfilePath = get.Optional.Field "dockerfile" Decode.string }) ]
-
     /// A path INSIDE the checkout, and the only kind of path a file may write.
     ///
     /// A `yession.yaml` is authored by whoever can push to the repo, so an absolute path is
@@ -337,6 +352,21 @@ module ConfigFile =
             elif segments |> List.contains ".." then
                 Decode.fail (sprintf "%s must be inside the checkout, and '%s' climbs out of it" what path)
             else Decode.succeed path)
+
+    /// `build:` — a context directory, and optionally a dockerfile within it.
+    ///
+    /// Both paths go through `inCheckout` for the same reason `workdir` does: the context
+    /// is read on the machine running the session — the daemon client streams it from
+    /// this filesystem — so a context a repo could point anywhere is arbitrary host-file
+    /// read lifted into an image the repo's own sandbox then opens. This decoder was the
+    /// one path-carrying field that read a bare string, three lines below the comment
+    /// explaining why nothing may.
+    let private build : Decoder<ContainerBuildSpec> =
+        Decode.oneOf
+            [ inCheckout "a build context" |> Decode.map (fun path -> { ContextPath = path; DockerfilePath = None })
+              Decode.object (fun get ->
+                  { ContextPath = get.Required.Field "context" (inCheckout "a build context")
+                    DockerfilePath = get.Optional.Field "dockerfile" (inCheckout "a build dockerfile") }) ]
 
     /// What a file may mount, and it is deliberately only the sandbox's own workspace.
     ///

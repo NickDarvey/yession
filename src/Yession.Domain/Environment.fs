@@ -20,6 +20,15 @@ module ContainerImage =
 
 type ContainerBuildSpec = { ContextPath : string; DockerfilePath : string option }
 
+/// One checkout, addressed from the two places a declaration's paths are USED.
+///
+/// `workdir:` is acted on INSIDE the sandbox, so it resolves against the sandbox's own
+/// view of the checkout. A `build:` context is read by the SESSION PROCESS — the daemon
+/// client streams the context from this filesystem — so it resolves against the host's
+/// view. Carrying both is what stops a path resolving against the wrong one, which is
+/// how `workdir: .` once produced a container working in a directory nothing mounted.
+type CheckoutViews = { InSandbox : string; OnHost : string }
+
 type MountSource =
     | HostPath of string
     | NamedVolume of string

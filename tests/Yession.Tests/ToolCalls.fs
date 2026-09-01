@@ -142,7 +142,10 @@ let private reposAnswering (add: RepoRef -> Async<Result<RepoListing, string>>) 
 let private servicesOver (service: Repos.ReposService) : Commands.CommandServices =
     { Repos = fun () -> Some service
       Sandboxes = fun () -> WorkSandboxes.unavailable
-      WorkCheckout = fun repo -> "/repos/" + RepoRef.relativePath repo
+      WorkCheckout =
+        fun repo ->
+            { InSandbox = "/repos/" + RepoRef.relativePath repo
+              OnHost = "/data/repos/" + RepoRef.relativePath repo }
       Terminals = fun () -> SessionTerminals.unavailable
       Prs = fun () -> None
       Invalidate = ignore
