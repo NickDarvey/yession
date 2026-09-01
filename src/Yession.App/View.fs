@@ -2029,12 +2029,11 @@ module View =
     /// mode, it is the ordinary one.
     let private terminalScreenView (actions: ViewActions) (model: ClientModel) (terminal: TerminalId) (holder: ActorRef option) : TemplateResult =
         let mine = ActorRef.PeerRef model.Peer.PeerId
-        let screen = ClientModel.terminalScreen terminal model |> Option.defaultValue ""
         let id = TerminalId.value terminal
         let body =
-            if screen = "" then
-                html $"""<div class="{Style.terminalOutputEmpty}">…</div>"""
-            else html $"""{ansiText screen}"""
+            match ClientModel.terminalScreen terminal model with
+            | None | Some "" -> html $"""<div class="{Style.terminalOutputEmpty}">…</div>"""
+            | Some screen -> html $"""{ansiText screen}"""
         match holder with
         | None ->
             // Nobody is typing, and a device streams anyway. Read-only for the same reason

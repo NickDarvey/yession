@@ -289,7 +289,7 @@ let private descriptorsOf (registry: ToolRegistry) : obj array =
                description = descriptor.Description
                schema = descriptor.InputSchema
                readOnly = descriptor.ReadOnly
-               title = Option.defaultValue "" descriptor.Title |})
+               title = descriptor.Title |})
     |> Array.ofList
 
 /// The one dispatch, as a promise the Emit block can await. Every tool — in-process today,

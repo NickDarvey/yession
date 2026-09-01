@@ -189,7 +189,7 @@ let create () : McpConnections =
         ToolDescriptor.foreign
             (McpServerName.value connection.Server.Name)
             tool.Name
-            (Option.defaultValue "" tool.Description)
+            (Option.toObj tool.Description)
             tool.InputSchema
 
     /// MCP's lifecycle, unmodified: `initialize`, then `notifications/initialized` (the
