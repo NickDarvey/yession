@@ -1353,32 +1353,18 @@ module ClientModel =
         if firstLine.Length <= 72 then firstLine
         else (firstLine.Substring (0, 71)).TrimEnd () + "…"
 
-    /// The marked items, each with where its stroke sits on the rail: a fraction of the
-    /// rail's height measured from the BOTTOM, 0 on the newest and 1 on the oldest.
+    /// The marked items, oldest first — the conversation's own order, which is the order the
+    /// strokes are rendered in and the order the rail reads them back in.
     ///
-    /// LOGARITHMIC in rank, not linear, and that is the whole of what makes the rail worth
-    /// having. A session's marks are not equally interesting: what somebody is coming back to
-    /// is nearly always recent, and forty marks spread evenly give the newest the same fortieth
-    /// of the rail as the fortieth. On a log scale the last few take most of the rail and deep
-    /// history compresses into a band at the top, which is the shape of the attention rather
-    /// than the shape of the list.
-    ///
-    /// By RANK, never by time. The rail indexes the marks; it does not map the scroll. Two
-    /// marks a week apart and two a second apart are one step either way, and a rail spaced by
-    /// timestamp would put a night's silence through the middle of it and stack a morning's
-    /// work into one line.
-    ///
-    /// Here rather than in the view for the ordinary reason: this is arithmetic, the view is a
-    /// composition root, and a bound computed there is a bound no cheap test can reach.
-    let landmarks (model: ClientModel) : (ConversationItem * float) list =
-        let marked = Landmarks.over model.Synced.Landmarks model.Conversation.Items
-        let count = List.length marked
-        // `log count` is the scale that lands the OLDEST at exactly 1: the rail is bounded by
-        // its ends rather than trailing off before them. One mark has no scale to be on and
-        // sits at the bottom, where the newest always is.
-        let span = if count <= 1 then 1.0 else log (float count)
-        marked
-        |> List.mapi (fun i item -> item, log (1.0 + float (count - 1 - i)) / span)
+    /// No position here, and that is a deliberate subtraction rather than an omission. The
+    /// rail used to space its strokes by RANK on a log scale, which made it an index of the
+    /// marks: readable in isolation, and beside a column of per-item controls sharing the same
+    /// margin, two rows of near-identical dashes with nothing saying which was which. A stroke
+    /// now stands where its MESSAGE stands, which no model can know — a pixel is a measurement
+    /// of a laid-out page, and this list is the same on a phone and a desk. `Rail.place` is the
+    /// arithmetic and `RailSync` is what measures its inputs.
+    let landmarks (model: ClientModel) : ConversationItem list =
+        Landmarks.over model.Synced.Landmarks model.Conversation.Items
 
     /// What this session's pull-request watches currently stand at, read off the
     /// `pull_requests` query — the only shape a browser has them in, since the query stream

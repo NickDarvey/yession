@@ -240,24 +240,6 @@ let private withMarks (ids: string list) : ClientModel =
             { representativeModel.Synced with
                 Landmarks = ids |> List.map (fun id -> MessageId.create id |> expect, true) |> Map.ofList } }
 
-/// A conversation of `n` messages, every one of them marked — the shape the rail's spacing is
-/// about, which the representative fixture's handful of items cannot show.
-let private withMarkedRun (n: int) : ClientModel =
-    let items =
-        [ for i in 1 .. n ->
-            { MessageId = MessageId.create (sprintf "mark-%d" i) |> expect
-              Author = PeerRef ada
-              Body = sprintf "message %d" i
-              Status = Complete
-              Kind = ConversationItemKind.Message
-              Offset = EventOffset.create (int64 i) |> expect
-              Woke = None } ]
-    { representativeModel with
-        Conversation = { representativeModel.Conversation with Items = items }
-        Synced =
-            { representativeModel.Synced with
-                Landmarks = items |> List.map (fun item -> item.MessageId, true) |> Map.ofList } }
-
 /// How many times a hook appears in a rendered page. Counting MOUNTS rather than words: what
 /// these cases promise is one control per item and one stroke per mark, and a substring of
 /// somebody's prose is not either.
@@ -1065,41 +1047,71 @@ let private uiChecklistTests =
 
         // --- The landmark rail ---------------------------------------------------------
 
-        // Where a stroke sits is arithmetic, and arithmetic in a view is arithmetic no cheap
-        // test can reach — so it lives on the model and is pinned here. `landmarks` returns
-        // the marks in TIMELINE order, so the head is the oldest and the last is the newest.
-        testCase "a lone mark sits at the bottom of the rail, where the newest always is" <| fun () ->
-            let model = withMarks [ "msg-1" ]
-            Expect.equal
-                (ClientModel.landmarks model |> List.map snd)
-                [ 0.0 ]
-                "nothing to be on a scale with"
-
-        // The rail is bounded by its own ends rather than trailing off before them, whatever
-        // it is holding.
-        testCase "the newest mark is at one end of the rail and the oldest at the other" <| fun () ->
-            for count in [ 2; 5; 40 ] do
-                let places = ClientModel.landmarks (withMarkedRun count) |> List.map snd
-                Expect.equal (List.length places) count (sprintf "%d strokes" count)
-                Expect.equal (List.head places) 1.0 (sprintf "the oldest of %d is at the top" count)
-                Expect.equal (List.last places) 0.0 (sprintf "and the newest of %d at the bottom" count)
-
-        // The whole reason the rail is worth having. Spread evenly, forty marks give the one
-        // somebody is actually coming back to the same fortieth of the rail as the fortieth —
-        // and the fortieth is not what anybody is reaching for. Stated as the SHAPE rather
-        // than as numbers, so a change of base or of curve keeps it true.
-        testCase "the newest marks take more of the rail than the oldest ones" <| fun () ->
-            let places = ClientModel.landmarks (withMarkedRun 8) |> List.map snd |> List.rev
-            let gap i = places.[i + 1] - places.[i]
-            Expect.isTrue (gap 0 > gap 6) (sprintf "newest gap %f should exceed oldest gap %f" (gap 0) (gap 6))
-            Expect.isTrue (gap 0 > gap 1) "and each step is smaller than the one before it"
-
         testCase "only what is marked is on the rail" <| fun () ->
             Expect.equal (ClientModel.landmarks representativeModel) [] "nothing marked, nothing drawn"
             Expect.equal
-                (ClientModel.landmarks (withMarks [ "msg-1" ]) |> List.map (fst >> fun i -> MessageId.value i.MessageId))
+                (ClientModel.landmarks (withMarks [ "msg-1" ]) |> List.map (fun i -> MessageId.value i.MessageId))
                 [ "msg-1" ]
                 "one mark, one stroke, on the item that carries it"
+
+        // The promise the whole rail rests on, and the one a person sees: tap a stroke, the
+        // message arrives, and the stroke is level with it. In the exact zone the placement IS
+        // the measurement — anything else here and the two lines are near each other by luck.
+        testCase "a message on screen puts its stroke exactly level with it" <| fun () ->
+            for aboveFold in [ 12.0; 100.0; 300.0; 452.0 ] do
+                Expect.equal
+                    (Rail.place 800.0 aboveFold)
+                    aboveFold
+                    (sprintf "a message %fpx above the fold is a stroke %fpx up" aboveFold aboveFold)
+
+        // The rail may not run off either end, however far a message is from the fold. A
+        // stroke outside its own box is a bookmark nobody can click.
+        testCase "no message is far enough away to put its stroke off the rail" <| fun () ->
+            for aboveFold in [ -1e6; -900.0; -1.0; 0.0; 801.0; 5000.0; 1e6 ] do
+                let place = Rail.place 800.0 aboveFold
+                Expect.isTrue
+                    (place >= 0.0 && place <= 800.0)
+                    (sprintf "%f above the fold placed at %f, which is off a 800px rail" aboveFold place)
+
+        // Order is the rail's other promise: a mark older than another is above it, wherever
+        // either of them has got to. A curve that folded back on itself would cross two
+        // strokes over and say the conversation happened in a different order.
+        testCase "a mark further up the conversation is further up the rail" <| fun () ->
+            let places = [ for i in 0 .. 200 -> Rail.place 800.0 (float (i * 12) - 400.0) ]
+            Expect.equal (List.sort places) places "placement never doubles back"
+
+        // The reason the easing has the shape it does, and the promise a person actually
+        // feels: a stroke never moves FASTER than the conversation under it. Inside the exact
+        // zone it moves at exactly the scroll's speed and outside it lags, so a pixel of
+        // scrolling is at most a pixel of rail — which is what makes both seams invisible.
+        //
+        // Swept rather than sampled at the two seams, so the case does not have to know where
+        // they are: a discontinuity anywhere is a hairline that teleports mid-scroll, and a
+        // test that guessed the seam's address would miss one that had moved.
+        testCase "a stroke never travels further than the message it is following" <| fun () ->
+            let step = 0.5
+            let worst =
+                [ for i in 0 .. 2400 -> Rail.place 800.0 (float i * step - 400.0) ]
+                |> List.pairwise
+                |> List.map (fun (below, above) -> above - below)
+                |> List.max
+            Expect.isTrue
+                (worst <= step + 1e-9)
+                (sprintf "%fpx of scrolling moved the rail %fpx" step worst)
+
+        // What crowding does to the rail. Everything scrolled away shares one band, so a long
+        // session's older marks arrive on top of each other — ordered, and unreadable as
+        // marks.
+        testCase "strokes landing on each other are pushed apart, keeping their order" <| fun () ->
+            let spread = Rail.spaced 6.0 800.0 [ 3.0; 2.0; 1.0; 0.0 ]
+            Expect.equal spread [ 18.0; 12.0; 6.0; 0.0 ] "each one a gap above the one below it"
+
+        // And what it does NOT do. The exact zone is where the placement is a promise, and a
+        // separation rule that nudged strokes there would quietly break it for the strokes it
+        // is not needed for.
+        testCase "strokes already apart are left exactly where they were" <| fun () ->
+            let places = [ 400.0; 200.0; 90.0; 20.0 ]
+            Expect.equal (Rail.spaced 6.0 800.0 places) places "no crowding, no correction"
 
         // A stroke's accessible name is where it goes. An act's headline is already a short
         // sentence; a message is somebody's markdown, and a rail announcing a paragraph per

@@ -29,6 +29,9 @@
          it). Before Browser.fs, which wires it to dispatch, and before the harness, which
          wires the same gesture to its own. -->
     <Compile Include="LongPress.fs" />
+    <!-- Where the landmark rail's strokes stand, measured against the conversation. Before
+         Browser.fs and the harness, both of which drive it: one render each, one syncer. -->
+    <Compile Include="RailSync.fs" />
     <Compile Include="Browser.fs" />
     <!-- Host-free harness for the rich-editor browser E2E; bundled only by the test build,
          never imported by the app entry (Browser.fs), so it does not ship. -->

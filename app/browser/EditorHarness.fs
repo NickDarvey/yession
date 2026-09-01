@@ -487,10 +487,18 @@ let private shellModel : ClientModel =
     { ClientModel.init { PeerId = peerId; DisplayName = "swift-heron" } with
         Connection = Connected
         Session = Some (SessionId.create "harness" |> expect)
-        // One marked message, so the landmark rail has a stroke to draw. Where a stroke
+        // Two marked messages, so the landmark rail has strokes to draw. Where a stroke
         // LANDS is arithmetic a model test settles; whether it lands beside the reading
         // column or on top of it is geometry, and only a rendered page knows that.
-        Synced = { SyncedSessionState.empty with Landmarks = Map.ofList [ messageId, true ] }
+        //
+        // The second one is in the MIDDLE of the conversation, and that is what a case about
+        // a stroke standing level with its message needs: the first item cannot be scrolled
+        // to the middle of a scrollport it is already at the top of, so a rail measured
+        // against it is only ever measured outside the zone where the placement is exact.
+        Synced =
+            { SyncedSessionState.empty with
+                Landmarks =
+                    Map.ofList [ messageId, true; MessageId.create "msg-filler-8" |> expect, true ] }
         Conversation =
             { Items =
                 [ { MessageId = messageId
@@ -740,6 +748,10 @@ do
         replays.Sync model
         screens.Sync model
         PaneShell.setOpen model.TerminalsOpen
+        // The app's own rail placement, for the same reason the harness runs its player and
+        // screen syncs: where a stroke lands is a measurement of a laid-out page, and only a
+        // browser has one.
+        RailSync.sync ()
     dispatchRef <- dispatch
     takeRef <-
         fun id ->
@@ -765,3 +777,7 @@ do
     // The shell harness drives the real view, so it gets the real shell plumbing too — a
     // splitter that only worked in the app is a splitter no browser-tier test could reach.
     PaneShell.installPaneResize ()
+    // Same rule for the rail: what a browser-tier test asks of it is that a stroke tracks its
+    // message while the conversation scrolls, and scrolling is exactly what only this listener
+    // answers.
+    RailSync.watch ()

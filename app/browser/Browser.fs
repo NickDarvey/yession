@@ -1619,6 +1619,11 @@ let private start () =
             // model, because unlike the sidebar this column's visibility is something the app
             // itself changes (selecting a terminal opens it).
             PaneShell.setOpen model.TerminalsOpen
+            // Where the landmark rail's strokes stand, measured against the conversation this
+            // render just wrote. Here rather than a frame later: a stroke reads its position
+            // from a custom property, and a frame with none written is a frame of hairlines
+            // stacked on the rail's foot.
+            RailSync.sync ()
             // Keep a slot rule running for every open terminal: a person may be mid-command
             // in more than one, and each slot follows its own command line.
             syncTerminalSlots model
@@ -1641,6 +1646,9 @@ let private start () =
         keepSurfacesPinned PinnedSurfaces
         // And the split between the two columns is the reader's to set, not the theme's.
         PaneShell.installPaneResize ()
+        // The rail follows the conversation while it moves under it — which scrolling and a
+        // resized window both do without changing a thing in the model.
+        RailSync.watch ()
 
         // The local peer's draft slot follows its body: published on the first keystroke,
         // retracted when the composer empties. Watches the body itself, so a keystroke and a
