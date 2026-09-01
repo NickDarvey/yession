@@ -1630,6 +1630,82 @@ let editorTests =
                 Expect.isTrue reached "the message a stroke points at is on the screen, not under what covers the top of it"
                 return ()
             }
+        // Dismissing a menu with the keyboard is where focus goes to `body` if nobody puts it
+        // back — the failure the WCAG floor names, hit on the very first Escape, and one no
+        // rendered string can see: the markup after a close is identical whether the cursor
+        // landed on the control or nowhere at all.
+        editorCaseIn 1440 900 "Escape closes an item's menu and hands focus back to what opened it" (EDITOR_PORT + 23) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-conversation] [data-item-actions]")
+                do! awaitU (page.ClickAsync "#shell [data-conversation] [data-item-actions]")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-item-menu]")
+
+                // INTO the menu first. A press leaves focus on the control itself, so Escape
+                // from there has nowhere to strand it and the case passes with nothing
+                // putting focus back — which is what the first version of this did. The
+                // hazard is the entry being removed out from under the cursor.
+                do! awaitU (page.Keyboard.PressAsync "Tab")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.hasAttribute('data-item-bookmark') === true""")
+
+                do! awaitU (page.Keyboard.PressAsync "Escape")
+                let! _ = await (page.WaitForFunctionAsync """!document.querySelector('#shell [data-item-menu]')""")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.hasAttribute('data-item-actions') === true""")
+                return ()
+            }
+        // The other door out of the menu, and it strands focus the same way: choosing removes
+        // the entry that was pressed. Escape is not this case — a menu can be left by either,
+        // and only one of them was putting the cursor back.
+        editorCaseIn 1440 900 "choosing from an item's menu hands focus back to what opened it" (EDITOR_PORT + 25) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-conversation] [data-item-actions]")
+                do! awaitU (page.ClickAsync "#shell [data-conversation] [data-item-actions]")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-item-bookmark]")
+
+                do! awaitU (page.Keyboard.PressAsync "Tab")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.hasAttribute('data-item-bookmark') === true""")
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+
+                let! _ = await (page.WaitForFunctionAsync """!document.querySelector('#shell [data-item-menu]')""")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.hasAttribute('data-item-actions') === true""")
+                return ()
+            }
+        // A control revealed by hover is a control a keyboard cannot find unless focus reveals
+        // it too, and `opacity-0` keeps it in the tab order either way — so the failure is not
+        // an unreachable control but an INVISIBLE one that is nonetheless the focused thing.
+        // Tabbed to for real, because `:focus-visible` is exactly the rule that does not fire
+        // for a programmatic `focus()`.
+        editorCaseIn 1440 900 "an item's actions show themselves to a keyboard that reaches them" (EDITOR_PORT + 24) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-conversation] [data-item-actions]")
+                let mutable reached = false
+                let mutable steps = 0
+                while not reached && steps < 60 do
+                    do! awaitU (page.Keyboard.PressAsync "Tab")
+                    steps <- steps + 1
+                    let! here =
+                        await (page.EvaluateAsync<bool>
+                                "() => document.activeElement?.hasAttribute('data-item-actions') === true")
+                    reached <- here
+                Expect.isTrue reached (sprintf "a keyboard reaches an item's actions (gave up after %d tabs)" steps)
+
+                // WAITED for, never read once: the control fades in, and a computed opacity
+                // sampled on the frame focus landed is the value the transition STARTED from.
+                // Read that way this passed nothing and failed everything — the first version
+                // of this case reported `0` against a control that was on its way to 1.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """getComputedStyle(document.querySelector('#shell [data-item-actions]:focus-visible'))
+                             ?.opacity === '1'""")
+                return ()
+            }
         // The DVR (Plan 14, stage 7). What only a browser can answer: that rewinding a LIVE
         // terminal really mounts a player over what it has recorded so far — the same player
         // and the same cast a finished terminal's replay uses, which is what "rewound like

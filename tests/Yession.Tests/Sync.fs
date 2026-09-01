@@ -229,6 +229,31 @@ let private codecTests =
             | Some entry -> Expect.isNone entry.Size "no viewport, no claim"
             | None -> failwith "the command was not queued at all"
 
+        // A second menu cannot be open, and that is the FIELD's promise rather than a
+        // behaviour: `ItemMenu` is one slot, so opening one is writing it. There is no case
+        // here for it because nothing short of changing that type could make it false, and a
+        // test that cannot fail is expensive silence.
+        testCase "pressing the same control again puts its menu away" <| fun () ->
+            let messageId = MessageId.create "msg-1" |> expect
+            let model =
+                ClientModel.init (peer "ada" "Ada")
+                |> ClientModel.update (ToggleItemMenuMsg messageId)
+                |> ClientModel.update (ToggleItemMenuMsg messageId)
+            Expect.isNone model.ItemMenu "shut, not reopened"
+
+        // A menu left standing over an act it has already performed is a menu asking to be
+        // pressed again — and its entry would by then be offering the opposite of what was
+        // just chosen, on a surface the reader has not looked away from.
+        testCase "choosing from an item's menu closes it" <| fun () ->
+            let messageId = MessageId.create "msg-1" |> expect
+            let model =
+                ClientModel.init (peer "ada" "Ada")
+                |> ClientModel.update (EventsPageMsg (said messageId "ship it"))
+                |> ClientModel.update (ToggleItemMenuMsg messageId)
+                |> ClientModel.update (ToggleLandmarkMsg messageId)
+            Expect.isNone model.ItemMenu "the menu is gone"
+            Expect.equal (Map.tryFind messageId model.Synced.Landmarks) (Some true) "and the mark was made"
+
         // A landmark is a property of the SESSION, so it has to reach the doc: a mark one
         // person could not see would be a bookmark in a shared book that only opens for one
         // reader.

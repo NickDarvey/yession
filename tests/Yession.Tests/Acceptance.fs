@@ -172,6 +172,7 @@ let private representativeModel : ClientModel =
       Pins = []
       Pane = None
       TerminalsOpen = true
+      ItemMenu = None
       // The pane shows a TAB by default; the list is what the cases below turn on.
       Claude =
         { Status = { SessionCredential = None; MineCredential = None; Owner = None; AgentAvailable = Some false }
@@ -1137,7 +1138,7 @@ let private uiChecklistTests =
         // "Mark any of it" is the promise, so the control is on every item that has an id —
         // a message and an act alike. A rail whose contents were chosen for the reader would
         // be a table of contents rather than a bookmark.
-        testCase "every item in the timeline offers a mark, said and done alike" <| fun () ->
+        testCase "every item in the timeline offers its actions, said and done alike" <| fun () ->
             // Both kinds explicitly: the representative fixture is all messages, so a case
             // counting only it would pass with the control missing from every act note in the
             // product — which is exactly half of what a timeline holds.
@@ -1158,16 +1159,28 @@ let private uiChecklistTests =
                                   item "done" (ConversationItemKind.ActNote { Detail = None; Notable = false }) ] } }
             let html = Support.render model
             Expect.equal (occurrences "data-message-id=" html) 2 "a message and an act"
-            Expect.equal (occurrences "data-item-mark=" html) 2 "one control per item, none left out"
+            Expect.equal (occurrences "data-item-actions=" html) 2 "one control per item, none left out"
 
-        // And it says whether the mark is on, to a reader who cannot see it. `aria-pressed`
-        // rather than a second name: that is what a toggle button announces its state with,
-        // and it is what a person hears before they press.
-        testCase "a mark control says whether the mark is on" <| fun () ->
-            let html = Support.render (withMarks [ "msg-1" ])
-            Expect.isTrue (html.Contains "aria-pressed=\"true\"") "the marked one is pressed"
-            Expect.isTrue (html.Contains "aria-pressed=\"false\"") "and the unmarked ones are not"
-            Expect.isTrue (html.Contains Dom.Text.markItem) "under one name either way"
+        // A menu entry is READ before it is chosen, so it can say which way it goes — which a
+        // toggle wearing `aria-pressed` could not, since a name that flips as well as a state
+        // announces itself twice and in two voices.
+        testCase "the bookmark entry names which way it will go" <| fun () ->
+            let opened (marks: string list) : string =
+                Support.render { (withMarks marks) with ItemMenu = Some (MessageId.create "msg-1" |> expect) }
+            Expect.isTrue ((opened [ "msg-1" ]).Contains Dom.Text.removeBookmark) "a marked item offers to remove it"
+            Expect.isTrue ((opened []).Contains Dom.Text.addBookmark) "an unmarked one offers to add it"
+
+        // The menu exists only while it is open. Kept in the document and hidden, a twenty
+        // message conversation would ship twenty menus to the accessibility tree, and twenty
+        // more with every message that arrives.
+        testCase "an item's menu is in the document only while it is open" <| fun () ->
+            Expect.isFalse
+                ((Support.render representativeModel).Contains Dom.Hooks.itemMenu)
+                "nothing open, no menu anywhere"
+            let html =
+                Support.render
+                    { representativeModel with ItemMenu = Some (MessageId.create "msg-1" |> expect) }
+            Expect.equal (occurrences (Dom.Hooks.itemMenu + "=") html) 1 "and exactly one when one is"
 
         // The tab title is the only surface that reaches somebody who is not looking at this
         // session at all, so what it says has to survive being read out of the corner of an

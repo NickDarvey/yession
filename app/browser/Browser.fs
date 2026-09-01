@@ -1579,7 +1579,8 @@ let private start () =
               FocusChat = PaneShell.toChatItem
               FocusWatch = PaneShell.toWatchToggle
               RevealBlock = fun id blockId -> PaneShell.revealBlock (TerminalId.value id) (BlockId.value blockId)
-              RevealMessage = fun id -> PaneShell.revealMessage (MessageId.value id) }
+              RevealMessage = fun id -> PaneShell.revealMessage (MessageId.value id)
+              FocusItemActions = fun id -> PaneShell.toItemActions (MessageId.value id) }
 
         let el = appRoot ()
         // Take over the server-rendered shell (see `clearChildren`): from here Lit owns it.

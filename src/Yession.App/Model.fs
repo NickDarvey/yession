@@ -535,6 +535,14 @@ type ClientModel =
       /// Whether the terminals panel is open. View state, never synced: two people in one
       /// session may reasonably want different columns on screen.
       TerminalsOpen : bool
+      /// Which timeline item has its actions menu open, if any. View state for the same
+      /// reason the column above is: a menu one person opened is not a thing anybody else
+      /// is looking at.
+      ///
+      /// ONE field rather than a set, and that is the invariant: a second menu cannot be
+      /// open, because opening one is writing this. Two open menus would be two popovers
+      /// over one column with one Escape between them.
+      ItemMenu      : MessageId option
       /// The Claude connection panel's state (Plan 08), driven by the /claude routes.
       Claude        : ClaudeViewState
       /// The GitHub connection panel's state (Plan 14), driven by the /github routes.
@@ -703,6 +711,13 @@ type ClientMsg =
     | RewindTerminalMsg of TerminalId
     /// Open or close the terminals column.
     | ToggleTerminalsMsg
+    /// Open this item's actions menu, or shut it if it is the one already open. A toggle
+    /// rather than an open, because the control that sends it is the same control either
+    /// way — pressing the ellipsis a second time has to put the menu away.
+    | ToggleItemMenuMsg of MessageId
+    /// Shut whatever menu is open. Everything that dismisses one sends this: Escape, a
+    /// press outside it, and choosing something from it.
+    | CloseItemMenuMsg
     /// Show the terminal list, or go back to the read it covered (Plan 20, stage 0).
     | ToggleTerminalListMsg
     /// Ensure the composer slot for (terminal, author) exists, carrying the queue key it
@@ -764,6 +779,7 @@ module ClientModel =
           Pins = []
           Pane = None
           TerminalsOpen = false
+          ItemMenu = None
           Claude =
             { Status = { SessionCredential = None; MineCredential = None; Owner = None; AgentAvailable = None }
               Flow = ClaudeIdle }
@@ -1745,6 +1761,12 @@ module ClientModel =
             else { model with Pins = model.Pins @ [ tab ] }
         | ToggleTerminalsMsg ->
             { model with TerminalsOpen = not model.TerminalsOpen }
+        | ToggleItemMenuMsg messageId ->
+            // Opening one is writing the field, so opening a second shuts the first without
+            // anybody arranging it. That is the whole reason this is one slot and not a set.
+            let next = if model.ItemMenu = Some messageId then None else Some messageId
+            { model with ItemMenu = next }
+        | CloseItemMenuMsg -> { model with ItemMenu = None }
         | ToggleTerminalListMsg ->
             // Going to the list KEEPS the read it covers, so coming back resumes it — a
             // rewind included, which is the one thing the boolean did right. The column comes
@@ -1832,6 +1854,11 @@ module ClientModel =
         // An id this client's window does not hold is a page boundary, not a bug — and
         // there is nothing to toggle, because what the mark would default to is on the item.
         | ToggleLandmarkMsg messageId ->
+            // The menu shuts either way. It is the surface the mark is chosen from, and one
+            // left standing over an act it has already performed is a menu asking to be
+            // pressed again — including when the item was not found, where leaving it open
+            // would be a menu offering something that cannot happen.
+            let model = { model with ItemMenu = None }
             match model.Conversation.Items |> List.tryFind (fun item -> item.MessageId = messageId) with
             | Some item ->
                 model

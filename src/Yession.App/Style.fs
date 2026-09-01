@@ -1032,33 +1032,51 @@ module Style =
               "group-hover/mark:w-5 group-hover/mark:bg-ink group-hover/mark:h-0.5"
               "group-focus-visible/mark:w-5 group-focus-visible/mark:bg-ink" ]
 
-    /// The control that puts a mark on one item, or takes it off. It sits in the item's own
-    /// left inset — the 32px every body is already indented by — so it is beside what it marks
-    /// and never inside the text.
+    /// What a person can DO to one item, behind an ellipsis at its top-right.
+    ///
+    /// TOP rather than bottom, which is the one place on a message that does not move: an
+    /// agent's message streams, so a control anchored to its foot slides down the screen for
+    /// as long as the answer is arriving — away from the pointer reaching for it.
     ///
     /// Present but INVISIBLE until the pointer or the keyboard reaches the item: a control on
     /// every line of a conversation would be the loudest thing in it, and one that vanished
     /// from the tab order would be a control keyboard readers do not have. `opacity`, never
-    /// `hidden`, is what keeps both true at once.
+    /// `hidden`, is what keeps both true at once — and the item is `group/item`, so hovering
+    /// anywhere on the message is what reveals it, not hovering the 20px it occupies.
     ///
-    /// A device with no pointer never hovers, so on one the control has to be on the screen or
-    /// it does not exist: invisible-and-unmarkable is worse than quiet-and-present. Half
-    /// strength there — enough to find, not enough to become the loudest thing in a
-    /// conversation.
-    let itemMark =
-        cls [ "absolute left-0 top-0.5 w-5 h-5 max-md:w-6 max-md:h-6"
-              "flex items-center justify-start bg-transparent cursor-pointer"
+    /// A device with no pointer never hovers, so on one it has to be on the screen or it does
+    /// not exist. Half strength there — enough to find, not enough to become the loudest
+    /// thing in a conversation.
+    let itemActions =
+        cls [ "absolute right-0 top-0 w-6 h-6 flex items-center justify-center"
+              "bg-transparent cursor-pointer text-ink-faint hover:text-ink"
               "opacity-0 group-hover/item:opacity-100 focus-visible:opacity-100"
-              "[@media(hover:none)]:opacity-50"
+              "[@media(hover:none)]:opacity-60"
               "transition-opacity duration-150 ease-out"
               focusRing ]
-    /// Once a mark is on, it stays on the screen — an item whose mark only appeared on hover
-    /// would be an item nobody could tell was marked.
-    let itemMarked = "opacity-100"
-    /// The glyph: the rail's own hairline, so the control and the stroke it produces are
-    /// visibly the same mark rather than two vocabularies for one idea.
-    let itemMarkGlyph = "block h-px w-3 bg-ink-faint"
-    let itemMarkGlyphOn = "block h-0.5 w-4 bg-ink"
+    /// While its menu is open the control stays put: a menu hanging off something invisible
+    /// reads as a menu hanging off nothing.
+    let itemActionsOpen = "opacity-100"
+
+    /// The menu itself, hung under the control. `panel` rather than the page's ground,
+    /// because it is a surface OVER the conversation and has to be told from it.
+    let itemMenu =
+        cls [ "absolute right-0 top-7 z-30 min-w-[12rem] py-1"
+              "bg-panel"
+              Stroke.ring
+              Stroke.hair ]
+    /// One entry. Full width so the whole row is the target, left-aligned so the entries read
+    /// as a list rather than as a row of buttons.
+    let itemMenuEntry =
+        cls [ "w-full text-left px-3 py-1.5 bg-transparent cursor-pointer"
+              "text-small leading-5 text-ink-dim hover:text-ink hover:bg-surface"
+              "transition-colors duration-150 ease-out"
+              focusRing ]
+    /// What a press ANYWHERE else lands on. A real button rather than a document listener:
+    /// the listener would have to be added, removed and reasoned about against a view that
+    /// re-renders, while this exists exactly as long as the menu does. Transparent and over
+    /// everything below the menu.
+    let itemMenuBackdrop = "fixed inset-0 z-20 bg-transparent cursor-default"
 
     /// A repo note in the timeline (Plan 14): one quiet act-line, indented past the
     /// avatar gutter so the reading edge lines up with message bodies.

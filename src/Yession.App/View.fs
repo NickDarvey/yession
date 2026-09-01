@@ -145,7 +145,13 @@ type ViewActions =
       /// Scroll the conversation to one message and mark it — the rail's half of "take me
       /// back there". Imperative for the reason `RevealBlock` is: the model says which
       /// moments are marked, and only the document can scroll to one.
-      RevealMessage : MessageId -> unit }
+      RevealMessage : MessageId -> unit
+      /// Put focus back on one item's actions control, after the menu it opened has gone.
+      /// Imperative for the reason every focus move here is: the model says the menu is
+      /// shut, and only the document knows where the cursor went. Without it, dismissing a
+      /// menu strands focus on `body` — the failure the WCAG floor names, and the one a
+      /// keyboard reader hits on the very first Escape.
+      FocusItemActions : MessageId -> unit }
 
 module ViewActions =
     /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
@@ -181,7 +187,8 @@ module ViewActions =
           FocusChat = ignore
           FocusWatch = ignore
           RevealBlock = fun _ _ -> ()
-          RevealMessage = fun _ -> () }
+          RevealMessage = fun _ -> ()
+          FocusItemActions = fun _ -> () }
 
 module View =
 
@@ -1421,25 +1428,64 @@ module View =
     /// copied into the timeline, which is what makes a running chip mutate in place as its
     /// block finishes — the timeline holds where it goes, the projection holds what it says.
     let private chat (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
-        // Put a mark on this item, or take it off. It goes on every item that HAS an id — a
-        // message and an act alike — because "mark any of it" is the promise, and a rail whose
-        // contents were chosen for the reader would be a table of contents rather than a
-        // bookmark.
+        // What can be done to one item, behind an ellipsis at its top-right. It goes on
+        // every item that HAS an id — a message and an act alike — because "mark any of it"
+        // is the promise, and a rail whose contents were chosen for the reader would be a
+        // table of contents rather than a bookmark.
+        //
+        // A MENU rather than the bare toggle this replaced, and not only because more will
+        // hang off it. The toggle wore the rail's own hairline, so the margin carried two
+        // near-identical columns of dashes twenty pixels apart — one positioned by the
+        // conversation, one by the rail's own arithmetic, and nothing on the screen saying
+        // which was which.
         //
         // The dispatch carries the id alone: which way the mark goes is `Landmarks.toggle`'s
         // to work out from the item, so this control never holds a second copy of what an act
         // defaults to (see `Landmarks`).
-        let itemMark (item: ConversationItem) =
+        let itemActions (item: ConversationItem) =
             let marked = Landmarks.marked model.Synced.Landmarks item
-            let dress = if marked then Style.cls [ Style.itemMark; Style.itemMarked ] else Style.itemMark
+            let opened = model.ItemMenu = Some item.MessageId
+            let dress =
+                if opened then Style.cls [ Style.itemActions; Style.itemActionsOpen ] else Style.itemActions
+            // Rendered only while open. A menu per item kept in the document and hidden would
+            // be twenty menus in the accessibility tree of a twenty-message conversation, and
+            // twenty more with every message that arrives.
+            let menu =
+                if not opened then Lit.nothing
+                else
+                    html $"""
+                        <button type="button" class="{Style.itemMenuBackdrop}" tabindex="-1"
+                                aria-label="{Dom.Text.dismissMenu}"
+                                @click={Ev(fun _ -> dispatch CloseItemMenuMsg)}></button>
+                        <div class="{Style.itemMenu}" role="menu" data-item-menu="{MessageId.value item.MessageId}">
+                          <button type="button" role="menuitem" class="{Style.itemMenuEntry}"
+                                  data-item-bookmark="{MessageId.value item.MessageId}"
+                                  data-item-marked="{if marked then "yes" else "no"}"
+                                  @click={Ev(fun _ ->
+                                                 dispatch (ToggleLandmarkMsg item.MessageId)
+                                                 // Choosing strands focus exactly as Escape
+                                                 // does: the entry is removed by the render
+                                                 // that follows, and a keyboard that pressed
+                                                 // Enter on it is left on `body`.
+                                                 actions.FocusItemActions item.MessageId)}>
+                            {if marked then Dom.Text.removeBookmark else Dom.Text.addBookmark}
+                          </button>
+                        </div>"""
+            // Escape on the WRAPPER, so it fires wherever focus is inside the menu — and on
+            // the control too, which is where focus is put back.
             html $"""
-                <button type="button" class="{dress}"
-                        data-item-mark="{MessageId.value item.MessageId}"
-                        data-item-marked="{if marked then "yes" else "no"}"
-                        aria-pressed="{if marked then "true" else "false"}" aria-label="{Dom.Text.markItem}"
-                        @click={Ev(fun _ -> dispatch (ToggleLandmarkMsg item.MessageId))}>
-                  <span class="{if marked then Style.itemMarkGlyphOn else Style.itemMarkGlyph}"></span>
-                </button>"""
+                <div class="contents" @keydown={Ev(fun (e: Browser.Types.Event) ->
+                                                       let key = (unbox<Browser.Types.KeyboardEvent> e).key
+                                                       if key = "Escape" && opened then
+                                                           dispatch CloseItemMenuMsg
+                                                           actions.FocusItemActions item.MessageId)}>
+                  <button type="button" class="{dress}"
+                          data-item-actions="{MessageId.value item.MessageId}"
+                          aria-haspopup="menu" aria-expanded="{if opened then "true" else "false"}"
+                          aria-label="{Dom.Text.itemActions}"
+                          @click={Ev(fun _ -> dispatch (ToggleItemMenuMsg item.MessageId))}>{Icon.more}</button>
+                  {menu}
+                </div>"""
         // The particulars, under the headline and never instead of it. A second LINE rather
         // than a disclosure: what an act asked for is exactly what a person has to decide
         // about, and a decision behind a click is a decision most readers never see. The fold
@@ -1455,7 +1501,7 @@ module View =
         let actNoteItem (facts: ActNoteFacts) (item: ConversationItem) =
             html $"""
                 <article class="{Style.actNote}" data-message-id="{MessageId.value item.MessageId}" data-act-note data-message-author="{authorLabel item.Author}">
-                  {itemMark item}
+                  {itemActions item}
                   <span class="{Style.actNoteText}"><span class="{Style.actNoteWho}">{authorName model item.Author}</span> {item.Body}</span>
                   {actNoteDetail facts}
                 </article>"""
@@ -1498,7 +1544,7 @@ module View =
                 else Lit.nothing
             html $"""
                 <article class="{Style.messageItem}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
-                  {itemMark item}
+                  {itemActions item}
                   {meta}
                   <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
                 </article>"""
@@ -1749,7 +1795,7 @@ module View =
                           <span class="{Style.landmarkMark}"></span>
                         </button>"""
                 html $"""
-                    <nav class="{Style.landmarkRail}" aria-label="{Dom.Text.markedMoments}" data-landmark-rail>
+                    <nav class="{Style.landmarkRail}" aria-label="{Dom.Text.bookmarks}" data-landmark-rail>
                       {marks |> List.map stroke}
                     </nav>"""
         html $"""
