@@ -268,11 +268,13 @@ let private platform () : string = jsNative
 let limitsFor (backend: SandboxBackend) (platform: string) : HostLimits =
     match backend with
     // Every CONFINEMENT distinction and not `unlimited`: allowing everything answers a
-    // question about bounds, and `NamedVolumes` is a provision — the host backend has no
-    // volumes to provide, so a volume granted to it is withheld rather than silently
-    // held-and-never-mounted.
+    // question about bounds. The PROVISIONS stay out — `NamedVolumes` because the host
+    // backend has no volumes to provide, and `OverlayMounts` because a union mount is
+    // equally something to provide, not something to permit: claimed here, an overlay
+    // grant realised as-asked and died downstream with an internal-bug sentence, where
+    // unclaimed it is withheld with the one that tells the operator what to write.
     | HostBackend ->
-        HostLimits.of' [ HostDistinction.SocketsByPath; HostDistinction.EgressByHost; HostDistinction.OverlayMounts ]
+        HostLimits.of' [ HostDistinction.SocketsByPath; HostDistinction.EgressByHost ]
     | SrtBackend ->
         if platform = "darwin" then
             HostLimits.of' [ HostDistinction.SocketsByPath; HostDistinction.EgressByHost ]
