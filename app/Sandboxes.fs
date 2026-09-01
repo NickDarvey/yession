@@ -235,6 +235,14 @@ let reposVisibleAt (backend: SandboxBackend) (hostReposDir: string) : string =
 let workCheckoutAt (reposDir: string) (repo: RepoRef) : string =
     sprintf "%s/%s" (reposVisibleAt SandboxRuntime.repoWorkBackend reposDir) (RepoRef.relativePath repo)
 
+/// The same checkout in both its addresses (`CheckoutViews`): the sandbox's own view for
+/// `workdir:`, the host's for a `build:` context the daemon client reads from THIS
+/// filesystem. `SandboxDecl.toRequest` takes the pair so each path resolves against the
+/// view its reader will use.
+let checkoutViewsAt (reposDir: string) (repo: RepoRef) : CheckoutViews =
+    { InSandbox = workCheckoutAt reposDir repo
+      OnHost = sprintf "%s/%s" reposDir (RepoRef.relativePath repo) }
+
 /// What an operator's granted leaves add to a policy.
 ///
 /// The operator's side of the ceiling/grant split. `YESSION_SESSION_READ` was a bound AND an

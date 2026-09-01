@@ -1139,6 +1139,11 @@ let private launchTests =
 
 let private repo (raw: string) = RepoRef.create raw |> expect
 let private sandboxName (raw: string) = SandboxName.create raw |> expect
+
+/// The two views DIFFER on purpose: a resolution against the wrong one then fails the
+/// assertion instead of passing by coincidence of equal strings.
+let private checkout (inSandbox: string) : CheckoutViews option =
+    Some { InSandbox = inSandbox; OnHost = "/on-host" + inSandbox }
 let private configTests =
     testList "yession.yaml (Plan 27)" [
 
@@ -1199,7 +1204,7 @@ let private configTests =
                       "sandboxes": { "dev": { "files": { ".local/share/NuGet/Migrations/1": "" } } } }"""
                 |> expect
             let decl = file.Sandboxes |> Map.find (sandboxName "dev")
-            let request = SandboxDecl.toRequest (Some "/repos/octo/hello") decl |> expect
+            let request = SandboxDecl.toRequest (checkout "/repos/octo/hello") decl |> expect
             Expect.equal
                 (request.Spec.Files |> Map.toList |> List.map (fun (path, content) -> HomePath.value path, content))
                 [ ".local/share/NuGet/Migrations/1", "" ]
@@ -1241,7 +1246,7 @@ let private configTests =
                          "sandboxes": { "dev": { "uses": [ "npm" ], "wants": [ "warm-store" ] } } }"""
                 |> expect
             let decl = file.Sandboxes |> Map.find (sandboxName "dev")
-            let request = SandboxDecl.toRequest (Some "/repos/octo/hello") decl |> expect
+            let request = SandboxDecl.toRequest (checkout "/repos/octo/hello") decl |> expect
             Expect.equal (request.Spec.Uses |> List.map ResourceName.value) [ "npm" ] "the need"
             Expect.equal (request.Spec.Wants |> List.map ResourceName.value) [ "warm-store" ] "and the wish, apart"
 
@@ -1275,7 +1280,7 @@ let private configTests =
                           "forward": [ "github" ] } } }"""
                  |> expect).Sandboxes
                 |> Map.find (sandboxName "dev")
-            let request = SandboxDecl.toRequest (Some "/data/repos/octo/hello") decl |> expect
+            let request = SandboxDecl.toRequest (checkout "/data/repos/octo/hello") decl |> expect
             Expect.equal request.Spec.WorkingDirectory (Some "/data/repos/octo/hello/app") "the workdir is under the checkout"
             Expect.equal (request.Spec.Uses |> List.map ResourceName.value) [ "npm" ] "the resources it selects"
             Expect.equal request.Forward [ "github" ] "the credentials by name"
@@ -1288,7 +1293,7 @@ let private configTests =
             for written in [ "."; "./"; "app/.." ] do
                 let decl = { SandboxDecl.empty with WorkingDirectory = Some written }
                 Expect.equal
-                    (SandboxDecl.toRequest (Some "/data/repos/octo/hello") decl |> expect).Spec.WorkingDirectory
+                    (SandboxDecl.toRequest (checkout "/data/repos/octo/hello") decl |> expect).Spec.WorkingDirectory
                     (Some "/data/repos/octo/hello")
                     (sprintf "'%s' is the checkout" written)
 
@@ -1298,11 +1303,71 @@ let private configTests =
         // is CLAMPED there, so `../../etc` names the same directory `etc` does.
         testCase "no declaration can name a directory above its checkout" <| fun () ->
             let resolved written =
-                (SandboxDecl.toRequest (Some "/data/repos/octo/hello") { SandboxDecl.empty with WorkingDirectory = Some written } |> expect)
+                (SandboxDecl.toRequest (checkout "/data/repos/octo/hello") { SandboxDecl.empty with WorkingDirectory = Some written } |> expect)
                     .Spec.WorkingDirectory
             Expect.equal (resolved "../..") (Some "/data/repos/octo/hello") "climbing runs out at the checkout"
             Expect.equal (resolved "../../etc") (Some "/data/repos/octo/hello/etc") "and what follows lands inside it"
             Expect.equal (resolved "a/../../../etc") (Some "/data/repos/octo/hello/etc") "however far it climbed first"
+
+        // The build context is read on the machine running the session — the daemon client
+        // streams it from this filesystem — so a context a repo could point anywhere is
+        // arbitrary host-file read, lifted into an image the repo's own sandbox then opens.
+        // Same rule as `workdir`, refused where the person who can fix it is standing.
+        testCase "a build context may not leave the checkout, however it is written" <| fun () ->
+            let parsed build =
+                ConfigFile.parse (
+                    sprintf
+                        """{ "version": 2, "sandboxes": { "dev": { "container": { "build": %s } } } }"""
+                        build)
+            match parsed "\"/etc\"" with
+            | Ok _ -> failwith "an absolute context was accepted"
+            | Error e -> Expect.isTrue (e.Contains "absolute") (sprintf "refused as absolute, said: %s" e)
+            match parsed """{ "context": "../../home" }""" with
+            | Ok _ -> failwith "a climbing context was accepted"
+            | Error e -> Expect.isTrue (e.Contains "climbs") (sprintf "refused as climbing, said: %s" e)
+            match parsed """{ "context": ".", "dockerfile": "../Dockerfile" }""" with
+            | Ok _ -> failwith "a climbing dockerfile was accepted"
+            | Error e -> Expect.isTrue (e.Contains "climbs") (sprintf "the dockerfile is under the same rule, said: %s" e)
+
+        // One declaration, two addresses: the workdir is acted on INSIDE the sandbox and
+        // the build context is read on the HOST, so each resolves against its reader's
+        // view of the same checkout — which is what `CheckoutViews` carries both for.
+        testCase "a build context resolves against the host's view; the workdir against the sandbox's" <| fun () ->
+            let decl =
+                (ConfigFile.parse """
+                    { "version": 2,
+                      "sandboxes": {
+                        "dev": { "container": { "build": { "context": "infra", "dockerfile": "Dockerfile.dev" } },
+                                 "workdir": "app" } } }"""
+                 |> expect).Sandboxes
+                |> Map.find (sandboxName "dev")
+            let request = SandboxDecl.toRequest (checkout "/repos/octo/hello") decl |> expect
+            Expect.equal request.Spec.WorkingDirectory (Some "/repos/octo/hello/app") "the sandbox's address"
+            match request.Spec.Runtime with
+            | Container { Build = Some build } ->
+                Expect.equal build.ContextPath "/on-host/repos/octo/hello/infra" "the host's address"
+                Expect.equal build.DockerfilePath (Some "Dockerfile.dev") "the dockerfile stays relative — the daemon resolves it inside the streamed context"
+            | other -> failwithf "expected a build, got %A" other
+
+        // The downstream half, mirroring the workdir clamp: a build spec arriving some
+        // other way still cannot name a directory above the checkout.
+        testCase "no build context can name a directory above its checkout" <| fun () ->
+            let decl =
+                { SandboxDecl.empty with
+                    Container =
+                        Some { ContainerSpec.defaults with Build = Some { ContextPath = "../../../etc"; DockerfilePath = None } } }
+            match (SandboxDecl.toRequest (checkout "/repos/octo/hello") decl |> expect).Spec.Runtime with
+            | Container { Build = Some build } ->
+                Expect.equal build.ContextPath "/on-host/repos/octo/hello/etc" "climbing is clamped at the checkout"
+            | other -> failwithf "expected a build, got %A" other
+
+        testCase "a build on a sandbox no repo declared is refused" <| fun () ->
+            let decl =
+                { SandboxDecl.empty with
+                    Container = Some { ContainerSpec.defaults with Build = Some { ContextPath = "."; DockerfilePath = None } } }
+            match SandboxDecl.toRequest None decl with
+            | Ok _ -> failwith "expected a refusal"
+            | Error e -> Expect.isTrue (e.Contains "checkout") (sprintf "it says what the context had nothing to be relative to, said: %s" e)
 
         // A session's own sandbox has no checkout for a relative path to be relative to, so
         // there is nothing to resolve against and nothing honest to invent.
@@ -1361,7 +1426,7 @@ let private configTests =
         // answer, and `forBackend` is where the two authors meet.
         testCase "a declaration with no container asks for no container, not for confinement" <| fun () ->
             Expect.equal
-                (SandboxDecl.toRequest (Some "/checkout") SandboxDecl.empty |> expect)
+                (SandboxDecl.toRequest (checkout "/checkout") SandboxDecl.empty |> expect)
                 SandboxRequest.defaults
                 "an empty declaration is the ask that names nothing in particular"
 

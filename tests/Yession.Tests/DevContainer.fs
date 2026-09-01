@@ -85,7 +85,7 @@ let private reposDirWith (checkout: string -> unit) : string =
 let private declaredDev (reposDir: string) : EnvironmentSpec =
     let file = RepoConfig.read reposDir repoRef |> expect |> Option.get
     let decl = file.Sandboxes |> Map.find (SandboxName.create "dev" |> expect)
-    let request = SandboxDecl.toRequest (Some (Sandboxes.workCheckoutAt reposDir repoRef)) decl |> expect
+    let request = SandboxDecl.toRequest (Some (Sandboxes.checkoutViewsAt reposDir repoRef)) decl |> expect
     let container =
         match request.Spec.Runtime with
         | Container container -> container
