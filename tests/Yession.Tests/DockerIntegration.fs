@@ -61,7 +61,7 @@ let private start (resolve: SecretName -> Async<Result<string, string>>) (spec: 
     async {
         let name = SessionId.value (SessionId.mint ())
         let createSandbox = Sandboxes.forBackend DockerBackend name spec |> expect
-        match! Sandboxes.preparePolicy DockerBackend resolve None None None (fun _ -> Ok []) spec () with
+        match! Sandboxes.preparePolicy DockerBackend resolve None None None (fun _ _ -> Ok []) spec () with
         | Error reason -> return Error reason
         | Ok policy ->
             let! created = createSandbox policy

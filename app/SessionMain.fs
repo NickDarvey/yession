@@ -99,7 +99,14 @@ let private grantedLeaves : ResourceLeaf list =
 /// old ceiling check — a repo cannot exceed what the operator offered because it can only
 /// name what the operator offered, which is a stronger arrangement than comparing two lists
 /// and hoping the comparison is right.
-let private grantsFor (selection: ResourceName list) : Result<ResourceLeaf list, string> =
+let private grantsFor (uses: ResourceName list) (wants: ResourceName list) : Result<ResourceLeaf list, string> =
+    // A want is selected where this host offers it and is silently absent where it does
+    // not — the filter is the profile's own (`ResourceProfile.selected`), so the policy
+    // and the approval prompt cannot disagree about what a want came to.
+    let selection =
+        match resourceProfile with
+        | None -> uses
+        | Some file -> ResourceProfile.selected file.Resources uses wants
     match selection, resourceProfile with
     | [], _ -> Ok grantedLeaves
     | _, None ->
@@ -977,10 +984,13 @@ Async.StartImmediate (
                 // refusal is for — and `capabilitiesOn` has already answered the empty one.
                 (RepoSandboxes.capabilitiesOn
                     (Sandboxes.limitsHere SandboxRuntime.repoWorkBackend)
-                    (fun selection ->
+                    (fun uses wants ->
                         match resourceProfile with
-                        | None -> grantsFor selection |> Result.map (fun _ -> ResourceClosure.empty)
-                        | Some file -> ResourceProfile.resolve file.Resources selection))
+                        | None -> grantsFor uses wants |> Result.map (fun _ -> ResourceClosure.empty)
+                        | Some file ->
+                            ResourceProfile.resolve
+                                file.Resources
+                                (ResourceProfile.selected file.Resources uses wants)))
         // How each gated command is carried out, handed to the gate the Host owns. Here —
         // and not closed over a turn — because the table is built from the services, and the
         // services are composed here.

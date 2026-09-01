@@ -27,6 +27,11 @@ sandboxes:
     container:
       image: nixos/nix
     forward: [ github ]              # so `git push` works from a terminal
+    # A wish, not a need: where the operator offers a warm nix store volume under this
+    # name, the container mounts it and the first build substitutes into a store that
+    # outlives the sandbox; where nobody offers it, this line selects nothing and the
+    # build runs cold. `uses:` would refuse on every host that offers none.
+    wants: [ nix-container-store ]
 
     # Which nix features this repo's build needs, plus where its artifacts substitute
     # from. In the container this is the whole nix configuration the devshell sees —
@@ -52,6 +57,7 @@ sandboxes:
     container:
       image: nixos/nix
     forward: [ github ]
+    wants: [ nix-container-store ]
 
     # The same reasons as `dev`; `like:` does not exist yet, so both are written twice.
     env:

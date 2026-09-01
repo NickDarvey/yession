@@ -526,6 +526,23 @@ first's.
 
 ## Agent
 
+- **A bare `start_work_sandbox` beside a repo-declared name mints a decoy.** Sandbox
+  names are scoped (`SandboxRef`): the repo's file declares `trinketworks/yession:dev`,
+  and an agent that calls `start_work_sandbox` with plain `dev` gets a NEW session-owned
+  sandbox — srt-confined, empty-workspaced, wearing the name the agent had in mind.
+  Nothing is wrong in the model (two scopes may share a short name), but agents driven
+  through the tool fall for it repeatedly: measured across the container e2e runs, one
+  spent a whole errand creating, inspecting and removing `dev` decoys while the real dev
+  container sat running. The tool's own answer says which sandbox came up; a refusal or a
+  disambiguating nudge when a repo-scoped sibling exists is the likely fix, not built yet.
+- **An agent and a long-running build are a bad pairing without explicit parking.** A
+  container build (`nix develop --command check`, tens of minutes cold) outlives any
+  patience an agent turn has: measured, agents polled it into their own timeout, re-ran
+  it, and twice called `stop_work_sandbox` on the container mid-build — killing a
+  7.5GB-warm store to "reset". The working pattern is a detached launch (`nohup … &`,
+  log to a file) plus an instruction to stop after starting it; the missing piece is a
+  first-class long-job story (a command the session watches and reports on, rather than
+  a turn that has to survive it).
 - **The live agent's tool results are text renderings** of the typed capability
   results; there is no structured tool-result schema. The agent can read back what its
   own terminal commands did (`read_terminal`, plus the digest on the context pack

@@ -181,6 +181,13 @@ let tests =
                     (decl.EnvironmentVariables |> Map.containsKey "NIX_CONFIG")
                     (sprintf "%s carries the nix settings its build needs" name)
             Expect.equal dev.Forward [ "github" ] "dev forwards the credential `git push` needs"
+            for name, decl in [ "dev", dev; "gate", gate ] do
+                // A WANT, not a use: the same file has to work on hosts that offer no warm
+                // store, and a `uses:` there would refuse the sandbox outright.
+                Expect.equal
+                    (decl.Wants |> List.map ResourceName.value)
+                    [ "nix-container-store" ]
+                    (sprintf "%s wishes for the warm store where an operator offers one" name)
 
         testCase "a repo with no file asks for nothing, and that is not an error" <| fun () ->
             // The ordinary case. Most repos will never carry one.
@@ -293,15 +300,15 @@ let private cell (value: 'a) = fun () -> value
 
 /// A session whose host declares no resources: every selection comes to nothing. The
 /// capability notes have their own cases, where a real vocabulary is worth the setup.
-let private noCapabilities : ResourceName list -> Result<RepoSandboxes.RepoCapabilities, string> =
+let private noCapabilities : ResourceName list * ResourceName list -> Result<RepoSandboxes.RepoCapabilities, string> =
     fun _ -> Ok { RepoSandboxes.Granted = []; RepoSandboxes.Sensitive = false }
 
 /// A vocabulary that grants exactly these lines, and nothing an operator marked sensitive —
 /// so the fold's approval gate stays out of the way of cases about something else.
-let private sensitively (lines: string list) : ResourceName list -> Result<RepoSandboxes.RepoCapabilities, string> =
+let private sensitively (lines: string list) : ResourceName list * ResourceName list -> Result<RepoSandboxes.RepoCapabilities, string> =
     fun _ -> Ok { RepoSandboxes.Granted = lines; RepoSandboxes.Sensitive = true }
 
-let private granting (lines: string list) : ResourceName list -> Result<RepoSandboxes.RepoCapabilities, string> =
+let private granting (lines: string list) : ResourceName list * ResourceName list -> Result<RepoSandboxes.RepoCapabilities, string> =
     fun _ -> Ok { RepoSandboxes.Granted = lines; RepoSandboxes.Sensitive = false }
 
 /// A log for the fold to read its own history from and append its notes to. Fresh per case:

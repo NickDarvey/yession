@@ -84,9 +84,11 @@ let createFull
                                         None
                                         // The in-process Manager composition declares no
                                         // resources, so a sandbox here can only select
-                                        // nothing — and says so if it tries.
-                                        (fun selection ->
-                                            if List.isEmpty selection then Ok []
+                                        // nothing — and says so if it tries. A want is
+                                        // absent-where-unoffered by definition, so wants
+                                        // are simply nothing here.
+                                        (fun uses _wants ->
+                                            if List.isEmpty uses then Ok []
                                             else Error "this composition declares no resources")
                                         spec
                                 Ok (

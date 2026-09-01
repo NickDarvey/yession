@@ -212,6 +212,14 @@ type EnvironmentSpec =
       /// ceiling and an unconditional grant — so a repo's `read:` could never obtain
       /// anything, and an operator could not offer a path without forcing it on everything.
       Uses : ResourceName list
+      /// Resources this sandbox selects IF this host offers them, by name — an
+      /// optimisation by declaration. `Uses` refuses when a name is not offered, and
+      /// that refusal is the ceiling; a warm cache written there would break the repo on
+      /// every host that offers none. A want is the other posture: selected where
+      /// offered, silently absent where not, so the same file works cold anywhere and
+      /// warm where the operator chose to make it so. Everything else about a granted
+      /// want — sensitivity, approval, realisation — is exactly a granted use.
+      Wants : ResourceName list
       /// Files written into the sandbox's own home before anything runs in it, by path
       /// and content.
       ///
@@ -239,6 +247,7 @@ module EnvironmentSpec =
         { WorkingDirectory = None
           EnvironmentVariables = Map.empty
           Uses = []
+          Wants = []
           Files = Map.empty
           Runtime = Confinement }
 
@@ -308,11 +317,32 @@ module SandboxRequest =
                     "it uses %s, not %s"
                     (list (running.Spec.Uses |> List.map ResourceName.value))
                     (list (wanted.Spec.Uses |> List.map ResourceName.value))
-              if running.Spec.EnvironmentVariables <> wanted.Spec.EnvironmentVariables then
+              if running.Spec.Wants <> wanted.Spec.Wants then
                 sprintf
-                    "its environment sets %s, not %s"
-                    (names running.Spec.EnvironmentVariables)
-                    (names wanted.Spec.EnvironmentVariables)
+                    "it wants %s, not %s"
+                    (list (running.Spec.Wants |> List.map ResourceName.value))
+                    (list (wanted.Spec.Wants |> List.map ResourceName.value))
+              if running.Spec.EnvironmentVariables <> wanted.Spec.EnvironmentVariables then
+                // Names, never values — a value is the one thing a refusal must not
+                // print. But when the two asks name the SAME variables and differ only
+                // in what they say, listing the names twice produced "sets NIX_CONFIG,
+                // not NIX_CONFIG" on a live session: a sentence that reads as a bug in
+                // the refusal rather than a difference in the ask. Say which variables
+                // moved instead.
+                let runningNames = running.Spec.EnvironmentVariables |> Map.toList |> List.map fst
+                let wantedNames = wanted.Spec.EnvironmentVariables |> Map.toList |> List.map fst
+                if runningNames = wantedNames then
+                    let moved =
+                        runningNames
+                        |> List.filter (fun name ->
+                            Map.tryFind name running.Spec.EnvironmentVariables
+                            <> Map.tryFind name wanted.Spec.EnvironmentVariables)
+                    sprintf "its environment sets a different value for %s" (list moved)
+                else
+                    sprintf
+                        "its environment sets %s, not %s"
+                        (names running.Spec.EnvironmentVariables)
+                        (names wanted.Spec.EnvironmentVariables)
               // The runtime is a union, so a difference in it can be the CASE as well as a
               // field — which is why it is described rather than compared field by field.
               if SandboxRuntime.describe running.Spec.Runtime <> SandboxRuntime.describe wanted.Spec.Runtime then
