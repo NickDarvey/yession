@@ -41,21 +41,21 @@ module private ToolArgs =
     /// `execute_command`'s three: the line, which named sandbox to run it in, and whether the
     /// caller intends to wait for it (Plan 20, stage 2). An absent or empty `sandbox` is the
     /// default one, which is what the optional parameter degrades to.
-    let commandSandbox (json: string) : Result<string * string * bool, string> =
+    let commandSandbox (json: string) : Result<string * string option * bool, string> =
         read
             (Decode.object (fun get ->
                 get.Required.Field "command" Decode.string,
-                get.Optional.Field "sandbox" Decode.string |> Option.defaultValue "",
+                get.Optional.Field "sandbox" Decode.string |> Option.filter (fun s -> s <> ""),
                 get.Optional.Field "background" Decode.bool |> Option.defaultValue false))
             json
 
     /// `start_work_sandbox`'s pair: the sandbox name, and the credentials to forward.
     /// `open_terminal`'s pair: what the terminal is for, and which sandbox to open it in.
-    let nameSandbox (json: string) : Result<string * string, string> =
+    let nameSandbox (json: string) : Result<string * string option, string> =
         read
             (Decode.object (fun get ->
                 get.Required.Field "name" Decode.string,
-                get.Optional.Field "sandbox" Decode.string |> Option.defaultValue ""))
+                get.Optional.Field "sandbox" Decode.string |> Option.filter (fun s -> s <> "")))
             json
 
     let nameForward (json: string) : Result<string * string list, string> =
@@ -68,11 +68,11 @@ module private ToolArgs =
     /// `set_shell_profile`'s pair, both optional: where shells opened from now on start,
     /// and whose sandbox. An absent `cwd` is the CLEAR, and an absent `sandbox` is the
     /// default one — so a bare call means "put the default sandbox back the way it was".
-    let cwdSandbox (json: string) : Result<string option * string, string> =
+    let cwdSandbox (json: string) : Result<string option * string option, string> =
         read
             (Decode.object (fun get ->
                 get.Optional.Field "cwd" Decode.string,
-                get.Optional.Field "sandbox" Decode.string |> Option.defaultValue ""))
+                get.Optional.Field "sandbox" Decode.string |> Option.filter (fun s -> s <> "")))
             json
 
     let two (first: string) (second: string) (json: string) : Result<string * string, string> =
@@ -227,13 +227,14 @@ module AgentTools =
     let private executeCommand
         (capabilities: AgentCapabilities)
         (command: string)
-        (sandbox: string)
+        (sandbox: string option)
         (background: bool)
         : Async<ToolAnswer> =
         async {
             let target =
-                if sandbox = "" then Ok None
-                else SandboxRef.parse sandbox |> Result.map (InSandbox >> Some)
+                match sandbox with
+                | None -> Ok None
+                | Some s -> SandboxRef.parse s |> Result.map (InSandbox >> Some)
             match target with
             | Error e -> return ToolAnswer.text (sprintf "not a sandbox: %s" e)
             | Ok target ->
@@ -456,8 +457,8 @@ module AgentTools =
 
     /// Where terminals opened from now on start (Plan 25). The sandbox defaults, so the
     /// common call is one argument.
-    let private setShellProfile (capabilities: AgentCapabilities) (raw: string) (cwd: string option) : Async<string> =
-        let raw = if raw = "" then SandboxRef.render SandboxRef.defaultRef else raw
+    let private setShellProfile (capabilities: AgentCapabilities) (sandbox: string option) (cwd: string option) : Async<string> =
+        let raw = sandbox |> Option.defaultValue (SandboxRef.render SandboxRef.defaultRef)
         // An empty string is the CLEAR, like an absent one: a model that computed a path and
         // got nothing must not be told it set the profile to "".
         let cwd = cwd |> Option.map (fun path -> path.Trim ()) |> Option.filter (fun path -> path <> "")
@@ -525,13 +526,14 @@ module AgentTools =
                       match ToolArgs.nameSandbox args with
                       | Error e -> return Error e
                       | Ok (name, sandbox) ->
-                          let sandbox =
-                              if sandbox = "" then Ok None
-                              else SandboxRef.parse sandbox |> Result.map Some
-                          match sandbox with
+                          let resolved =
+                              match sandbox with
+                              | None -> Ok None
+                              | Some s -> SandboxRef.parse s |> Result.map Some
+                          match resolved with
                           | Error e -> return ToolAnswer.text (sprintf "not a sandbox: %s" e) |> Ok
-                          | Ok sandbox ->
-                              match! capabilities.Terminals.Open name sandbox with
+                          | Ok target ->
+                              match! capabilities.Terminals.Open name target with
                               | Ok id ->
                                   return
                                       Ok (ToolAnswer.text (sprintf "opened terminal %s for %s" (TerminalId.value id) name))
