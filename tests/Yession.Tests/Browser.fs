@@ -792,6 +792,34 @@ let private editorCase = editorCaseOn None
 /// than 390 — the very lie the ui-exploration skill warns about, arriving through another door.
 let private editorCaseIn (width: int) (height: int) = editorCaseOn (Some (width, height))
 
+/// How far the rail's stroke sits from the top of the message it marks, once the rail has had
+/// a chance to place it — the one number both rail-tracking cases are about.
+///
+/// A promise resolved three frames out rather than a timeout, because the sequence is exact: a
+/// scroll happens, the scroll ASKS for a measurement, and the measurement lands on the frame
+/// after that. Reading on the frame the scroll happened reads where the rail was, which is a
+/// green case that measures nothing.
+///
+/// The stroke's CENTRE, because that is where its hairline is: the button is a hit area
+/// deliberately taller than the mark inside it.
+///
+/// The mark in the MIDDLE of the harness's conversation, not the first one: an item at the top
+/// of a scrollport cannot be scrolled to the middle of it, so the first message is never in
+/// the zone where the placement is exact and a case measuring it would be measuring the
+/// easing.
+let [<Literal>] private settledOffset =
+    """() => new Promise(done => {
+         const measure = () => {
+           const stroke = document.querySelector("#shell [data-landmark='msg-filler-8']")
+           const item = document.querySelector("#shell [data-conversation] [data-message-id='msg-filler-8']")
+           const s = stroke.getBoundingClientRect()
+           const i = item.getBoundingClientRect()
+           return Math.abs((s.top + s.height / 2) - i.top)
+         }
+         const frame = n => n === 0 ? done(measure()) : requestAnimationFrame(() => frame(n - 1))
+         frame(3)
+       })"""
+
 let editorTests =
     testList "Editor rendering (browser)" [
         editorCase "Markdown typed in the rich editor renders formatted and round-trips to Markdown" EDITOR_PORT <| fun page ->
@@ -1628,6 +1656,56 @@ let editorTests =
                                  return item.contains(at)
                                }""")
                 Expect.isTrue reached "the message a stroke points at is on the screen, not under what covers the top of it"
+                return ()
+            }
+        // The rail's whole promise, and the one nothing but a rendered page can settle: a
+        // stroke stands LEVEL with the message it marks. `Rail.place` is pinned in the cheap
+        // tier and says nothing about what it is given — a syncer measuring against the wrong
+        // box, or against a rail whose ends are inset from the scrollport's, satisfies every
+        // model test and puts every stroke on the screen a constant distance from its message.
+        //
+        // Measured after the rail's own jump, which is what a person does to see this: tap the
+        // stroke, the message arrives, and the two are on one line.
+        editorCaseIn 1440 900 "a stroke stands level with the message it marks" (EDITOR_PORT + 29) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-landmark-rail] [data-landmark]")
+                do! awaitU (page.ClickAsync "#shell [data-landmark='msg-filler-8']")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector("#shell [data-conversation] [data-message-id='msg-filler-8']")
+                             ?.classList.contains('animate-reveal') === true""")
+                // Three frames rather than a timeout: the jump scrolls, the scroll is what asks
+                // for a measurement, and the measurement lands on the frame after that. A read
+                // taken on the frame the scroll happened is a read of where the rail WAS.
+                let! apart = await (page.EvaluateAsync<float> settledOffset)
+                Expect.isTrue
+                    (apart < 2.0)
+                    (sprintf "the stroke sits %fpx from the top of the message it marks" apart)
+                return ()
+            }
+        // And it goes on standing there while the conversation moves under it. Nothing
+        // re-renders when a reader scrolls — the model does not hold a pixel — so the only
+        // thing that can keep these two on one line is the listener, and a rail without one
+        // passes the case above and then slides off its message on the first scroll.
+        editorCaseIn 1440 900 "a stroke follows its message while the timeline scrolls" (EDITOR_PORT + 30) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-landmark-rail] [data-landmark]")
+                do! awaitU (page.ClickAsync "#shell [data-landmark='msg-filler-8']")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector("#shell [data-conversation] [data-message-id='msg-filler-8']")
+                             ?.classList.contains('animate-reveal') === true""")
+                let! _ = await (page.EvaluateAsync<float> settledOffset)
+                let! _ =
+                    await (page.EvaluateAsync<bool>
+                            """() => { const t = document.querySelector('#shell [data-conversation]')
+                                       const was = t.scrollTop
+                                       t.scrollTop = was + 40
+                                       return t.scrollTop > was }""")
+                let! apart = await (page.EvaluateAsync<float> settledOffset)
+                Expect.isTrue
+                    (apart < 2.0)
+                    (sprintf "40px of scrolling left the stroke %fpx from its message" apart)
                 return ()
             }
         // Dismissing a menu with the keyboard is where focus goes to `body` if nobody puts it

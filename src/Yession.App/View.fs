@@ -1778,18 +1778,19 @@ module View =
                 | None ->
                     [ html $"""<div class="{Style.timelineIdle}" aria-hidden="true"><span class="{Style.caretIdle}"></span></div>""" ]
             | _ -> Option.toList missing @ items
-        // One stroke per marked moment, standing where the rail says it stands. The position
-        // is an inline style because it is a computed number and a utility class cannot be
-        // one — the same reason a peer's cursor carries its colour that way.
+        // One stroke per marked moment, standing level with its message. WHERE that is cannot
+        // be rendered: it is a measurement of a laid-out page that changes on every scroll
+        // frame, so each stroke reads a custom property the browser layer writes (`RailSync`),
+        // and this puts the `data-landmark` hook on it that says which message to measure.
         let rail =
             match ClientModel.landmarks model with
             | [] -> Lit.nothing
             | marks ->
-                let stroke (item: ConversationItem, place: float) =
+                let stroke (item: ConversationItem) =
                     let label = ClientModel.landmarkLabel item
                     html $"""
                         <button type="button" class="{Style.landmarkStroke}"
-                                style="{Style.landmarkAt place}"
+                                style="{Style.landmarkAt}"
                                 data-landmark="{MessageId.value item.MessageId}" aria-label="{label}"
                                 @click={Ev(fun _ -> actions.RevealMessage item.MessageId)}>
                           <span class="{Style.landmarkMark}"></span>

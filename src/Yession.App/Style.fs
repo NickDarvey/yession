@@ -997,22 +997,31 @@ module Style =
     /// `pointer-events-none` here and `auto` on the strokes: the gutter stays as dead as it
     /// was except exactly where a mark is, so this cannot become an invisible sheet swallowing
     /// clicks meant for the text.
-    let landmarkRail =
-        "absolute left-0 top-6 bottom-6 w-8 max-md:w-4 max-md:top-4 max-md:bottom-4 pointer-events-none z-10"
+    /// `inset-y-0` and not an inset band, which is load bearing rather than tidiness: a stroke
+    /// is placed by how far its message's top sits above the RAIL's bottom, so a rail whose
+    /// ends did not stand on the scrollport's would offset every stroke on the screen by the
+    /// difference. The breathing room the old `top-6 bottom-6` bought is now bought by the
+    /// arithmetic instead — `Rail.place` reserves a band at each end and never reaches either.
+    let landmarkRail = "absolute inset-y-0 left-0 w-8 max-md:w-4 pointer-events-none z-10"
 
-    /// Where one stroke sits, as the inline style the rail's arithmetic becomes. A utility
-    /// class cannot hold a computed number, which is the same reason a peer's cursor carries
-    /// its colour this way. From the BOTTOM, because the newest mark is the one whose place
-    /// must not move as older ones accumulate above it.
-    let landmarkAt (place: float) : string = sprintf "bottom:%.3f%%" (place * 100.0)
+    /// Where one stroke sits: a custom property the browser layer writes on each stroke, read
+    /// here so the stylesheet still owns the rule and the measurement owns only the number.
+    ///
+    /// From the BOTTOM, because that is the end the conversation is anchored to — the newest
+    /// mark must not move as older ones accumulate above it.
+    ///
+    /// The fallback is the top of the foot band, which is where an unmeasured stroke would sit
+    /// if its message were exactly at the fold. It is only ever seen by a stroke that has not
+    /// been measured yet, and nothing paints between a render and its measurement.
+    let landmarkAt = "bottom:var(--rail-at,12px)"
 
     /// One stroke. The BUTTON is the hit area and is deliberately taller than the mark inside
-    /// it: on a log scale the oldest marks sit within a pixel or two of each other, and a
-    /// target the size of its own hairline is a target for nobody.
-    /// A finger is not a hairline, so the target grows where there is no pointer to aim
-    /// one. On a log scale the oldest marks then overlap, and the topmost of them wins —
-    /// which is the right way round: what is hard to reach up there is what nobody is
-    /// reaching for.
+    /// it: a target the size of its own hairline is a target for nobody, and two marks on
+    /// consecutive messages are a few pixels apart however the rail places them.
+    /// A finger is not a hairline, so the target grows where there is no pointer to aim one.
+    /// The hit areas then overlap where the marks are dense, and the topmost of them wins —
+    /// which is the right way round: what is crowded is what has scrolled away, and what has
+    /// scrolled away is not what a finger is reaching for.
     ///
     /// `translate-y-1/2` and not a hand-tuned negative margin: `bottom` places the box's
     /// EDGE, and the mark has to sit on the place the arithmetic named. A margin that
