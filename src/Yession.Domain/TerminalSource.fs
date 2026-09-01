@@ -59,8 +59,10 @@ type AttachTicket =
       /// What the other end says it can do.
       Capabilities : SourceCapabilities
       /// A human name for the thing on the other end — the terminal's title, so a panel can
-      /// say "USB serial /dev/ttyACM0" rather than an id.
-      Label : string }
+      /// say "USB serial /dev/ttyACM0" rather than an id. `None` when the provider named
+      /// nothing: an absent label is a fact `named` fills with the call it came from, not a
+      /// blank string a reader has to detect after the fact.
+      Label : string option }
 
 /// A stream a provider OFFERED, in the answer to a tool call (Plan 19).
 ///
@@ -126,8 +128,9 @@ module StreamOffer =
     /// IS still ends up with a titled panel, and the fallback names the call it came from —
     /// which is the most a client can honestly say about somebody else's resource.
     let named (fallback: string) (offer: StreamOffer) : StreamOffer =
-        if offer.Ticket.Label.Trim () <> "" then offer
-        else { offer with Ticket = { offer.Ticket with Label = fallback } }
+        match offer.Ticket.Label with
+        | Some label when label.Trim () <> "" -> offer
+        | _ -> { offer with Ticket = { offer.Ticket with Label = Some fallback } }
 
     /// Whether this session may dial what a server offered it.
     ///

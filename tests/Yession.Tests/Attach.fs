@@ -108,7 +108,7 @@ let private startProvider () : JS.Promise<Provider> = jsNative
 let private ticket (port: int) (path: string) (capabilities: SourceCapabilities) : AttachTicket =
     { Url = sprintf "ws://127.0.0.1:%d%s" port path
       Capabilities = capabilities
-      Label = "loopback" }
+      Label = Some "loopback" }
 
 /// Poll for a condition rather than sleeping a fixed amount: what is being waited on is a
 /// round trip over loopback, and a fixed sleep is either flaky or slow.
@@ -223,7 +223,7 @@ let portsTests =
                 // Port 1 on loopback: reserved, never listening, and refused immediately.
                 let! attached =
                     Yession.Host.AttachWs.attach
-                        { Url = "ws://127.0.0.1:1/echo"; Capabilities = device; Label = "nothing" }
+                        { Url = "ws://127.0.0.1:1/echo"; Capabilities = device; Label = Some "nothing" }
                         80 24 ignore
                 Expect.isError attached "a refused connection is reported, not awaited"
             }

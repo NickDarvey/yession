@@ -723,7 +723,7 @@ module Codec =
                       Capabilities =
                         get.Optional.Field "capabilities" capabilities
                         |> Option.defaultValue SourceCapabilities.byteStream
-                      Label = get.Optional.Field "label" Decode.string |> Option.defaultValue "" }
+                      Label = get.Optional.Field "label" Decode.string |> Option.filter (fun s -> s.Trim () <> "") }
                   Renewable = get.Optional.Field "renewable" Decode.bool |> Option.defaultValue false })
         let container : Decoder<StreamOffer option> =
             Decode.object (fun get -> get.Optional.Field StreamOffer.metaKey offer)
@@ -2043,7 +2043,7 @@ module Codec =
             Decode.object (fun get ->
                 AgentModel.create
                     (get.Required.Field "id" modelId.Decode)
-                    (get.Optional.Field "name" Decode.string |> Option.defaultValue "")) }
+                    (get.Optional.Field "name" Decode.string |> Option.toObj)) }
 
     /// The catalogue as the session serves it to a picker. An OBJECT around the list rather
     /// than a bare array, so the reply has somewhere to grow — a provider's default, a

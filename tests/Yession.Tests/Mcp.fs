@@ -627,7 +627,7 @@ let portsTests =
                     | None -> failwith "the offer did not survive the round trip"
                     | Some offer ->
                         Expect.stringContains offer.Ticket.Url "/attach/tok" "the address the session will dial"
-                        Expect.equal offer.Ticket.Label "USB serial" "named by the provider"
+                        Expect.equal offer.Ticket.Label (Some "USB serial") "named by the provider"
                         Expect.isTrue offer.Renewable "and it says asking again is safe"
                         Expect.isFalse
                             offer.Ticket.Capabilities.CanInstrument
@@ -811,7 +811,9 @@ let serialTests =
                 // is what makes the device a terminal rather than a url in some prose.
                 let offer = streamOf acquired
                 Expect.stringContains offer.Ticket.Url "ws://127.0.0.1" "the offer is the address, structured"
-                Expect.stringContains offer.Ticket.Label "/dev/ttyFAKE0" "a panel can say what it is looking at"
+                match offer.Ticket.Label with
+                | Some label -> Expect.stringContains label "/dev/ttyFAKE0" "a panel can say what it is looking at"
+                | None -> failwith "the provider named its stream, so the label is present"
                 Expect.isFalse offer.Ticket.Capabilities.CanInstrument "a serial line has no prompt to bootstrap"
                 Expect.isFalse offer.Ticket.Capabilities.CanResize "and no size to be told"
                 Expect.isTrue offer.Renewable "asking again is how you get another stream"

@@ -30,7 +30,7 @@ let private meta (body: string) = sprintf """{"%s":%s}""" StreamOffer.metaKey bo
 let private offerOf (body: string) = Codec.streamOffer (meta body)
 
 let private ticket (url: string) : AttachTicket =
-    { Url = url; Capabilities = SourceCapabilities.byteStream; Label = "a device" }
+    { Url = url; Capabilities = SourceCapabilities.byteStream; Label = Some "a device" }
 
 let private offer (url: string) : StreamOffer = { Ticket = ticket url; Renewable = false }
 
@@ -119,11 +119,11 @@ let private admissionTests =
         }
 
         test "an unlabelled offer is named after the call it came from" {
-            let bare = { Ticket = { ticket "ws://h/s" with Label = "" }; Renewable = false }
-            Expect.equal (StreamOffer.named "serial/acquire_device" bare).Ticket.Label "serial/acquire_device" "a panel always has a title"
+            let bare = { Ticket = { ticket "ws://h/s" with Label = None }; Renewable = false }
+            Expect.equal (StreamOffer.named "serial/acquire_device" bare).Ticket.Label (Some "serial/acquire_device") "a panel always has a title"
             Expect.equal
                 (StreamOffer.named "serial/acquire_device" (offer "ws://h/s")).Ticket.Label
-                "a device"
+                (Some "a device")
                 "and a provider that named its own stream keeps the name"
         }
     ]

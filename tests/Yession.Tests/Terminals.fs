@@ -2315,7 +2315,7 @@ let private refusingStream () : AttachTerminal =
 let private deviceTicket =
     { Url = "ws://127.0.0.1:0/device"
       Capabilities = SourceCapabilities.byteStream
-      Label = "USB serial" }
+      Label = Some "USB serial" }
 
 /// A source that DID claim an exit code — a remote shell rather than a serial line — so
 /// "is the code reported" and "is one invented" are two different questions with two
