@@ -194,7 +194,7 @@ let tryHandle
                 decodeAnd (ControlWire.fromString ControlWire.sessionSummaryReport) (fun summary ->
                     Async.StartImmediate (
                         async {
-                            match! reportSummary (Option.defaultValue "" secret) summary with
+                            match! reportSummary launchSecret summary with
                             | Ok () -> respond res 200 "ok"
                             | Error e -> respond res 400 e
                         }))
