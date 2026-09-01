@@ -189,6 +189,16 @@ let revealMessage (messageId: string) : unit =
             reflow item
             item.classList.add [| "animate-reveal" |]))
 
+/// Put focus back on one item's actions control, once the menu it opened has gone.
+///
+/// A frame later like every act here, and for the sharper reason: the control is what the
+/// menu was hanging off, and the render that removed the menu is the one that has to have
+/// happened before this can find it. Nothing to fall back to if it cannot — the item has
+/// scrolled out of the window this client holds, and there is no second right place for a
+/// cursor that was inside a menu about it.
+let toItemActions (messageId: string) : unit =
+    nextFrame (fun () -> focusOn (find (sprintf "[data-item-actions=\"%s\"]" messageId)))
+
 /// The pane's open state, as a class on the shell root — the same mechanism the sidebar uses,
 /// so a Lit re-render never fights the CSS transition. A `set` rather than a toggle, because
 /// the model holds the bit and this only reflects it: the app opens this column itself

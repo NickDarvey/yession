@@ -701,6 +701,7 @@ do
             FocusWatch = PaneShell.toWatchToggle
             RevealBlock = fun id blockId -> PaneShell.revealBlock (TerminalId.value id) (BlockId.value blockId)
             RevealMessage = fun id -> PaneShell.revealMessage (MessageId.value id)
+            FocusItemActions = fun id -> PaneShell.toItemActions (MessageId.value id)
             TakeTerminal = fun id -> takeRef id
             TypeIntoTerminal = recordTyped }
     // The app's own player sync, so a block tab in the harness really plays its recording —

@@ -75,6 +75,12 @@ module Icon =
     let private archivePath =
         "M2.5 3.5 L13.5 3.5 L13.5 6.5 L2.5 6.5 Z M3.5 6.5 L3.5 12.5 L12.5 12.5 L12.5 6.5 M6.5 9 L9.5 9"
 
+    /// An ellipsis: three dots, drawn as ZERO-LENGTH subpaths. This set has no fills, so a
+    /// filled circle would be its first — and a stroked ring at this size is a doughnut, not
+    /// a dot. A subpath of no length paints its cap, which under this vocabulary's square
+    /// caps is exactly a square dot, at whatever weight the icon is drawn.
+    let private morePath = "M3.5 8 L3.5 8 M8 8 L8 8 M12.5 8 L12.5 8"
+
     // --- The vocabulary ----------------------------------------------------------------------
     // 14px inside a 24px icon button; 12px where an icon rides a caps-label line.
 
@@ -84,6 +90,10 @@ module Icon =
     let left = stroked "w-3.5 h-3.5" leftPath
     let right = stroked "w-3.5 h-3.5" rightPath
     let send = stroked "w-3.5 h-3.5" sendPath
+    /// What else can be done to the thing this sits on. Heavier than the working stroke,
+    /// because the dots are square CAPS rather than segments: at 1.5 they are a smaller mark
+    /// than any other glyph here, and read as dirt on the screen rather than as a control.
+    let more = strokedAt "2.5" "w-3.5 h-3.5" morePath
 
     /// The marks the sidebar's pivots travel with (`Style.navPivot`): tall, thin, and lighter
     /// than any working control, because they sit beside a 19px extralight word.

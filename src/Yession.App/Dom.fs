@@ -81,7 +81,13 @@ module Dom =
         /// state without reading a class.
         let landmarkRail = "data-landmark-rail"
         let landmark = "data-landmark"
-        let itemMark = "data-item-mark"
+        /// The per-item actions control, valued by the message it acts on, and the menu it
+        /// opens. `data-item-marked` rides the BOOKMARK entry rather than the control: what
+        /// a test wants to read is which way the entry will go, and that is a property of
+        /// the entry.
+        let itemActions = "data-item-actions"
+        let itemMenu = "data-item-menu"
+        let itemBookmark = "data-item-bookmark"
         let itemMarked = "data-item-marked"
         // Agent activity strip.
         let agentStream = "data-agent-stream"
@@ -324,12 +330,20 @@ module Dom =
         let catchingUp = "Catching up"
         let upToDate = "Up to date"
 
-        // The landmark rail. The mark control keeps ONE name and carries its state in
-        // `aria-pressed`: a toggle whose NAME flips as well announces itself twice and in two
-        // voices ("unmark this, pressed"), and a reader then has to work out which half is
-        // the state and which is the offer.
-        let markItem = "Mark this"
-        let markedMoments = "Marked moments"
+        // The landmark rail, and the menu a mark is put on from.
+        //
+        // "Bookmark" rather than the domain's "landmark": a landmark is what the code calls
+        // the thing because some of them arrive without anybody asking, and a bookmark is
+        // what a person is doing when they put one there. The surfaces say the second.
+        //
+        // The entry NAMES which way it goes, unlike the toggle this replaced — a menu entry
+        // is read before it is chosen, so it can afford the longer name that a control
+        // wearing `aria-pressed` could not.
+        let itemActions = "More actions"
+        let addBookmark = "Bookmark"
+        let removeBookmark = "Remove bookmark"
+        let dismissMenu = "Close menu"
+        let bookmarks = "Bookmarks"
 
         /// The word on every notice's disclosure. ONE word across all of them: the move is
         /// the same wherever it appears — what this costs you is on the surface, why it is
