@@ -45,6 +45,8 @@ type Need =
     | Serial      // a real serial engine: the `serialport` addon, `udevadm`, and socat for a PTY pair
     | Jumpstarter // uv, and a resolvable Python environment for the jumpstarter example
     | Bench       // this run is MEASURING, not asserting — see `tasks.fsx bench`
+    | Dogfood     // consent to the LONG self-hosting run: this repo's own suite inside the
+                  // dev container it declares. Needs Docker beside it, egress, and patience.
 
 // process.env under Node; the CLR reads it through System.Environment below. Guarded so this
 // branch is dead-code-eliminated out of the .NET build path — jsNative would throw there.
@@ -59,7 +61,11 @@ let private getEnv (name: string) : string =
 
 // `Bench` is deliberately absent: `verify` means "every capability", and a timing suite in the
 // release gate is minutes of runtime buying a number nothing in the gate asserts on. It is asked
-// for by name, by `tasks.fsx bench`, and nowhere else.
+// for by name, by `tasks.fsx bench`, and nowhere else. `Dogfood` is absent for the same shape of
+// reason: the self-hosting run re-executes this whole suite inside a container whose devshell it
+// first substitutes, which is tens of minutes buying a proof the gate already has piecewise —
+// it is asked for by name (`check Docker Dogfood`, or a `verify.yml` dispatch naming both) when
+// the container environment story changes.
 let private allNeeds = [ Browser; Ports; Native; Docker; LiveAgent; Keyring; Nix; Srt; Pty; Serial; Jumpstarter ]
 
 let private parseNeed (s: string) : Need option =
@@ -76,6 +82,7 @@ let private parseNeed (s: string) : Need option =
     | "serial"    -> Some Serial
     | "jumpstarter" -> Some Jumpstarter
     | "bench"     -> Some Bench
+    | "dogfood"   -> Some Dogfood
     | _           -> None
 
 /// The capabilities THIS run declares it has. `YESSION_TEST_CAPS` is the primary API (a
