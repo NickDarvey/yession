@@ -69,7 +69,7 @@ let beginRequest (target: SecretId) : ControlWire.ConnectionBeginRequest =
 /// (`sk-ant-oat01-…`) or a Console API key (`sk-ant-…`). Anything else is a paste
 /// mistake worth rejecting before it is stored.
 let classifyPasted (raw: string) : Result<string, string> =
-    let trimmed = (defaultArg (Option.ofObj raw) "").Trim ()
+    let trimmed = raw |> Option.ofObj |> Option.map (fun r -> r.Trim ()) |> Option.defaultValue ""
     if trimmed.StartsWith "sk-ant-" then Ok trimmed
     else Error "expected a Claude credential (sk-ant-oat01-… setup token or sk-ant-… API key)"
 

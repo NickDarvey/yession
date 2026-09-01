@@ -722,7 +722,7 @@ let createWithUi
     let issuerOf () =
         match PublicAccess.managerUrl options.Public with
         | Some url -> url
-        | None -> defaultArg endpointUrl ""
+        | None -> endpointUrl |> Option.defaultWith (fun () -> failwith "the manager endpoint URL is not known until the server is listening")
     // The Manager's audit sink (Plan 06 telemetry): one greppable audit line to stdout for
     // each authority decision. (Session telemetry is emitted directly by each process now —
     // there is no Manager-side collector; forwarding audit to a collector too is a follow-up.)
