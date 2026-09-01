@@ -50,7 +50,7 @@ let prDecoder : Decoder<PrFields> =
             if merged then PrMerged
             elif state = "closed" then PrClosed
             else PrOpen
-          Title = get.Optional.Field "title" Decode.string |> Option.defaultValue ""
+          Title = get.Required.Field "title" Decode.string
           HeadSha = get.Required.At [ "head"; "sha" ] Decode.string
           // `auto_merge` is an OBJECT when auto merge is armed and null when it is not, so
           // its presence is the whole fact and none of its contents are read. Decoded as
@@ -129,7 +129,7 @@ let private failureOf (reply: FetchReply) : PrFetchFailure =
 let fetchOver (apiBase: string) : FetchPr =
     fun token pr etags last ->
         async {
-            let bearer = defaultArg token ""
+            let bearer = Option.toObj token
             let repo = RepoRef.value pr.Repo
             let succeeded (reply: FetchReply) = reply.reachable && reply.status >= 200 && reply.status < 300
             let notModified (reply: FetchReply) = reply.reachable && reply.status = 304
