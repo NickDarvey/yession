@@ -66,6 +66,9 @@ module DK = Fable.Dockerode
 [<Emit("$0.getVolume($1).remove()")>]
 let private removeVolume (client: obj) (name: string) : JS.Promise<unit> = jsNative
 
+[<Emit("$0.createVolume({ Name: $1, Labels: { 'yession-session': $1 } })")>]
+let private createLabelledVolume (client: obj) (name: string) : JS.Promise<obj> = jsNative
+
 let private repoRef = RepoRef.create "trinketworks/yession" |> expect
 
 /// A repos directory holding this repo's checkout at the place the session would put it —
@@ -132,6 +135,40 @@ let private awaitReady (sandbox: Sandbox) : Async<unit> =
         }
     go 20
 
+/// One case's whole fixture lifecycle, cleaned up on RED as well as green: these suites
+/// used to dispose with trailing statements, so a failed assertion leaked a container
+/// idling forever and — in the self-hosting case — a root-owned checkout the host user
+/// cannot delete. The in-container wipe runs before Dispose on every path for the same
+/// reason it exists at all: whatever the case wrote into the checkout, it wrote as the
+/// container's root, and the same root is the only thing that can take it back.
+let private withDev
+    (granted: ResourceLeaf list)
+    (checkout: string -> unit)
+    (body: Sandbox -> Async<unit>)
+    : Async<unit> =
+    async {
+        let reposDir = reposDirWith checkout
+        let mutable sandbox = None
+        let mutable failure = None
+        try
+            let! started = startDev granted (declaredDev reposDir)
+            sandbox <- Some started
+            do! awaitReady started
+            do! body started
+        with e -> failure <- Some e
+        match sandbox with
+        | Some (s: Sandbox) ->
+            let! _ = runInSandbox s "sh" [ "-c"; sprintf "rm -rf /repos/%s" (RepoRef.value repoRef) ] Map.empty None
+            do! s.Dispose ()
+        | None -> ()
+        rmrf nodeFs reposDir
+        match failure with
+        | Some e -> return raise e
+        | None -> return ()
+    }
+
+let private copiedConfig (dir: string) = copyFile nodeFs "yession.yaml" (dir + "/yession.yaml")
+
 let tests =
     Tag.needs "The declared dev container" [ Tag.Docker ] (fun () ->
         testList "the dev container this repo declares" [
@@ -142,68 +179,65 @@ let tests =
             // silent: the probes run in one case each against a per-case container, and
             // the image pull is paid once by the daemon's own cache.
 
-            testCaseAsync "it starts in this repo's checkout, reached through the /repos bind" (async {
-                let reposDir = reposDirWith (fun dir -> copyFile nodeFs "yession.yaml" (dir + "/yession.yaml"))
-                let! sandbox = startDev [] (declaredDev reposDir)
-                do! awaitReady sandbox
-                // An exec answering AT ALL is itself the Docker 29 /etc invariant: on a
-                // nix-built image every exec died while the container ran happily.
-                let! run, out, _ = runInSandbox sandbox "sh" [ "-c"; "pwd && ls yession.yaml" ] Map.empty None
-                Expect.equal run (SandboxExited 0) "the exec ran"
-                Expect.isTrue (out.Contains "/repos/trinketworks/yession") "it stands in the checkout, container view"
-                Expect.isTrue (out.Contains "yession.yaml") "and the checkout's content is really there (an empty listing here usually means the daemon cannot see the fixture — see the module comment)"
-                do! sandbox.Dispose ()
-                rmrf nodeFs reposDir
-            })
+            testCaseAsync "it starts in this repo's checkout, reached through the /repos bind" (
+                withDev [] copiedConfig (fun sandbox -> async {
+                    // An exec answering AT ALL is itself the Docker 29 /etc invariant: on a
+                    // nix-built image every exec died while the container ran happily.
+                    let! run, out, _ = runInSandbox sandbox "sh" [ "-c"; "pwd && ls yession.yaml" ] Map.empty None
+                    Expect.equal run (SandboxExited 0) "the exec ran"
+                    Expect.isTrue (out.Contains "/repos/trinketworks/yession") "it stands in the checkout, container view"
+                    Expect.isTrue (out.Contains "yession.yaml") "and the checkout's content is really there (an empty listing here usually means the daemon cannot see the fixture — see the module comment)"
+                }))
 
-            testCaseAsync "the backend's git trust reaches the container" (async {
-                let reposDir = reposDirWith (fun dir -> copyFile nodeFs "yession.yaml" (dir + "/yession.yaml"))
-                let! sandbox = startDev [] (declaredDev reposDir)
-                do! awaitReady sandbox
-                // Presence, not behaviour: the base image carries no git, and pulling one
-                // just for this probe would make the case about the network. The BEHAVIOUR
-                // — git actually reading the uid-mismatched checkout — is what the
-                // Dogfood run proves, whose suite reads devenv.lock through real git.
-                let! run, out, _ = runInSandbox sandbox "sh" [ "-c"; "printenv GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0" ] Map.empty None
-                Expect.equal run (SandboxExited 0) "the trio is set"
-                Expect.isTrue (out.Contains "safe.directory") "the key"
-                Expect.isTrue (out.Contains "*") "for every path the session mounted"
-                do! sandbox.Dispose ()
-                rmrf nodeFs reposDir
-            })
+            testCaseAsync "the backend's git trust reaches the container" (
+                withDev [] copiedConfig (fun sandbox -> async {
+                    // Presence, not behaviour: the base image carries no git, and pulling one
+                    // just for this probe would make the case about the network. The BEHAVIOUR
+                    // — git actually reading the uid-mismatched checkout — is what the
+                    // Dogfood run proves, whose suite reads devenv.lock through real git.
+                    let! run, out, _ = runInSandbox sandbox "sh" [ "-c"; "printenv GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0" ] Map.empty None
+                    Expect.equal run (SandboxExited 0) "the trio is set"
+                    Expect.isTrue (out.Contains "safe.directory") "the key"
+                    Expect.isTrue (out.Contains "*") "for every path the session mounted"
+                }))
 
-            testCaseAsync "nix initialises and writes its store under the hardened profile" (async {
-                let reposDir = reposDirWith (fun dir -> copyFile nodeFs "yession.yaml" (dir + "/yession.yaml"))
-                let! sandbox = startDev [] (declaredDev reposDir)
-                do! awaitReady sandbox
-                // Offline on purpose: a store ADD proves single-user init and store writes
-                // under CapDrop (the multi-user chown was the fault) without making the
-                // case about the network. Substitution is the Dogfood run's business.
-                let! run, _, err = runInSandbox sandbox "sh" [ "-c"; "echo probe > /tmp/probe && nix store add-file /tmp/probe" ] Map.empty None
-                Expect.equal run (SandboxExited 0) (sprintf "the store accepted a write (stderr: %s)" err)
-                do! sandbox.Dispose ()
-                rmrf nodeFs reposDir
-            })
+            testCaseAsync "nix initialises and writes its store under the hardened profile" (
+                withDev [] copiedConfig (fun sandbox -> async {
+                    // Offline on purpose: a store ADD proves single-user init and store writes
+                    // under CapDrop (the multi-user chown was the fault) without making the
+                    // case about the network. Substitution is the Dogfood run's business.
+                    let! run, _, err = runInSandbox sandbox "sh" [ "-c"; "echo probe > /tmp/probe && nix store add-file /tmp/probe" ] Map.empty None
+                    Expect.equal run (SandboxExited 0) (sprintf "the store accepted a write (stderr: %s)" err)
+                }))
 
             testCaseAsync "a granted store volume mounts at /nix, seeded from the image" (async {
-                let reposDir = reposDirWith (fun dir -> copyFile nodeFs "yession.yaml" (dir + "/yession.yaml"))
                 // A unique name per run: volumes are host-global and persistent — the
                 // property under test — so a fixed name would couple runs to each other.
+                // Created HERE, with the sweep's label: the daemon auto-creates an
+                // unlabelled volume at mount time, which `clean-docker` structurally
+                // cannot find — labelled, a run that dies before its own removal still
+                // leaves something the sweep sees.
                 let volume = sprintf "yession-test-%s" (SessionId.value (SessionId.mint ())) |> fun s -> s.ToLowerInvariant ()
-                let! sandbox = startDev [ Volume (volume, "/nix") ] (declaredDev reposDir)
-                do! awaitReady sandbox
-                let! run, out, _ =
-                    runInSandbox sandbox "sh"
-                        [ "-c"; "grep -c ' /nix ' /proc/mounts && ls /nix/store | wc -l" ] Map.empty None
-                Expect.equal run (SandboxExited 0) "the probes ran"
-                match out.Trim().Split '\n' |> Array.toList |> List.map (fun s -> s.Trim ()) with
-                | [ mounts; paths ] ->
-                    Expect.equal mounts "1" "/nix is a mount, not the image's own directory"
-                    Expect.isTrue (int paths > 0) "and dockerd seeded the empty volume from the image, so nix still runs"
-                | other -> failwithf "expected two counts, got %A" other
-                do! sandbox.Dispose ()
+                do! createLabelledVolume (DK.create ()) volume |> Interop.awaitPromise |> Async.Ignore
+                let mutable failure = None
+                try
+                    do!
+                        withDev [ Volume (volume, "/nix") ] copiedConfig (fun sandbox -> async {
+                            let! run, out, _ =
+                                runInSandbox sandbox "sh"
+                                    [ "-c"; "grep -c ' /nix ' /proc/mounts && ls /nix/store | wc -l" ] Map.empty None
+                            Expect.equal run (SandboxExited 0) "the probes ran"
+                            match out.Trim().Split '\n' |> Array.toList |> List.map (fun s -> s.Trim ()) with
+                            | [ mounts; paths ] ->
+                                Expect.equal mounts "1" "/nix is a mount, not the image's own directory"
+                                Expect.isTrue (int paths > 0) "and dockerd seeded the empty volume from the image, so nix still runs"
+                            | other -> failwithf "expected two counts, got %A" other
+                        })
+                with e -> failure <- Some e
                 do! removeVolume (DK.create ()) volume |> Interop.awaitPromise
-                rmrf nodeFs reposDir
+                match failure with
+                | Some e -> return raise e
+                | None -> return ()
             })
         ])
 
@@ -216,33 +250,26 @@ let dogfood =
     Tag.needs "The dev container, self-hosting" [ Tag.Docker; Tag.Dogfood ] (fun () ->
         testList "the dev container runs this repo's own suite" [
 
-            testCaseAsync "nix develop --command check passes inside the declared container" (async {
+            testCaseAsync "nix develop --command check passes inside the declared container" (
                 // A real clone of HEAD, not a copy of the working tree: `nix develop`
                 // evaluates the flake from git, and a checkout is what the session would
                 // have put there. Uncommitted changes are deliberately not smuggled in —
                 // this proves the tree as committed, which is what anything downstream gets.
-                let reposDir =
-                    reposDirWith (fun dir -> execSync childProcess (sprintf "git clone --quiet . %s" dir))
-                let! sandbox = startDev [] (declaredDev reposDir)
-                do! awaitReady sandbox
-                // Through a SHELL, deliberately — not because nix needs one to run, but
-                // because devenv's flake reads $PWD under --impure and only a shell sets
-                // it: exec'd bare, the eval died inside devenv's own mkShell with an
-                // unrelated-looking `//` operator error. A terminal and the agent's
-                // run_command both arrive through sh, so this is also simply how every
-                // real invocation reaches the container.
-                let! run, out, err =
-                    runInSandbox sandbox "sh" [ "-c"; "nix develop --impure --command check" ] Map.empty None
-                // The exit code IS the tally: check exits non-zero on any failure or
-                // error. The output check on top only proves the suite RAN rather than
-                // something exiting 0 without ever reaching it.
-                Expect.equal run (SandboxExited 0) (sprintf "check failed inside the container; tail of stderr: %s" (err.Substring (max 0 (err.Length - 2000))))
-                Expect.isTrue (out.Contains "tests run") "the tally printed, so the suite really ran"
-                // The run wrote build state into the checkout AS THE CONTAINER'S ROOT
-                // (.devenv, out, obj), which the host user cannot delete — so the same
-                // root that wrote it wipes it, and the host removes what is left.
-                let! _ = runInSandbox sandbox "sh" [ "-c"; "rm -rf /repos/trinketworks" ] Map.empty None
-                do! sandbox.Dispose ()
-                rmrf nodeFs reposDir
-            })
+                withDev [] (fun dir -> execSync childProcess (sprintf "git clone --quiet . %s" dir)) (fun sandbox -> async {
+                    // Through a SHELL, deliberately — not because nix needs one to run, but
+                    // because devenv's flake reads $PWD under --impure and only a shell sets
+                    // it: exec'd bare, the eval died inside devenv's own mkShell with an
+                    // unrelated-looking `//` operator error. A terminal and the agent's
+                    // run_command both arrive through sh, so this is also simply how every
+                    // real invocation reaches the container.
+                    let! run, out, err =
+                        runInSandbox sandbox "sh" [ "-c"; "nix develop --impure --command check" ] Map.empty None
+                    // The exit code IS the tally: check exits non-zero on any failure or
+                    // error. The output check on top only proves the suite RAN rather than
+                    // something exiting 0 without ever reaching it. Whatever this wrote
+                    // into the checkout, it wrote as the container's root — `withDev`'s
+                    // cleanup wipes it from inside on green and red alike.
+                    Expect.equal run (SandboxExited 0) (sprintf "check failed inside the container; tail of stderr: %s" (err.Substring (max 0 (err.Length - 2000))))
+                    Expect.isTrue (out.Contains "tests run") "the tally printed, so the suite really ran"
+                }))
         ])
