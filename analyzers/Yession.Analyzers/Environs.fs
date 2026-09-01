@@ -69,10 +69,9 @@ let direct (mfv: FSharpMemberOrFunctionOrValue) =
 /// environment.
 let private key (mfv: FSharpMemberOrFunctionOrValue) =
     try
-        let owner =
-            mfv.DeclaringEntity |> Option.bind (fun e -> e.TryFullName) |> Option.defaultValue ""
-
-        Some (owner + "." + mfv.LogicalName)
+        mfv.DeclaringEntity
+        |> Option.bind (fun e -> e.TryFullName)
+        |> Option.map (fun owner -> owner + "." + mfv.LogicalName)
     with _ ->
         None
 

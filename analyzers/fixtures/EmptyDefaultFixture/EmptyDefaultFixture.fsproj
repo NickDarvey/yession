@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Not a product project and deliberately not in Yession.slnx, for the same reason the other
+    fixtures are not: every binding in Defaults.fs is there to be judged, and some of them are
+    meant to fail. `lint` analyzes it on its own and checks the verdicts against the `// YES009`
+    markers in the source.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Defaults.fs" />
+  </ItemGroup>
+
+</Project>

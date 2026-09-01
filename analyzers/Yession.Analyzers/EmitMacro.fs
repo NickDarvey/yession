@@ -47,7 +47,10 @@ let private argumentSlots (mfv: FSharpMemberOrFunctionOrValue) =
           yield None
       for p in Seq.concat mfv.CurriedParameterGroups do
           if not (isUnit p.Type) then
-              yield Some (defaultArg p.Name "") ]
+              // The parameter's name, or `None` when it has none — which reads the same as the
+              // receiver slot above: a slot that counts toward arity but carries no name to
+              // report, so `faults` skips it rather than blaming an empty string.
+              yield p.Name ]
 
 /// A parameter the binding keeps for a reason other than being emitted — the shape a call
 /// site has to write, a type that has to be inferred — says so the way F# says it anywhere
