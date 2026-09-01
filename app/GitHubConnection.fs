@@ -71,7 +71,7 @@ let private configuredClientId () : string option =
 /// for four days. Where no App is configured (`deviceFlowConfigured = false`) paste is the
 /// only path there is, so they are still accepted.
 let classifyPasted (deviceFlowConfigured: bool) (raw: string) : Result<string, string> =
-    let trimmed = (defaultArg (Option.ofObj raw) "").Trim ()
+    let trimmed = raw |> Option.ofObj |> Option.map (fun r -> r.Trim ()) |> Option.defaultValue ""
     let durable = [ "github_pat_"; "ghp_" ]
     let expiring = [ "ghu_"; "gho_" ]
     if durable |> List.exists trimmed.StartsWith then Ok trimmed
@@ -194,7 +194,7 @@ let grantRequest (target: SecretId) (granted: PollGrant) : ControlWire.Connectio
       ExpiresIn = granted.ExpiresIn
       RefreshTokenExpiresIn = granted.RefreshTokenExpiresIn
       TokenUrl = envOr "YESSION_GITHUB_TOKEN_URL" tokenUrl
-      ClientId = configuredClientId () |> Option.defaultValue ""
+      ClientId = configuredClientId () |> Option.defaultWith (fun () -> failwith "the GitHub device-flow grant requires a configured client id")
       TokenDialect = FormEncoded }
 
 // --- the browser-facing /github* routes -------------------------------------------------
