@@ -302,13 +302,20 @@ first's.
   session id (a Crockford base32 id, always a valid Docker object name), and `EnvironmentSpec`
   is fully interpreted — image/build, mounts (incl. the persistent workspace volume),
   working directory, env-var refs, and secret refs (resolved at sandbox spawn). The
-  container drops all capabilities and sets `no-new-privileges`. It runs the image's
-  default (usually root) user, and that is a DECISION rather than an omission: without
-  `CAP_DAC_OVERRIDE` that root does not bypass file permissions — the mount suite proved
-  it by failing to write into a `0700` host directory — so the main thing a non-root user
-  buys is already bought, while running as one breaks the named workspace volume Docker
-  creates root-owned. What remains is that files written through a BIND mount are owned by
-  root on the host, which is a nuisance rather than an escape. Resource limits are
+  container drops all capabilities, then adds back the three file-ownership ones a real
+  build measurably needs — `CHOWN`, `FOWNER`, `DAC_OVERRIDE` (nix unpacks tarballs with
+  owners, chmods store paths, and re-reads what it chowned away) — and sets
+  `no-new-privileges`. It runs the image's default (usually root) user, and that is a
+  DECISION rather than an omission — but the argument for it changed when `DAC_OVERRIDE`
+  came back. It used to be that this root could not bypass file permissions (the mount
+  suite proved it by failing to write into a `0700` host directory); with `DAC_OVERRIDE`
+  it can again, on anything MOUNTED. The boundary is therefore the mount set, not the
+  permission bits within it: a container reaches only what `mountPlan` mounts — the
+  session's own checkouts and whatever the operator granted — and inside that set
+  container root was always going to own most of what it touches, while running non-root
+  breaks the named workspace volume Docker creates root-owned. What remains is that files
+  written through a BIND mount are owned by root on the host, which is a nuisance rather
+  than an escape. Resource limits are
   likewise absent, as they are for every backend. The suite (`tests/Yession.Tests/DockerIntegration.fs`) runs
   where a daemon exists; asking for the capability requires it, so a `verify` on a
   daemon-less runner fails rather than skipping. The dev container has no daemon, so
