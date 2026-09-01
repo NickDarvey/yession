@@ -30,14 +30,15 @@ type QueryName = private QueryName of string
 module QueryName =
 
     let create (raw: string) : Result<QueryName, string> =
-        let name = (defaultArg (Option.ofObj raw) "").Trim ()
         let charOk c = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c = '_'
-        if name = "" then Error "query name cannot be empty"
-        elif name.Length > 64 then Error (sprintf "'%s' is too long for a query name" name)
-        elif name.StartsWith "_" || name.EndsWith "_" then
-            Error (sprintf "'%s' is not a query name (no leading or trailing underscore)" name)
-        elif name |> Seq.forall charOk then Ok (QueryName name)
-        else Error (sprintf "'%s' is not a query name (lowercase, digits and underscore only)" name)
+        match Option.ofObj raw |> Option.map (fun r -> r.Trim ()) with
+        | None | Some "" -> Error "query name cannot be empty"
+        | Some name ->
+            if name.Length > 64 then Error (sprintf "'%s' is too long for a query name" name)
+            elif name.StartsWith "_" || name.EndsWith "_" then
+                Error (sprintf "'%s' is not a query name (no leading or trailing underscore)" name)
+            elif name |> Seq.forall charOk then Ok (QueryName name)
+            else Error (sprintf "'%s' is not a query name (lowercase, digits and underscore only)" name)
 
     let value (QueryName name) = name
 
