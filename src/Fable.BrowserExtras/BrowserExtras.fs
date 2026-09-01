@@ -83,3 +83,20 @@ module Css =
     /// want the same thing from it — a length the stylesheet decided, that no F# may assume.
     [<Emit("getComputedStyle($0).getPropertyValue($1)")>]
     let computedProperty (element: Browser.Types.HTMLElement) (name: string) : string = jsNative
+
+/// Scrolling something into view, where the ALIGNMENT matters.
+///
+/// `Browser.Dom`'s `scrollIntoView ()` takes no options and therefore always aligns to the
+/// start of the scrollport. That is the wrong end whenever the scrollport pins anything at
+/// its top: the thing scrolled to arrives underneath it.
+[<AutoOpen>]
+module Scrolling =
+
+    /// Scroll an element to the MIDDLE of its scrollport.
+    ///
+    /// Two reasons over the top: what is pinned at the top of a scrollport covers whatever
+    /// aligns there — the timeline pins the author line, so a jump landed its target under
+    /// the very line saying who was speaking — and a moment somebody has come back to is
+    /// worth showing with the moments around it, which is most of why they came back.
+    [<Emit("$0.scrollIntoView({ block: 'center' })")>]
+    let scrollIntoMiddle (element: Browser.Types.HTMLElement) : unit = jsNative

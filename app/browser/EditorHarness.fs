@@ -470,6 +470,20 @@ let private shellModel : ClientModel =
               "git -C /home/user/.yession/sessions/AAZFRYD11S65Q4P64KHATP8YYG/workspace/repos clone --depth 1 --filter=blob:none https://github.com/NickDarvey/yession.git"
               "```" ]
     let offset (n: int64) : EventOffset = EventOffset.create n |> expect
+    /// Enough said, under ONE author, that the column genuinely scrolls and the pinned author
+    /// line has something riding under it. Both are preconditions for the thing the rail's
+    /// jump has to get right — landing its target where a person can READ it, rather than
+    /// beneath the line saying who spoke — and a two-message fixture can show neither, so a
+    /// test written against one passes whatever the jump does.
+    let filler : ConversationItem list =
+        [ for i in 1 .. 16 ->
+            { MessageId = MessageId.create (sprintf "msg-filler-%d" i) |> expect
+              Author = PeerRef peerId
+              Body = sprintf "and then line %d, which is here to make the column long" i
+              Status = Complete
+              Kind = ConversationItemKind.Message
+              Offset = offset (int64 (10 + i))
+              Woke = None } ]
     { ClientModel.init { PeerId = peerId; DisplayName = "swift-heron" } with
         Connection = Connected
         Session = Some (SessionId.create "harness" |> expect)
@@ -493,6 +507,7 @@ let private shellModel : ClientModel =
                     Kind = ConversationItemKind.Message
                     Offset = offset 3L
                     Woke = None } ]
+                @ filler
               ActiveAgentMessages = Map.empty; WokenTurn = None }
         Timeline =
             { TimelineProjection.empty with
