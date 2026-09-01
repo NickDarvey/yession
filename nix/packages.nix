@@ -87,6 +87,13 @@ let
     mkdir -p "$HOME"
     export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
     export DOTNET_CLI_HOME="$HOME"
+    # The CoreCLR's W^X mode (double-mapped JIT pages) segfaults under the nix build
+    # sandbox on aarch64-linux: `dotnet fable` died with SIGSEGV (139) on the first
+    # arm CI leg while the same tree builds on x86_64-linux, on aarch64-darwin, and
+    # in the arm64 work containers (whose nix runs unsandboxed). Disabling it here
+    # affects only the BUILD-TIME compilers — what this derivation ships is the
+    # JavaScript they emit, not a CLR process.
+    export DOTNET_EnableWriteXorExecute=0
   '';
 
   # NuGet global-packages cache — the only network step (a fixed-output derivation). Populated
