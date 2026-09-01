@@ -338,7 +338,10 @@ let tests =
                       Spawn =
                         fun exec onChunk ->
                             async {
-                                let line = exec.Arguments |> List.tryLast |> Option.defaultValue ""
+                                let line =
+                                    match exec.Arguments |> List.tryLast with
+                                    | Some last -> last
+                                    | None -> failwith "the fake spawn received no command line"
                                 ran.Add line
                                 onChunk (Stdout, sprintf "ran<%s>" line)
                                 return
@@ -397,7 +400,10 @@ let tests =
                       Spawn =
                         fun exec onChunk ->
                             async {
-                                let line = exec.Arguments |> List.tryLast |> Option.defaultValue ""
+                                let line =
+                                    match exec.Arguments |> List.tryLast with
+                                    | Some last -> last
+                                    | None -> failwith "the fake spawn received no command line"
                                 onChunk (Stdout, sprintf "ran<%s>" line)
                                 return
                                     Ok

@@ -375,7 +375,13 @@ let private runDraftSchedule (ops: DraftOp list) : (string * string) list * Peer
         | Send ->
             match (runner.Model ()).Synced.Drafts |> Map.tryFind owner with
             | Some draft ->
-                let snapshot = Body.draft registry owner |> Option.defaultValue ""
+                // The draft's body text, or empty when the slot carries no fragment yet: the
+                // snapshot of an unstarted body IS the empty body, which is what the later
+                // "edits never mutate it" assertion is checked against.
+                let snapshot =
+                    match Body.draft registry owner with
+                    | Some md -> md
+                    | None -> ""
                 Body.send registry runner owner |> ignore
                 snapshots.Add (QueueId.value draft.QueueId, snapshot)
                 // Clean send, part 1: the sender's slot is gone the instant it is sent.

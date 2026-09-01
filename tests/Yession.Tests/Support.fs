@@ -589,11 +589,13 @@ module Body =
         match queueKeyOf runner peer with
         | None -> None
         | Some queueId ->
-            let md = draft registry peer |> Option.defaultValue ""
             // Seed the queue body BEFORE the entry (mirrors `Connection.SendDraft`): over an
             // ordered transport the body update reaches a draining Session Process before the
-            // entry, so the drain never snapshots an entry whose body has not yet landed.
-            if md <> "" then Markdown.intoFragment md (registry.Fragment (BodyKey.queued queueId))
+            // entry, so the drain never snapshots an entry whose body has not yet landed. Only
+            // when there IS body text — an absent or empty draft fragment has nothing to copy.
+            match draft registry peer with
+            | Some md when md <> "" -> Markdown.intoFragment md (registry.Fragment (BodyKey.queued queueId))
+            | _ -> ()
             runner.Dispatch (user (SendDraftMsg peer))
             // The composer empties after send (the body root is durable, not removed with the slot).
             Markdown.intoFragment "" (registry.Fragment (BodyKey.draft peer))

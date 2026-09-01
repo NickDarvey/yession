@@ -652,12 +652,15 @@ let foldTests =
                 Expect.equal seen.Count 0 "nothing was started"
                 match folded.Outcomes () with
                 | [ outcome ] ->
-                    Expect.isTrue
-                        (outcome.Problem |> Option.defaultValue "" |> fun p -> p.Contains "approve")
-                        (sprintf "the row says what is waited on, said: %A" outcome.Problem)
-                    Expect.isTrue
-                        (outcome.Problem |> Option.defaultValue "" |> fun p -> p.Contains "reaches anywhere")
-                        "and what is being asked for, so the answer is beside the question"
+                    match outcome.Problem with
+                    | None -> failwithf "expected the row to state a problem, got %A" outcome
+                    | Some problem ->
+                        Expect.isTrue
+                            (problem.Contains "approve")
+                            (sprintf "the row says what is waited on, said: %s" problem)
+                        Expect.isTrue
+                            (problem.Contains "reaches anywhere")
+                            "and what is being asked for, so the answer is beside the question"
                 | other -> failwithf "expected one row, got %A" other
             }
 

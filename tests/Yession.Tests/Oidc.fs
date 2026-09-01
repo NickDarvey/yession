@@ -396,7 +396,10 @@ let private opTests =
                     async {
                         let! reply = OidcHttp.getWithJar jar (authorizeUrl ())
                         Expect.equal reply.Status 302 "authorize redirects (trust-localhost strategy)"
-                        return queryOfUrl reply.Location "code" |> Option.defaultValue ""
+                        return
+                            match queryOfUrl reply.Location "code" with
+                            | Some code -> code
+                            | None -> failwith "the authorize redirect carried no code"
                     }
 
                 // Unknown client: 400, no redirect.

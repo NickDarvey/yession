@@ -567,7 +567,10 @@ let private timelineTests =
             let proj, _ = ConversationProjection.applyEvents None [ envelope ] ConversationProjection.empty
             match proj.Items with
             | [ item ] ->
-                let said = noteDetail item |> Option.defaultValue ""
+                let said =
+                    match noteDetail item with
+                    | Some detail -> detail
+                    | None -> failwith "the note carried no detail to name the grant"
                 Expect.equal item.Body "started sandbox test (srt)" "still says what started"
                 Expect.isTrue (said.Contains "/run/docker.sock") (sprintf "the grant is named, said: %s" said)
                 Expect.isTrue (said.Contains "any unix socket") (sprintf "and what it became, said: %s" said)
