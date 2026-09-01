@@ -228,7 +228,7 @@ module RepoRef =
     /// Parse `owner/repo`. A trailing `.git` is stripped rather than refused — it is how
     /// people paste repo names, and the canonical form should win.
     let create (raw: string) : Result<RepoRef, string> =
-        let trimmed = (defaultArg (Option.ofObj raw) "").Trim()
+        let trimmed = raw |> Option.ofObj |> Option.map (fun r -> r.Trim ()) |> Option.defaultValue ""
         match trimmed.Split '/' with
         | [| owner; repo |] ->
             let repo = if repo.EndsWith ".git" then repo.Substring (0, repo.Length - 4) else repo
@@ -397,15 +397,16 @@ module SandboxName =
     let defaultName = SandboxName "default"
 
     let create (raw: string) : Result<SandboxName, string> =
-        let name = (defaultArg (Option.ofObj raw) "").Trim ()
         let charOk c = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c = '-' || c = '_'
         let startOk c = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-        if name = "" then Error "sandbox name cannot be empty"
-        elif name.Length > 40 then Error (sprintf "'%s' is too long for a sandbox name (40 characters)" name)
-        elif not (startOk name.[0]) then
-            Error (sprintf "'%s' is not a sandbox name (it must start with a lowercase letter or digit)" name)
-        elif name |> Seq.forall charOk then Ok (SandboxName name)
-        else Error (sprintf "'%s' is not a sandbox name (lowercase letters, digits, '-' and '_' only)" name)
+        match Option.ofObj raw |> Option.map (fun r -> r.Trim ()) with
+        | None | Some "" -> Error "sandbox name cannot be empty"
+        | Some name ->
+            if name.Length > 40 then Error (sprintf "'%s' is too long for a sandbox name (40 characters)" name)
+            elif not (startOk name.[0]) then
+                Error (sprintf "'%s' is not a sandbox name (it must start with a lowercase letter or digit)" name)
+            elif name |> Seq.forall charOk then Ok (SandboxName name)
+            else Error (sprintf "'%s' is not a sandbox name (lowercase letters, digits, '-' and '_' only)" name)
 
     let value (SandboxName name) = name
 
@@ -421,15 +422,16 @@ type ResourceName = private ResourceName of string
 module ResourceName =
 
     let create (raw: string) : Result<ResourceName, string> =
-        let name = (defaultArg (Option.ofObj raw) "").Trim ()
         let charOk c = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c = '-' || c = '_'
         let startOk c = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-        if name = "" then Error "a resource name cannot be empty"
-        elif name.Length > 40 then Error (sprintf "'%s' is too long for a resource name (40 characters)" name)
-        elif not (startOk name.[0]) then
-            Error (sprintf "'%s' is not a resource name (it must start with a lowercase letter or digit)" name)
-        elif name |> Seq.forall charOk then Ok (ResourceName name)
-        else Error (sprintf "'%s' is not a resource name (lowercase letters, digits, '-' and '_' only)" name)
+        match Option.ofObj raw |> Option.map (fun r -> r.Trim ()) with
+        | None | Some "" -> Error "a resource name cannot be empty"
+        | Some name ->
+            if name.Length > 40 then Error (sprintf "'%s' is too long for a resource name (40 characters)" name)
+            elif not (startOk name.[0]) then
+                Error (sprintf "'%s' is not a resource name (it must start with a lowercase letter or digit)" name)
+            elif name |> Seq.forall charOk then Ok (ResourceName name)
+            else Error (sprintf "'%s' is not a resource name (lowercase letters, digits, '-' and '_' only)" name)
 
     let value (ResourceName name) = name
 
@@ -530,7 +532,7 @@ module SandboxRef =
 
     /// Read one back. Total by returning a `Result`: this parses agent input.
     let parse (raw: string) : Result<SandboxRef, string> =
-        let trimmed = (defaultArg (Option.ofObj raw) "").Trim()
+        let trimmed = raw |> Option.ofObj |> Option.map (fun r -> r.Trim ()) |> Option.defaultValue ""
         match trimmed.Split ':' with
         | [| name |] -> SandboxName.create name |> Result.map (fun n -> SandboxRef (SessionOwned, n))
         | [| repo; name |] ->
@@ -557,15 +559,16 @@ module McpServerName =
     let Reserved = "yession"
 
     let create (raw: string) : Result<McpServerName, string> =
-        let name = (defaultArg (Option.ofObj raw) "").Trim ()
         let charOk c = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c = '_'
-        if name = "" then Error "server name cannot be empty"
-        elif name.Length > 64 then Error (sprintf "'%s' is too long for a server name" name)
-        elif name = Reserved then
-            Error (sprintf "'%s' is the session's own namespace and cannot be a server name" name)
-        elif name.StartsWith "_" || name.EndsWith "_" then
-            Error (sprintf "'%s' is not a server name (no leading or trailing underscore)" name)
-        elif name |> Seq.forall charOk then Ok (McpServerName name)
-        else Error (sprintf "'%s' is not a server name (lowercase, digits and underscore only)" name)
+        match Option.ofObj raw |> Option.map (fun r -> r.Trim ()) with
+        | None | Some "" -> Error "server name cannot be empty"
+        | Some name ->
+            if name.Length > 64 then Error (sprintf "'%s' is too long for a server name" name)
+            elif name = Reserved then
+                Error (sprintf "'%s' is the session's own namespace and cannot be a server name" name)
+            elif name.StartsWith "_" || name.EndsWith "_" then
+                Error (sprintf "'%s' is not a server name (no leading or trailing underscore)" name)
+            elif name |> Seq.forall charOk then Ok (McpServerName name)
+            else Error (sprintf "'%s' is not a server name (lowercase, digits and underscore only)" name)
 
     let value (McpServerName name) = name
