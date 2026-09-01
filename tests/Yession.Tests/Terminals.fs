@@ -1564,7 +1564,10 @@ let private scriptedEnvironment (script: string -> (OutputStream * string) list 
             fun exec onChunk ->
                 async {
                     spawned.Add exec
-                    let command = exec.Arguments |> List.tryLast |> Option.defaultValue ""
+                    let command =
+                        match exec.Arguments |> List.tryLast with
+                        | Some last -> last
+                        | None -> failwith "the fake spawn received no command line"
                     let chunks, code = script command
                     chunks |> List.iter onChunk
                     return

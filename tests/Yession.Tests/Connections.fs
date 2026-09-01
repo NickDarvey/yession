@@ -468,19 +468,19 @@ type private TokenEndpoint =
     { Url : string
       SetResponse : string -> unit
       Requests : ResizeArray<string>
-      ContentTypes : ResizeArray<string> }
+      ContentTypes : ResizeArray<string option> }
 
 let private startTokenEndpoint () : Async<TokenEndpoint> =
     async {
         let mutable response = """{"access_token":"at-1","refresh_token":"rt-1","expires_in":3600}"""
         let requests = ResizeArray<string> ()
-        let contentTypes = ResizeArray<string> ()
+        let contentTypes = ResizeArray<string option> ()
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
             let mutable acc = ""
             req.on ("data", fun chunk -> acc <- acc + Interop.bufferToString chunk) |> ignore
             req.on ("end", fun _ ->
                 requests.Add acc
-                contentTypes.Add (Interop.headerOf req "content-type" |> Option.defaultValue "")
+                contentTypes.Add (Interop.headerOf req "content-type")
                 let status = if response.StartsWith "{" then 200 else 400
                 res.writeHead (status, Fable.Core.JsInterop.createObj [ "content-type", box "application/json" ]) |> ignore
                 res.``end`` response) |> ignore
@@ -556,7 +556,7 @@ let private brokerTests =
                 let began = expect began
                 let! completed = broker.Complete request.Target (sprintf "the-code#%s" began.State)
                 expect completed
-                Expect.equal endpoint.ContentTypes.[0] "application/json" "the exchange went out as JSON"
+                Expect.equal endpoint.ContentTypes.[0] (Some "application/json") "the exchange went out as JSON"
                 Expect.isTrue ((endpoint.Requests.[0]).Contains "\"grant_type\":\"authorization_code\"") "a JSON grant"
                 Expect.isTrue ((endpoint.Requests.[0]).Contains (sprintf "\"state\":\"%s\"" began.State)) "state replayed in the body"
 
@@ -575,7 +575,7 @@ let private brokerTests =
                 expect (seeded |> Result.map ignore)
                 let! resolved = broker.Resolve request.Target
                 Expect.equal (expect resolved) (OAuthConnection, "at-1") "refreshed"
-                Expect.equal endpoint.ContentTypes.[1] "application/json" "the refresh went out as JSON too"
+                Expect.equal endpoint.ContentTypes.[1] (Some "application/json") "the refresh went out as JSON too"
             }
 
         testCaseAsync "a session-supplied redirect URI rides the authorize URL and the exchange (the provider-hosted code page path)" <|
@@ -672,7 +672,11 @@ let private brokerTests =
                 Expect.isTrue ((endpoint.Requests.[0]).Contains "refresh_token=rt-stale") "the stored refresh token"
                 // The stored envelope updated — and kept the old refresh token (none returned).
                 let! raw = store.Resolve t
-                match BrokeredCredentialCodec.fromString (expect raw |> Option.defaultValue "") with
+                let stored =
+                    match expect raw with
+                    | Some s -> s
+                    | None -> failwith "the just-stored credential resolved to nothing"
+                match BrokeredCredentialCodec.fromString stored with
                 | Ok (BrokeredOAuth g) ->
                     Expect.equal g.AccessToken "at-fresh" "envelope updated"
                     Expect.equal g.RefreshToken (Some "rt-stale") "refresh token survives an omitting response"
@@ -764,7 +768,11 @@ let private brokerTests =
                           TokenDialect = FormEncoded }
                 Expect.isOk stored "stored"
                 let! raw = store.Resolve t
-                match BrokeredCredentialCodec.fromString (expect raw |> Option.defaultValue "") with
+                let envelope =
+                    match expect raw with
+                    | Some s -> s
+                    | None -> failwith "the just-stored credential resolved to nothing"
+                match BrokeredCredentialCodec.fromString envelope with
                 | Ok (BrokeredOAuth g) ->
                     Expect.equal g.AccessToken "ghu_1" "the token"
                     Expect.equal g.RefreshToken (Some "ghr_1") "and what a refresh needs"
@@ -2350,7 +2358,7 @@ type private StubGitHubApi =
       SetPr : string -> unit
       SetCheckRuns : string -> unit
       SetStatus : int -> unit
-      Requests : ResizeArray<string * string> }
+      Requests : ResizeArray<string * string option> }
 
 let private startStubGitHubApi () : Async<StubGitHubApi> =
     async {
@@ -2359,10 +2367,10 @@ let private startStubGitHubApi () : Async<StubGitHubApi> =
         let mutable prVersion = 1
         let mutable checksVersion = 1
         let mutable status = 200
-        let requests = ResizeArray<string * string> ()
+        let requests = ResizeArray<string * string option> ()
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
             let path = req.url.Split('?').[0]
-            requests.Add (path, defaultArg (Interop.headerOf req "authorization") "")
+            requests.Add (path, Interop.headerOf req "authorization")
             let body, version = if path.Contains "/check-runs" then checksBody, checksVersion else prBody, prVersion
             let etag = sprintf "\"v%d\"" version
             if status <> 200 then
@@ -2403,7 +2411,7 @@ let private prFetchTests =
                 | other -> failwithf "expected a snapshot, got %A" other
                 Expect.equal
                     (stub.Requests |> Seq.map snd |> Seq.distinct |> List.ofSeq)
-                    [ "Bearer token-abc" ]
+                    [ Some "Bearer token-abc" ]
                     "every request carries the resolved credential"
             }
 

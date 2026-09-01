@@ -431,7 +431,10 @@ let private auditTests =
                 let! _ =
                     registry.Invoke
                         (call "yession" "set_secret" """{"name":"DEPLOY_TOKEN","value":"hunter2"}""")
-                let recorded = (Seq.head started).Arguments |> Option.defaultValue ""
+                let recorded =
+                    match (Seq.head started).Arguments with
+                    | Some args -> args
+                    | None -> failwith "the tool use recorded no arguments"
                 Expect.stringContains recorded "DEPLOY_TOKEN" "the name is the whole point of the record"
                 Expect.isFalse (recorded.Contains "hunter2") "the value never reached the record"
             }
@@ -445,8 +448,9 @@ let private auditTests =
                       ToolField.secret "drop" "never recorded"
                       ToolField.secret "also" "never recorded" ]
             let recorded =
-                ToolArguments.redact schema """{"keep":"yes","drop":"a","also":"b"}"""
-                |> Option.defaultValue ""
+                match ToolArguments.redact schema """{"keep":"yes","drop":"a","also":"b"}""" with
+                | Some kept -> kept
+                | None -> failwith "the redactor dropped every field, keeping nothing to record"
             Expect.stringContains recorded "yes" "an unmarked field is recorded"
             Expect.isFalse (recorded.Contains "\"a\"") "a marked field is not"
             Expect.isFalse (recorded.Contains "\"b\"") "nor the second one"
