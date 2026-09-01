@@ -238,6 +238,10 @@ let dogfood =
                 // something exiting 0 without ever reaching it.
                 Expect.equal run (SandboxExited 0) (sprintf "check failed inside the container; tail of stderr: %s" (err.Substring (max 0 (err.Length - 2000))))
                 Expect.isTrue (out.Contains "tests run") "the tally printed, so the suite really ran"
+                // The run wrote build state into the checkout AS THE CONTAINER'S ROOT
+                // (.devenv, out, obj), which the host user cannot delete — so the same
+                // root that wrote it wipes it, and the host removes what is left.
+                let! _ = runInSandbox sandbox "sh" [ "-c"; "rm -rf /repos/trinketworks" ] Map.empty None
                 do! sandbox.Dispose ()
                 rmrf nodeFs reposDir
             })
