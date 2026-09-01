@@ -69,9 +69,10 @@ module McpTransport =
 type McpServerRef =
     { Name : McpServerName
       Transport : McpTransport
-      /// One sentence, for the humans. NOT sent to the model — the model reads the tool
-      /// descriptions the server itself supplies, which is a separate trust problem.
-      Description : string }
+      /// One sentence, for the humans, or None when the operator gave none. NOT sent to the
+      /// model — the model reads the tool descriptions the server itself supplies, which is a
+      /// separate trust problem.
+      Description : string option }
 
 /// WHO reaches it. The whole of the configuration model, because there is no second step: a
 /// session this names has the server, from the moment it is declared until it is not.
@@ -197,8 +198,8 @@ type JsonRpcResponse =
 /// them to call anything); this we can, so we do.
 type McpHandshake =
     { ProtocolVersion : string
-      ServerName : string
-      ServerVersion : string }
+      ServerName : string option
+      ServerVersion : string option }
 
 /// What `tools/call` answered, flattened. MCP returns a list of content blocks; the model
 /// reads text, so text is what is kept and anything else is named rather than dropped

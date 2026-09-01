@@ -521,13 +521,12 @@ module Codec =
                 Encode.object
                     [ "name", mcpServerName.Encode server.Name
                       "transport", mcpTransport.Encode server.Transport
-                      "description", Encode.string server.Description ]
+                      "description", Encode.option Encode.string server.Description ]
           Decode =
             Decode.object (fun get ->
                 { McpServerRef.Name = get.Required.Field "name" mcpServerName.Decode
                   McpServerRef.Transport = get.Required.Field "transport" mcpTransport.Decode
-                  McpServerRef.Description =
-                    get.Optional.Field "description" Decode.string |> Option.defaultValue "" }) }
+                  McpServerRef.Description = get.Optional.Field "description" Decode.string }) }
 
     let mcpAudience : Codec<McpAudience> =
         { Encode =
@@ -666,14 +665,13 @@ module Codec =
                     [ "protocolVersion", Encode.string h.ProtocolVersion
                       "serverInfo",
                       Encode.object
-                          [ "name", Encode.string h.ServerName; "version", Encode.string h.ServerVersion ] ]
+                          [ "name", Encode.option Encode.string h.ServerName
+                            "version", Encode.option Encode.string h.ServerVersion ] ]
           Decode =
             Decode.object (fun get ->
                 { McpHandshake.ProtocolVersion = get.Required.Field "protocolVersion" Decode.string
-                  McpHandshake.ServerName =
-                    get.Optional.At [ "serverInfo"; "name" ] Decode.string |> Option.defaultValue ""
-                  McpHandshake.ServerVersion =
-                    get.Optional.At [ "serverInfo"; "version" ] Decode.string |> Option.defaultValue "" }) }
+                  McpHandshake.ServerName = get.Optional.At [ "serverInfo"; "name" ] Decode.string
+                  McpHandshake.ServerVersion = get.Optional.At [ "serverInfo"; "version" ] Decode.string }) }
 
     /// `tools/call`'s result. Content blocks are flattened to the text the model reads; a
     /// block of some other kind is NAMED rather than dropped, so a provider answering with

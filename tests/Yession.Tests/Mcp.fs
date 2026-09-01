@@ -25,7 +25,7 @@ let private declare (name: string) (audience: McpAudience) : McpDeclaration =
     { Server =
         { Name = McpServerName.create name |> expect
           Transport = McpHttp "http://127.0.0.1:7333"
-          Description = "" }
+          Description = None }
       Audience = audience }
 
 let private names (servers: McpServerRef list) =
@@ -112,7 +112,7 @@ let private noteTests =
             |> List.map (fun name ->
                 { Name = McpServerName.create name |> expect
                   Transport = McpHttp "http://127.0.0.1:1"
-                  Description = "" }) }
+                  Description = None }) }
     let describe (gained, lost) =
         (gained |> List.map McpServerName.value), (lost |> List.map McpServerName.value)
 
@@ -371,7 +371,7 @@ let private connections () : McpClient.McpConnections = McpClient.create ()
 let private at (port: int) (path: string) (name: string) : McpServerRef =
     { Name = McpServerName.create name |> expect
       Transport = McpHttp (sprintf "http://127.0.0.1:%d%s" port path)
-      Description = "" }
+      Description = None }
 
 let private toolNames (registries: ToolRegistry list) =
     registries |> List.collect ToolRegistry.allowedTools
@@ -754,7 +754,7 @@ let serialTests =
                         { Servers =
                             [ { Name = McpServerName.create "serial" |> expect
                                 Transport = McpHttp (sprintf "http://127.0.0.1:%d/mcp" port)
-                                Description = "" } ] }
+                                Description = None } ] }
                 Expect.equal
                     (toolNames (mcp.Registries ()))
                     [ "mcp__serial__list_devices"
@@ -776,7 +776,7 @@ let serialTests =
                         { Servers =
                             [ { Name = McpServerName.create "serial" |> expect
                                 Transport = McpHttp (sprintf "http://127.0.0.1:%d/mcp" port)
-                                Description = "" } ] }
+                                Description = None } ] }
                 let! listed = call (mcp.Registries ()) "serial" "list_devices" "{}"
                 let text = textOf listed
                 Expect.stringContains text "ttyFAKE0" "the recognised device is offered"
@@ -796,7 +796,7 @@ let serialTests =
                     { Servers =
                         [ { Name = McpServerName.create "serial" |> expect
                             Transport = McpHttp (sprintf "http://127.0.0.1:%d/mcp" port)
-                            Description = "" } ] }
+                            Description = None } ] }
                 do! first.Apply declared
                 do! second.Apply declared
 
@@ -833,7 +833,7 @@ let serialTests =
                         { Servers =
                             [ { Name = McpServerName.create "serial" |> expect
                                 Transport = McpHttp (sprintf "http://127.0.0.1:%d/mcp" port)
-                                Description = "" } ] }
+                                Description = None } ] }
                 let! acquired =
                     call (mcp.Registries ()) "serial" "acquire_device" """{"device_id":"qinheng_ch340_fake_0001"}"""
                 // The ticket the PROVIDER offered, taken the way a session takes it: out of
@@ -873,7 +873,7 @@ let serialTests =
                         { Servers =
                             [ { Name = McpServerName.create "serial" |> expect
                                 Transport = McpHttp (sprintf "http://127.0.0.1:%d/mcp" port)
-                                Description = "" } ] }
+                                Description = None } ] }
                 let! acquired =
                     call (mcp.Registries ()) "serial" "acquire_device" """{"device_id":"qinheng_ch340_fake_0001"}"""
                 let ticket = (streamOf acquired).Ticket
@@ -904,7 +904,7 @@ let serialTests =
                         { Servers =
                             [ { Name = McpServerName.create "serial" |> expect
                                 Transport = McpHttp (sprintf "http://127.0.0.1:%d/mcp" port)
-                                Description = "" } ] }
+                                Description = None } ] }
                 let acquire () =
                     call (mcp.Registries ()) "serial" "acquire_device" """{"device_id":"qinheng_ch340_fake_0001"}"""
 
@@ -948,7 +948,7 @@ let serialTests =
                         { Servers =
                             [ { Name = McpServerName.create "serial" |> expect
                                 Transport = McpHttp (sprintf "http://127.0.0.1:%d/mcp" port)
-                                Description = "" } ] }
+                                Description = None } ] }
                 let args = """{"device_id":"qinheng_ch340_fake_0001"}"""
                 let! _ = call (mcp.Registries ()) "serial" "acquire_device" args
                 let! configured = call (mcp.Registries ()) "serial" "configure_device" ("""{"device_id":"qinheng_ch340_fake_0001","baud_rate":9600}""")

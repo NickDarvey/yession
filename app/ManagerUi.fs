@@ -884,7 +884,10 @@ let tryHandle
                                     { Server =
                                         { Name = name
                                           Transport = McpHttp url
-                                          Description = formField body "description" }
+                                          Description =
+                                            (match formField body "description" with
+                                             | "" -> None
+                                             | description -> Some description) }
                                       Audience = audience }
                     match declared |> Result.bind pm.DeclareMcpServer with
                     | Ok () -> html res (mcpSection (pm.Sessions ()) (pm.McpServers ()))
