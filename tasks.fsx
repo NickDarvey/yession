@@ -1387,7 +1387,8 @@ let private fixtures =
       "YES005", "NamespaceShadowingFixture", [ "Scopes.fs" ]
       "YES006", "DomainExportsFixture", [ "Slices.fs" ]
       "YES007", "EnvWriteFixture", [ "Access.fs"; "Owner.fs"; "Elsewhere.fs" ]
-      "YES008", "EnvReaderFixture", [ "Access.fs"; "Boot.fs"; "Elsewhere.fs" ] ]
+      "YES008", "EnvReaderFixture", [ "Access.fs"; "Boot.fs"; "Elsewhere.fs" ]
+      "YES009", "EmptyDefaultFixture", [ "Defaults.fs" ] ]
 
 let private fixtureProject name =
     Path.Combine ("analyzers", "fixtures", name, name + ".fsproj")

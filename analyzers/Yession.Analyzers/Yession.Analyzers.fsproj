@@ -35,6 +35,7 @@
     <Compile Include="DomainExports.fs" />
     <Compile Include="EnvWrites.fs" />
     <Compile Include="EnvReaders.fs" />
+    <Compile Include="EmptyDefault.fs" />
   </ItemGroup>
 
   <ItemGroup>
