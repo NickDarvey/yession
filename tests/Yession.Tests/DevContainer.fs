@@ -225,8 +225,14 @@ let dogfood =
                     reposDirWith (fun dir -> execSync childProcess (sprintf "git clone --quiet . %s" dir))
                 let! sandbox = startDev [] (declaredDev reposDir)
                 do! awaitReady sandbox
+                // Through a SHELL, deliberately — not because nix needs one to run, but
+                // because devenv's flake reads $PWD under --impure and only a shell sets
+                // it: exec'd bare, the eval died inside devenv's own mkShell with an
+                // unrelated-looking `//` operator error. A terminal and the agent's
+                // run_command both arrive through sh, so this is also simply how every
+                // real invocation reaches the container.
                 let! run, out, err =
-                    runInSandbox sandbox "nix" [ "develop"; "--impure"; "--command"; "check" ] Map.empty None
+                    runInSandbox sandbox "sh" [ "-c"; "nix develop --impure --command check" ] Map.empty None
                 // The exit code IS the tally: check exits non-zero on any failure or
                 // error. The output check on top only proves the suite RAN rather than
                 // something exiting 0 without ever reaching it.
