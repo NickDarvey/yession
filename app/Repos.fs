@@ -43,17 +43,18 @@ open Yession.SessionProcess
 /// `git check-ref-format` allows, enough for every real branch and none of the
 /// option-injection shapes (`-`-leading) or traversal shapes (`..`).
 let validBranchName (raw: string) : Result<string, string> =
-    let name = (defaultArg (Option.ofObj raw) "").Trim ()
     let charOk c = Char.IsLetterOrDigit c || c = '-' || c = '_' || c = '.' || c = '/'
-    if name = "" then Error "branch name cannot be empty"
-    elif name.StartsWith "-" || name.StartsWith "." || name.StartsWith "/" then
-        Error (sprintf "'%s' is not a valid branch name" name)
-    elif name.EndsWith "/" || name.EndsWith ".lock" then
-        Error (sprintf "'%s' is not a valid branch name" name)
-    elif name.Contains ".." || name.Contains "//" || name.Contains "@{" then
-        Error (sprintf "'%s' is not a valid branch name" name)
-    elif name |> Seq.forall charOk then Ok name
-    else Error (sprintf "'%s' is not a valid branch name" name)
+    match Option.ofObj raw |> Option.map (fun r -> r.Trim ()) with
+    | None | Some "" -> Error "branch name cannot be empty"
+    | Some name ->
+        if name.StartsWith "-" || name.StartsWith "." || name.StartsWith "/" then
+            Error (sprintf "'%s' is not a valid branch name" name)
+        elif name.EndsWith "/" || name.EndsWith ".lock" then
+            Error (sprintf "'%s' is not a valid branch name" name)
+        elif name.Contains ".." || name.Contains "//" || name.Contains "@{" then
+            Error (sprintf "'%s' is not a valid branch name" name)
+        elif name |> Seq.forall charOk then Ok name
+        else Error (sprintf "'%s' is not a valid branch name" name)
 
 /// The environment one git invocation runs with. Everything here is the point:
 /// no global/system config (a repo's own `.git/config` is already untrusted — the
@@ -392,7 +393,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                 | Error e -> return Error e
                 | Ok run when run.Code <> 0 ->
                     let said = if run.Stderr.Trim () <> "" then run.Stderr else run.Stdout
-                    return Error (sprintf "git %s failed (exit %d): %s" (List.tryHead args |> Option.defaultValue "") run.Code (capText 2000 (said.Trim ())))
+                    return Error (sprintf "git %s failed (exit %d): %s" (List.tryHead args |> Option.defaultValue "?") run.Code (capText 2000 (said.Trim ())))
                 | Ok run -> return Ok run
             }
 
