@@ -27,12 +27,15 @@ module UsbId =
     /// and miss on macOS.
     let create (vendor: string) (product: string) : UsbId option =
         let clean (raw: string) =
-            let raw = (defaultArg (Option.ofObj raw) "").Trim().ToLowerInvariant()
-            let raw = if raw.StartsWith "0x" then raw.Substring 2 else raw
-            if raw.Length = 0 || raw.Length > 4 then None
-            elif raw |> Seq.forall (fun c -> (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) then
-                Some (raw.PadLeft (4, '0'))
-            else None
+            match Option.ofObj raw with
+            | None -> None
+            | Some value ->
+                let value = value.Trim().ToLowerInvariant()
+                let value = if value.StartsWith "0x" then value.Substring 2 else value
+                if value.Length = 0 || value.Length > 4 then None
+                elif value |> Seq.forall (fun c -> (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) then
+                    Some (value.PadLeft (4, '0'))
+                else None
         match clean vendor, clean product with
         | Some vendor, Some product -> Some { Vendor = vendor; Product = product }
         | _ -> None
