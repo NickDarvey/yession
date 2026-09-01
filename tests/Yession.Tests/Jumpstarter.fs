@@ -122,7 +122,7 @@ let private expect result =
 let private name = McpServerName.create "jumpstarter" |> expect
 
 let private declared (url: string) : McpServerSet =
-    { Servers = [ { Name = name; Transport = McpHttp url; Description = "" } ] }
+    { Servers = [ { Name = name; Transport = McpHttp url; Description = None } ] }
 
 let private toolNames (registries: ToolRegistry list) =
     registries |> List.collect ToolRegistry.allowedTools

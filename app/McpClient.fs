@@ -445,6 +445,7 @@ let query (current: unit -> McpConnections) : Queries.QueryRegistration =
                                   | McpUnreachable reason -> sprintf "unreachable: %s" reason)
                               "tools", CellText (string (McpServerStatus.toolCount health.Status))
                               "description",
-                              (if health.Server.Description = "" then CellAbsent
-                               else CellText health.Server.Description) ])))
+                              (match health.Server.Description with
+                               | None -> CellAbsent
+                               | Some description -> CellText description) ])))
             } }

@@ -52,7 +52,7 @@ let private sessionB = SessionId.create "beta" |> expect
 let private serverRef (name: string) (url: string) (description: string) : McpServerRef =
     { Name = McpServerName.create name |> expect
       Transport = McpHttp url
-      Description = description }
+      Description = (if description = "" then None else Some description) }
 
 let private serialServer = serverRef "serial" "http://127.0.0.1:7333" "USB serial ports on this host"
 let private printerServer = serverRef "printer" "http://127.0.0.1:7401" ""
@@ -110,14 +110,14 @@ let private stateTests =
                     { Server =
                         { Name = McpServerName.create "printer" |> expect
                           Transport = McpHttp "http://127.0.0.1:7401"
-                          Description = "the label printer" }
+                          Description = Some "the label printer" }
                       Audience = AnySession }
                 |> expect
                 |> ManagerState.declareMcpServer
                     { Server =
                         { Name = McpServerName.create "serial" |> expect
                           Transport = McpHttp "http://127.0.0.1:7333"
-                          Description = "" }
+                          Description = None }
                       Audience = OneSession alpha }
                 |> expect
             let decoded = ManagerCodec.toString declared |> ManagerCodec.fromString |> expect
