@@ -316,7 +316,14 @@ first's.
   breaks the named workspace volume Docker creates root-owned. What remains is that files
   written through a BIND mount are owned by root on the host, which is a nuisance rather
   than an escape. Resource limits are
-  likewise absent, as they are for every backend. The suite (`tests/Yession.Tests/DockerIntegration.fs`) runs
+  likewise absent, as they are for every backend. Three more edges, known and accepted for
+  now: a docker exec has no kill — "kill" is closing the stdin stream, so a runaway that
+  ignores EOF burns CPU until the sandbox is disposed; the operator's resource ceiling is
+  global, one profile for every repo the session hosts, so an operator cannot offer a
+  socket to one repo and not another; and a host with no reachable daemon surfaces at the
+  first `ensure_environment` as a raw dockerode socket error naming neither the missing
+  backend nor whose configuration is at fault — `repoWorkBackend` is hard-coded with no
+  preflight. The suite (`tests/Yession.Tests/DockerIntegration.fs`) runs
   where a daemon exists; asking for the capability requires it, so a `verify` on a
   daemon-less runner fails rather than skipping. The dev container has no daemon, so
   `check Docker` refuses to start there — run a tier that does not ask for it.

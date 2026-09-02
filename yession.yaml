@@ -37,11 +37,15 @@ sandboxes:
     # from. In the container this is the whole nix configuration the devshell sees —
     # there is no /etc/nix/nix.conf story to inherit, which is the point.
     #
-    # The last two lines are what make nix RUN in this container at all: the sandbox
-    # drops every capability, so multi-user store init (chown to nixbld) and nix's own
-    # build sandbox both die on Operation not permitted. Single-user, unsandboxed nix
-    # is the container norm — the container IS the sandbox. Measured under the exact
-    # CapDrop ALL profile: store writes and a real derivation build both pass.
+    # The last two lines are what make nix RUN in this container at all — and they are
+    # the BACKEND's consequence wearing this file's clothes: yession's docker backend
+    # runs every work container under its hardened capability profile, so multi-user
+    # store init (chown to nixbld) and nix's own build sandbox both die on Operation
+    # not permitted. Single-user, unsandboxed nix is the container norm — the container
+    # IS the sandbox. Measured under the exact profile: store writes and a real
+    # derivation build both pass. If that profile ever changes, these two lines are
+    # what to re-measure; every repo running nix in a yession container has to carry
+    # them until the backend grows a nix-aware seam.
     env:
       NIX_CONFIG: |
         experimental-features = nix-command flakes
