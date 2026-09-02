@@ -1107,6 +1107,12 @@ module Style =
     /// A device with no pointer never hovers, so on one it has to be on the screen or it does
     /// not exist. Half strength there — enough to find, not enough to become the loudest
     /// thing in a conversation.
+    ///
+    /// `[@media(hover:none)]` is now the WHOLE story on a phone, not a fallback beside one. A
+    /// hold on the message used to open this menu as well, and that gesture is gone: every
+    /// platform binds a long press on text to selecting that text, so the two were one finger
+    /// meaning two things, and the reader lost the half only the platform can give. This
+    /// being permanently visible is what made the gesture affordable to drop.
     /// `top-2 right-1` and not the corner it used to sit in: `top-2` is the ground's own top
     /// padding, so a 24px control there is centred on the 24px first line — the dots read as
     /// belonging to that line rather than floating above it.
@@ -1125,6 +1131,9 @@ module Style =
     /// because it is a surface OVER the conversation and has to be told from it.
     let itemMenu =
         cls [ "absolute right-0 top-7 z-30 min-w-[12rem] py-1"
+              // Chrome, not content: a menu is a list of things to press, and dragging across
+              // one should never start selecting its labels.
+              "select-none"
               "bg-panel"
               Stroke.ring
               Stroke.hair ]
@@ -1139,7 +1148,10 @@ module Style =
     /// the listener would have to be added, removed and reasoned about against a view that
     /// re-renders, while this exists exactly as long as the menu does. Transparent and over
     /// everything below the menu.
-    let itemMenuBackdrop = "fixed inset-0 z-20 bg-transparent cursor-default"
+    /// `select-none` because it is the size of the screen. A backdrop is chrome and holds no
+    /// words, so nothing is lost by making it unselectable — and what is gained is that a
+    /// viewport-sized element can never take a selection that was in flight when it mounted.
+    let itemMenuBackdrop = "fixed inset-0 z-20 bg-transparent cursor-default select-none"
 
     /// A repo note in the timeline (Plan 14): one quiet act-line, indented past the
     /// avatar gutter so the reading edge lines up with message bodies.
