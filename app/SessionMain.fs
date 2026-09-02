@@ -226,33 +226,6 @@ let private makeSandboxes
     (credentials: WorkSandboxes.CredentialSource list)
     : Yession.SessionProcess.EventLog<SessionEvent> -> WorkSandboxes.WorkSandboxes =
     let name = SessionId.value sessionId
-    /// What the SESSION adds to whatever was asked for. The checkouts are the session's,
-    /// shared by every sandbox in it, so they are not part of anybody's ask: a repo that
-    /// declared its own `dev` did not decline to see the repos directory.
-    ///
-    /// The docker backend cannot share a host path by policy, so it rides the spec as a
-    /// bind mount at /repos — beside the named workspace volume, not replacing it.
-    /// Host-family backends share it by write path instead (`sharedRepos`). The runtime
-    /// union makes this branch structural rather than incidental: only the docker arm can
-    /// name a mount, because only it has a container to mount into.
-    let withSessionRepos (backend: SandboxBackend) (requested: EnvironmentSpec) =
-        match backend with
-        | DockerBackend ->
-            let container =
-                match requested.Runtime with
-                | Container container -> container
-                | Confinement -> ContainerSpec.defaults
-            { requested with
-                Runtime =
-                    Container
-                        { container with
-                            Mounts =
-                                container.Mounts
-                                @ [ { Source = HostPath reposDir
-                                      Target = Sandboxes.reposVisibleAt backend reposDir
-                                      Mode = ReadWrite } ] } }
-        | HostBackend
-        | SrtBackend -> requested
     let sharedRepos (backend: SandboxBackend) =
         match backend with
         | HostBackend
@@ -267,7 +240,7 @@ let private makeSandboxes
             | Error e -> Error e
             | Ok backend ->
 
-            let workSpec = withSessionRepos backend requested
+            let workSpec = Sandboxes.withSessionRepos reposDir backend requested
             // The backend's own container/volume namespace has to differ per sandbox, or two
             // of them under docker would fight over one container name — and now that a repo
             // can declare its own, two REPOS' same-named sandboxes would too. The rule lives
