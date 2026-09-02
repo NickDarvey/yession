@@ -40,41 +40,61 @@ let private ghost = ResourceName.create "ghost" |> expect
 /// is what lets the load and set-semantics properties be about cycles and diamonds rather
 /// than about collisions. Conflicts get their own cases, with the colliding pair written
 /// down where the reader can see it.
+/// One leaf per `ResourceLeaf` case for resource `i` — the canonical list the generator
+/// draws from. The match under the list is its totality proof: warnings are errors here,
+/// so a seventh case added to the union fails THIS file to compile until the list carries
+/// it. Before, the case count was hand-numbered into a `Range` — a new case was
+/// compiler-forced through every product site and silently absent from every property in
+/// this file, which is green-by-blindness, the exact fault the analyzer fixtures exist to
+/// prevent.
+let private leafShapesFor (i: int) (mode: ResourceMountMode) : ResourceLeaf list =
+    let shapes =
+        [ Mount { From = sprintf "/from/%d" i; At = sprintf "/at/%d" i; Mode = mode }
+          Socket (sprintf "/run/%d.sock" i)
+          Endpoint (sprintf "h%d.example.com" i)
+          Variable (sprintf "V%d" i, sprintf "value-%d" i)
+          Volume (sprintf "vol%d" i, sprintf "/vol/%d" i)
+          Exec (sprintf "/bin/tool%d" i) ]
+    for shape in shapes do
+        match shape with
+        | Mount _ | Socket _ | Endpoint _ | Variable _ | Volume _ | Exec _ -> ()
+    shapes
+
+/// Every mount mode, proved total the same way.
+let private mountModes : ResourceMountMode list =
+    let modes = [ ResourceMountMode.Read; ResourceMountMode.Write; ResourceMountMode.Overlay ]
+    for mode in modes do
+        match mode with
+        | ResourceMountMode.Read | ResourceMountMode.Write | ResourceMountMode.Overlay -> ()
+    modes
+
 let private genLeafFor (i: int) : Gen<ResourceLeaf> =
     gen {
-        let! kind = Gen.int32 (Range.linear 0 5)
-        let! mode = Gen.int32 (Range.linear 0 2)
-        return
-            match kind with
-            | 0 ->
-                Mount
-                    { From = sprintf "/from/%d" i
-                      At = sprintf "/at/%d" i
-                      Mode =
-                        match mode with
-                        | 0 -> ResourceMountMode.Read
-                        | 1 -> ResourceMountMode.Write
-                        | _ -> ResourceMountMode.Overlay }
-            | 1 -> Socket (sprintf "/run/%d.sock" i)
-            | 2 -> Endpoint (sprintf "h%d.example.com" i)
-            | 3 -> Variable (sprintf "V%d" i, sprintf "value-%d" i)
-            | 4 -> Volume (sprintf "vol%d" i, sprintf "/vol/%d" i)
-            | _ -> Exec (sprintf "/bin/tool%d" i)
+        let! mode = Gen.item mountModes
+        return! Gen.item (leafShapesFor i mode)
     }
+
+/// Every host distinction, proved total the same way — both the limits generator and
+/// anything else asking "what could a host claim" draw from here.
+let private distinctions : HostDistinction list =
+    let all =
+        [ HostDistinction.SocketsByPath
+          HostDistinction.EgressByHost
+          HostDistinction.OverlayMounts
+          HostDistinction.NamedVolumes ]
+    for distinction in all do
+        match distinction with
+        | HostDistinction.SocketsByPath
+        | HostDistinction.EgressByHost
+        | HostDistinction.OverlayMounts
+        | HostDistinction.NamedVolumes -> ()
+    all
 
 /// A host that can express some arbitrary subset of the distinctions.
 let private genLimits : Gen<HostLimits> =
     gen {
-        let! sockets = Gen.int32 (Range.linear 0 1)
-        let! egress = Gen.int32 (Range.linear 0 1)
-        let! overlay = Gen.int32 (Range.linear 0 1)
-        let! volumes = Gen.int32 (Range.linear 0 1)
-        return
-            HostLimits.of' (
-                [ if sockets = 1 then HostDistinction.SocketsByPath
-                  if egress = 1 then HostDistinction.EgressByHost
-                  if overlay = 1 then HostDistinction.OverlayMounts
-                  if volumes = 1 then HostDistinction.NamedVolumes ])
+        let! keep = Gen.list (Range.linear (List.length distinctions) (List.length distinctions)) Gen.bool
+        return HostLimits.of' (List.zip distinctions keep |> List.choose (fun (d, k) -> if k then Some d else None))
     }
 
 let private genSensitivity : Gen<Sensitivity> =
