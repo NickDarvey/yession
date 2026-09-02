@@ -864,17 +864,35 @@ module Style =
         "flex-1 overflow-y-auto px-8 pb-6 flex flex-col gap-6 [&>*:first-child]:mt-6 "
         + "max-md:px-4 max-md:pb-4 max-md:gap-5 max-md:[&>*:first-child]:mt-4 break-words"
 
+    /// How wide anything in the timeline is allowed to get.
+    ///
+    /// 38rem is 608px, which at the body's 15px Source Serif is about 68 characters — inside
+    /// the 60-75 a line of prose is comfortable at. It was 46rem/736px, near 96, and a line
+    /// that long is one the eye loses its place returning from.
+    ///
+    /// A token rather than the five copies of `max-w-[46rem]` this replaced. The measure is
+    /// ONE decision — a chip, a tool run and a message all sit in the same column, and a
+    /// number written five times is a number that gets changed four times.
+    ///
+    /// Uncapped on a phone, where the screen is already narrower than any measure worth
+    /// setting and the grounds inside it run edge to edge (`itemGround`).
+    let readingColumn = "max-w-[38rem]"
+
     /// One actor's consecutive run — their messages, the commands they ran, the tools they
     /// called — under ONE author line. Attribution is said where it CHANGES, which is how a
     /// conversation reads; a name repeated over every consecutive turn is wallpaper, and
     /// wallpaper is what stops a reader noticing when the speaker actually turns over.
-    let messageGroup = "flex flex-col gap-3 max-w-[46rem]"
+    ///
+    /// `gap-3` between the members is what the message GROUNDS grow into — `itemGround` pulls
+    /// half of it back at each end — so two of them meet rather than leaving a dead stripe
+    /// between two hoverable surfaces.
+    let messageGroup = cls [ "flex flex-col gap-3"; readingColumn; "max-md:max-w-none" ]
 
     /// The author line: avatar and name, STICKY — while a long run scrolls, who is speaking
     /// stays readable at the top of the column.
     ///
-    /// `pb-1 -mb-1` gives the stuck line's ground one step past the label, so scrolled text
-    /// does not touch the name: padding paints it, the negative margin keeps it out of flow.
+    /// `pb-2 -mb-1` gives the stuck line's ground room past the label, so scrolled text does
+    /// not touch the name: padding paints it, the negative margin keeps it out of flow.
     ///
     /// There was a `pt-6 -mt-6` above it meant to do the same upward — and it did neither
     /// thing it claimed. Padding pushes content DOWN inside a box; a negative top margin pulls
@@ -889,11 +907,43 @@ module Style =
     /// line flush to the scrollport's own top edge and there is no strip left above the name
     /// for scrolled text to show through. The rule that fixes it lives with the box that
     /// creates it, which is why it is stated there and not compensated for here.
+    /// It was `pb-1`, and the extra step is the boxes' doing: the ground under the label now
+    /// has to clear the first item's own GROUND rather than just its first line, and that
+    /// starts 8px above the words in it. At `pb-1` a hovered first message came within four
+    /// pixels of the name.
     let messageGroupHead =
-        "sticky top-0 z-10 bg-bg flex items-center gap-3 pb-1 -mb-1"
+        "sticky top-0 z-10 bg-bg flex items-center gap-3 pb-2 -mb-1"
+
+    /// THE GROUND one item stands on — the rectangle that lights under the pointer, and that
+    /// a jump from the rail flashes (`animate-reveal`). Shared by a message and an act note,
+    /// because "mark any of it" is the promise and a surface that only some of the timeline
+    /// had would say the opposite.
+    ///
+    /// Sharp, filled, unbordered: this product has no rounded rectangle in it, and a border
+    /// here would be the first thing that is neither a field nor a button to carry one. The
+    /// lit state's rim is the exception and it lives in the keyframes, because it exists for
+    /// a second and a half — see `@keyframes reveal` in `app/tailwind.css`. That flash is the
+    /// GROUND's; a terminal block, which has no ground, wears `reveal-line` instead.
+    ///
+    /// `-my-1.5 py-2` rather than plain padding: 8px inside each end, six of which is taken
+    /// back out of the 12px that already sat between two items. The ink keeps its rhythm and
+    /// the two grounds MEET, so a pointer travelling down the column is never over nothing.
+    ///
+    /// No left padding, because the 32px avatar gutter every body already carries
+    /// (`messageBody`, `actNote`) is the box's left padding — the box starts at the column's
+    /// edge and not one word moves. `pr-8` is the actions control's berth: without it the
+    /// last words of a wrapping line run underneath the ellipsis.
+    let itemGround =
+        cls [ "relative group/item -my-1.5 py-2 pr-8"
+              // FULL BLEED on a phone: the box escapes the scroller's own padding and puts
+              // exactly as much back, so the ground reaches both edges of the screen and the
+              // text stays on the line it was on. A 390px screen has no margin to spend on
+              // making a surface look like a card.
+              "max-md:-mx-4"
+              "hover:bg-surface transition-colors duration-150 ease-out" ]
 
     /// One item inside a group: its (rare) meta line over its body.
-    let messageItem = "relative group/item flex flex-col gap-1"
+    let messageItem = cls [ itemGround; "max-md:pl-4"; "flex flex-col gap-1" ]
     /// The meta line carries only what is NEWS — streaming, failed, woke unasked. The author
     /// is the group's to say, so a settled message has no meta line at all.
     let messageMeta = "flex items-baseline gap-2.5 pl-8"
@@ -938,7 +988,8 @@ module Style =
     /// avatars. The palette stays `text-ink-dim`/`text-ink-faint` — chips are the busiest
     /// thing the chat will carry, and they must read as texture next to what people said.
     let chatChip =
-        cls [ "w-full max-w-[46rem] bg-transparent cursor-pointer text-left"
+        cls [ "w-full bg-transparent cursor-pointer text-left"
+              readingColumn
               "flex items-baseline gap-2 pl-[32px] py-0.5"
               "text-ink-dim hover:text-ink transition-colors duration-150 ease-out"
               focusRing ]
@@ -952,7 +1003,7 @@ module Style =
 
     /// A turn's tool calls (Plan 16): a `<details>` on the same content column as the chips,
     /// so a chatty turn reads as one quiet line until somebody wants the detail.
-    let chatToolRun = "w-full max-w-[46rem] pl-[32px] py-0.5"
+    let chatToolRun = cls [ "w-full pl-[32px] py-0.5"; readingColumn ]
     /// Its summary. A real `<summary>` rather than a button, so the disclosure is the
     /// browser's and arrives keyboard-operable and correctly announced.
     let chatToolSummary =
@@ -969,7 +1020,7 @@ module Style =
     /// One agent burst (Plan 20, stage 4). A `<details>` on the same content column the chips
     /// and tool runs sit on, for the same reason: a turn that ran twelve commands reads as
     /// one line until somebody wants the twelve.
-    let chatTaskCard = "w-full max-w-[46rem] pl-[32px] py-0.5"
+    let chatTaskCard = cls [ "w-full pl-[32px] py-0.5"; readingColumn ]
     /// Its summary. A real `<summary>`, so the disclosure is the browser's and arrives
     /// keyboard-operable and correctly announced.
     let chatTaskSummary =
@@ -1056,8 +1107,11 @@ module Style =
     /// A device with no pointer never hovers, so on one it has to be on the screen or it does
     /// not exist. Half strength there — enough to find, not enough to become the loudest
     /// thing in a conversation.
+    /// `top-2 right-1` and not the corner it used to sit in: `top-2` is the ground's own top
+    /// padding, so a 24px control there is centred on the 24px first line — the dots read as
+    /// belonging to that line rather than floating above it.
     let itemActions =
-        cls [ "absolute right-0 top-0 w-6 h-6 flex items-center justify-center"
+        cls [ "absolute right-1 top-2 w-6 h-6 flex items-center justify-center"
               "bg-transparent cursor-pointer text-ink-faint hover:text-ink"
               "opacity-0 group-hover/item:opacity-100 focus-visible:opacity-100"
               "[@media(hover:none)]:opacity-60"
@@ -1089,7 +1143,8 @@ module Style =
 
     /// A repo note in the timeline (Plan 14): one quiet act-line, indented past the
     /// avatar gutter so the reading edge lines up with message bodies.
-    let actNote = "relative group/item max-w-[46rem] pl-[32px] flex flex-col gap-0.5"
+    let actNote =
+        cls [ itemGround; readingColumn; "pl-[32px] max-md:pl-12"; "flex flex-col gap-0.5" ]
     /// Sentence case, deliberately. This wore the caps LABEL voice, and a label voice is for
     /// two or three words: `STARTED SANDBOX WORK (DOCKER), FORWARDING ANTHROPIC_API_KEY FROM
     /// ADA` is a line nobody reads, because uppercase flattens the word shapes a reader scans

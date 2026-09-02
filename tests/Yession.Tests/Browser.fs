@@ -792,6 +792,18 @@ let private editorCase = editorCaseOn None
 /// than 390 — the very lie the ui-exploration skill warns about, arriving through another door.
 let private editorCaseIn (width: int) (height: int) = editorCaseOn (Some (width, height))
 
+/// How much narrower a message's ground is than the scrollport holding it — 0 when it runs
+/// edge to edge, and the width of the margins either side when it does not.
+///
+/// Measured against the scrollport's CLIENT width rather than its border box, so a classic
+/// scrollbar does not read as a message that stopped short of the screen.
+let [<Literal>] private groundSpare =
+    """() => {
+         const item = document.querySelector("#shell [data-conversation] [data-message-id='msg-filler-8']")
+         const port = document.querySelector('#shell [data-conversation]')
+         return port.clientWidth - item.getBoundingClientRect().width
+       }"""
+
 /// How far the rail's stroke sits from the top of the message it marks, once the rail has had
 /// a chance to place it — the one number both rail-tracking cases are about.
 ///
@@ -1706,6 +1718,53 @@ let editorTests =
                 Expect.isTrue
                     (apart < 2.0)
                     (sprintf "40px of scrolling left the stroke %fpx from its message" apart)
+                return ()
+            }
+        // The ground a message stands on, and the three promises it makes that only a laid-out
+        // page can settle. Every cheap tier reads markup, and markup with a control overlapping
+        // its own text reads exactly like markup where it does not.
+        //
+        // First: the control has a BERTH. It is absolutely positioned over the item, so
+        // nothing in the flow knows it is there — without a reserved strip the last words of a
+        // wrapping line run underneath the dots, which is what shipped until this case existed.
+        editorCaseIn 1440 900 "an item's actions never sit on the words" (EDITOR_PORT + 31) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-conversation] [data-item-actions]")
+                do! awaitU (page.HoverAsync "#shell [data-conversation] [data-message-id='msg-filler-8']")
+                let! clear =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 const item = document.querySelector("#shell [data-conversation] [data-message-id='msg-filler-8']")
+                                 const dots = item.querySelector('[data-item-actions]').getBoundingClientRect()
+                                 const body = item.querySelector('[data-message-body]').getBoundingClientRect()
+                                 return dots.left >= body.right
+                               }""")
+                Expect.isTrue clear "the words stop before the actions control begins"
+                return ()
+            }
+        // Second: on a phone the ground is FULL BLEED. A 390px screen has no margin to spend
+        // on making a surface look like a card, and a ground inset from both edges of a narrow
+        // screen reads as a card rather than as the row it is.
+        editorCaseIn 390 844 "a message's ground reaches both edges of a phone screen" (EDITOR_PORT + 32) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-conversation] [data-message-id]")
+                let! spare =
+                    await (page.EvaluateAsync<float> groundSpare)
+                Expect.isTrue
+                    (abs spare < 1.0)
+                    (sprintf "the ground stops %fpx short of the screen" spare)
+                return ()
+            }
+        // Third: on a desktop it does NOT. The same measurement the other way round — what
+        // bounds a message here is the reading column, and a ground that ran the width of a
+        // 1440px window would be announcing a line of text nobody could read back.
+        editorCaseIn 1440 900 "a message's ground stops at the reading column, not the window" (EDITOR_PORT + 33) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-conversation] [data-message-id]")
+                let! spare = await (page.EvaluateAsync<float> groundSpare)
+                Expect.isTrue
+                    (spare > 100.0)
+                    (sprintf "the ground runs to within %fpx of a 1440px window" spare)
                 return ()
             }
         // Dismissing a menu with the keyboard is where focus goes to `body` if nobody puts it

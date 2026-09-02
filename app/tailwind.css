@@ -241,6 +241,11 @@
      for which line they were brought here for; a permanent mark would still be claiming it
      an hour later. One pass, and the surface is ordinary again. */
   --animate-reveal: reveal 1.6s ease-out 1;
+  /* The same flash for something that has no ground under it. A terminal block is `flex
+     flex-col` and nothing else — no padding — so the rim `reveal` paints would be drawn
+     hard against the command line's own glyphs. What a block has instead is a colour, so
+     that is what changes. */
+  --animate-reveal-line: reveal-line 1.6s ease-out 1;
 
   @keyframes pulse2 {
     0%, 100% { opacity: 0.25; }
@@ -249,9 +254,20 @@
   @keyframes blink {
     50% { opacity: 0; }
   }
-  @keyframes reveal {
+  @keyframes reveal-line {
     0%, 55% { background-color: var(--color-surface-2); }
     100% { background-color: transparent; }
+  }
+  @keyframes reveal {
+    /* A rim as well as a fill, because the fill alone is ambiguous: surface-2 is one step off
+       the `surface` a hover paints, and once the animation has faded past its own midpoint
+       there is nothing left to say which of the two a reader is looking at. The rim is also
+       the edge the landmark rail's stroke lines up with. */
+    0%, 55% {
+      background-color: var(--color-surface-2);
+      box-shadow: inset 0 0 0 1px var(--color-edge);
+    }
+    100% { background-color: transparent; box-shadow: inset 0 0 0 1px transparent; }
   }
 }
 
