@@ -218,9 +218,7 @@ let create
                         |> List.groupBy (fun (repo, _) -> RepoRef.value repo)
                     for _, entries in byRepo do
                         let repo = entries |> List.head |> fst
-                        let asked =
-                            (entries |> List.collect (fun (_, decl) -> decl.Uses) |> List.distinct),
-                            (entries |> List.collect (fun (_, decl) -> decl.Wants) |> List.distinct)
+                        let asked = entries |> List.map snd |> SandboxDecl.selectionOf
                         match capabilitiesOf asked with
                         // A selection that does not resolve is already a refusal further
                         // down, said per declaration and with the reason. Saying it twice
@@ -248,9 +246,7 @@ let create
                         byRepo
                         |> List.choose (fun (_, entries) ->
                             let repo = entries |> List.head |> fst
-                            let asked =
-                                (entries |> List.collect (fun (_, decl) -> decl.Uses) |> List.distinct),
-                                (entries |> List.collect (fun (_, decl) -> decl.Wants) |> List.distinct)
+                            let asked = entries |> List.map snd |> SandboxDecl.selectionOf
                             match capabilitiesOf asked with
                             | Ok capabilities when
                                 capabilities.Sensitive && lastApproved told repo <> Some capabilities.Granted ->
@@ -349,9 +345,7 @@ let create
                 match SandboxRef.scope ref with
                 | RepoOwned owner when RepoRef.value owner = RepoRef.value repo -> Some decl
                 | _ -> None)
-        capabilitiesOf
-            ((mine |> List.collect (fun decl -> decl.Uses) |> List.distinct),
-             (mine |> List.collect (fun decl -> decl.Wants) |> List.distinct))
+        capabilitiesOf (SandboxDecl.selectionOf mine)
         |> Result.toOption
         |> Option.map (fun capabilities -> capabilities.Granted)
 
