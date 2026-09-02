@@ -403,6 +403,13 @@ let policyFor
     // merely allowed, and `YESSION_SESSION_READ` being both at once is the defect this pair
     // exists to separate.
     (granted: ResourceLeaf list)
+    // The subset of `granted` that arrived through `wants:` alone — leaves nothing NEEDS.
+    // A want's whole promise is "warm where the host makes it so and silently absent where
+    // not", and the resolver honours the first half of "not" (a name the profile does not
+    // declare selects nothing). This is the second half: a want the profile DOES declare
+    // but this host cannot realise degrades to absent instead of refusing the sandbox.
+    // A leaf reachable through `uses:` too is not in this set, and still refuses.
+    (optional: Set<ResourceLeaf>)
     // What this sandbox ASKED to reach. Reconciled here, and only here, because here is
     // where the operator's ambient environment and the (partly repo-authored) spec are both
     // in hand — a caller that reconciled first would be a second copy of the ceiling rule.
@@ -420,10 +427,14 @@ let policyFor
     // A leaf this host cannot give AT ALL refuses the sandbox, and a leaf it gives more
     // coarsely does not. That is the whole difference between a degradation and a refusal —
     // a sandbox that works differently against one that does not work — and it is decided
-    // here rather than by each caller's judgement about which is which.
+    // here rather than by each caller's judgement about which is which. One exception, and
+    // it is the caller SAYING so rather than judging: a withheld leaf held only through
+    // `wants:` is the posture's own promise kept — absent, silently, exactly as it would be
+    // on a host whose operator never offered it. (`held` already excludes it, so dropping
+    // the refusal IS the drop.)
     match differences |> List.tryPick (fun (leaf, outcome) ->
             match outcome with
-            | LeafRealisation.Withheld because -> Some (leaf, because)
+            | LeafRealisation.Withheld because when not (Set.contains leaf optional) -> Some (leaf, because)
             | _ -> None) with
     | Some (leaf, because) ->
         Error (sprintf "this host cannot grant %s: %s" (ResourceLeaf.describe leaf) because)
@@ -587,8 +598,10 @@ let preparePolicy
     // What this sandbox holds, resolved: the operator's `default` together with whatever the
     // sandbox itself selected. ONE function rather than a list and a resolver, because the
     // two are the same question asked about different names, and a caller that could resolve
-    // one without the other would be a caller that could forget half.
-    (grantsFor: ResourceName list -> ResourceName list -> Result<ResourceLeaf list, string>)
+    // one without the other would be a caller that could forget half. The set beside the
+    // list is the leaves held through `wants:` alone, which `policyFor` may drop where this
+    // host cannot realise them instead of refusing the sandbox.
+    (grantsFor: ResourceName list -> ResourceName list -> Result<ResourceLeaf list * Set<ResourceLeaf>, string>)
     (spec: EnvironmentSpec)
     : unit -> Async<Result<SandboxPolicy, string>> =
     fun () ->
@@ -598,8 +611,8 @@ let preparePolicy
             | Ok resolved ->
                 match grantsFor spec.Uses spec.Wants with
                 | Error e -> return Error e
-                | Ok granted ->
-                    return policyFor backend (limitsHere backend) (ambientEnv ()) resolved workspace reposDir home granted spec
+                | Ok (granted, optional) ->
+                    return policyFor backend (limitsHere backend) (ambientEnv ()) resolved workspace reposDir home granted optional spec
         }
 
 // --- A buffered one-shot: settle once, deliver to every (even late) awaiter --------------

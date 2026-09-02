@@ -88,7 +88,7 @@ let createFull
                                         // absent-where-unoffered by definition, so wants
                                         // are simply nothing here.
                                         (fun uses _wants ->
-                                            if List.isEmpty uses then Ok []
+                                            if List.isEmpty uses then Ok ([], Set.empty)
                                             else Error "this composition declares no resources")
                                         spec
                                 Ok (

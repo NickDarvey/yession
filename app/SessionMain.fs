@@ -99,25 +99,19 @@ let private grantedLeaves : ResourceLeaf list =
 /// old ceiling check — a repo cannot exceed what the operator offered because it can only
 /// name what the operator offered, which is a stronger arrangement than comparing two lists
 /// and hoping the comparison is right.
-let private grantsFor (uses: ResourceName list) (wants: ResourceName list) : Result<ResourceLeaf list, string> =
-    // A want is selected where this host offers it and is silently absent where it does
-    // not — the filter is the profile's own (`ResourceProfile.selected`), so the policy
-    // and the approval prompt cannot disagree about what a want came to.
-    let selection =
-        match resourceProfile with
-        | None -> uses
-        | Some file -> ResourceProfile.selected file.Resources uses wants
-    match selection, resourceProfile with
-    | [], _ -> Ok grantedLeaves
-    | _, None ->
+let private grantsFor (uses: ResourceName list) (wants: ResourceName list) : Result<ResourceLeaf list * Set<ResourceLeaf>, string> =
+    // The selection, the want filter, and the wants-only set all live in the domain
+    // (`ResourceProfile.grants`) — the root only answers the one question the domain
+    // cannot: whether this deployment has a profile at all. Wants stay silent either
+    // way; a USE with no profile behind it is the refusal.
+    match resourceProfile with
+    | Some file -> ResourceProfile.grants file.Resources grantedLeaves uses wants
+    | None when List.isEmpty uses -> Ok (grantedLeaves, Set.empty)
+    | None ->
         Error (
             sprintf
                 "this sandbox selects %s, and this host declares no resources at all — an operator sets YESSION_SESSION_RESOURCES to a profile naming them"
-                (selection |> List.map ResourceName.value |> String.concat ", "))
-    | selection, Some file ->
-        ResourceProfile.resolve file.Resources selection
-        |> Result.map (fun closure ->
-            (ResourceClosure.leaves closure |> Set.toList) @ grantedLeaves |> List.distinct)
+                (uses |> List.map ResourceName.value |> String.concat ", "))
 
 // The AgentSandbox backend (`YESSION_SESSION_AGENT_BACKEND`): where the agent CLI process
 // runs — host or srt, never docker (a work-sandbox-only backend). Both tiers go through
