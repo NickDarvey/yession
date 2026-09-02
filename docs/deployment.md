@@ -474,3 +474,88 @@ outlive it, that is when the desired set is genuinely empty.
   every sub-fetch absolute — but worth knowing before it is discovered.
 - **The session id is not percent-encoded into the path.** Ids are Docker-safe by
   construction, so nothing can currently produce a path that needs it.
+
+### Nix
+
+The flake ships the two bins as one installable: `packages.<system>.default` is
+`yession-manager` + `yession-session`, wrapped with the native WebRTC addon built from
+source and `YESSION_BIN_CLAUDE` / `YESSION_BIN_GIT` defaulted to store paths. The module
+below is distilled from the deployment the Yession project itself runs — home-manager
+under nix-darwin on a Mac, composed with the Tailscale integration above.
+
+Pin the input, and leave its nixpkgs alone:
+
+```nix
+inputs.yession.url = "github:trinketworks/yession";
+# Deliberately NOT `inputs.yession.inputs.nixpkgs.follows = "nixpkgs"`: the flake
+# builds the native WebRTC addon from source against its own nixpkgs pin, and
+# overriding that trades a cached, tested build for an untested one.
+```
+
+Then one module declares the Manager, its policy, and its addresses together:
+
+```nix
+{ config, pkgs, inputs, ... }:
+let
+  yession = inputs.yession.packages.${pkgs.stdenv.hostPlatform.system}.default;
+  # Scheme + host spelled once, feeding both URLs — see §Tailscale.
+  origin = "https://host.example.ts.net:8321";
+  logDir = "${config.home.homeDirectory}/Library/Logs/yession";
+
+  # The resources profile (§What the variable names tell you). Paths are written
+  # as the kernel sees them — /private/etc, not /etc — because the profile
+  # refuses symlinked spellings. `nix-container-store` is the name this
+  # repository's own yession.yaml reaches with `wants:`.
+  resources = pkgs.writeText "yession-resources.yaml" ''
+    version: 1
+    resources:
+      nix-container-store:
+        volume: { name: yession-nix, at: /nix }
+      ca:
+        mount: { from: /private/etc/ssl/cert.pem, mode: read }
+        env:
+          SSL_CERT_FILE: /private/etc/ssl/cert.pem
+          NIX_SSL_CERT_FILE: /private/etc/ssl/cert.pem
+  '';
+in
+{
+  launchd.agents.yession-manager = {
+    enable = true;
+    config = {
+      ProgramArguments = [ "${yession}/bin/yession-manager" "--auth" "localhost" ];
+      RunAtLoad = true;
+      KeepAlive = true;
+      EnvironmentVariables = {
+        HOME = config.home.homeDirectory;
+        # The default data dir is RELATIVE (`.yession`), and launchd does not
+        # start agents in $HOME.
+        YESSION_DATA_DIR = "${config.home.homeDirectory}/.yession";
+        YESSION_IDLE_TIMEOUT = "30m";
+        YESSION_SESSION_RESOURCES = "${resources}";
+        YESSION_MANAGER_URL = origin;
+        YESSION_SESSION_URL = "${origin}/s/{id}";
+        PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+      };
+      StandardOutPath = "${logDir}/manager.out.log";
+      StandardErrorPath = "${logDir}/manager.err.log";
+    };
+  };
+}
+```
+
+Three choices in it are load-bearing:
+
+- **A user agent, not a root LaunchDaemon.** The default `--secrets` behaviour is durable
+  through the OS credential manager, and on macOS that means the login Keychain — which
+  only a login session has. Run the Manager where the credential manager answers, or
+  §Credentials' fallback rules decide for you.
+- **The profile rides the store.** `pkgs.writeText` gives the sandbox policy the same
+  lifecycle as the process that enforces it: one switch moves both, one rollback restores
+  both, and there is no live file for a later hand-edit to drift.
+- **A plist change restarts the Manager, and a Manager restart evicts every session.**
+  Nix redeploys by rewriting the agent's plist whenever anything above changes — the
+  store path of the bin included. For frequent upgrades, §Session lifetime's advice
+  applies doubly: point `YESSION_SPAWN_BIN` at a path outside the store that floats with
+  your builds (a symlink you promote), keep the agent's `ProgramArguments` constant, and
+  sessions roll onto new builds as they idle out — reserving the eviction for changes to
+  the Manager itself.
