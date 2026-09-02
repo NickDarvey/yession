@@ -79,7 +79,10 @@ module Icon =
     /// filled circle would be its first — and a stroked ring at this size is a doughnut, not
     /// a dot. A subpath of no length paints its cap, which under this vocabulary's square
     /// caps is exactly a square dot, at whatever weight the icon is drawn.
-    let private morePath = "M3.5 8 L3.5 8 M8 8 L8 8 M12.5 8 L12.5 8"
+    /// Three dots, stacked. VERTICAL rather than the row this was: a horizontal ellipsis
+    /// sitting beside the first line of a message reads as text that trailed off, and the
+    /// eye tries to finish the sentence. Turned upright it is unmistakably a control.
+    let private morePath = "M8 3.5 L8 3.5 M8 8 L8 8 M8 12.5 L8 12.5"
 
     // --- The vocabulary ----------------------------------------------------------------------
     // 14px inside a 24px icon button; 12px where an icon rides a caps-label line.

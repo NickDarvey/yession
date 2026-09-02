@@ -166,9 +166,12 @@ let revealBlock (terminalId: string) (blockId: string) : unit =
             // only way to replay a CSS animation on an element that has already run it. The
             // read is the load-bearing line, which is why it is not `ignore` on a call that
             // does something — nothing is computed here, the browser is being made to flush.
-            block.classList.remove [| "animate-reveal" |]
+            // `-line` and not the flash a MESSAGE gets: that one lights a padded ground and
+            // rims it, and a block has neither — it is a bare `flex flex-col`, so an edge
+            // would be drawn hard against the command's own glyphs.
+            block.classList.remove [| "animate-reveal-line" |]
             reflow block
-            block.classList.add [| "animate-reveal" |]))
+            block.classList.add [| "animate-reveal-line" |]))
 
 /// Scroll the conversation to one message and flash it — the rail's half of "take me back
 /// there", and deliberately the same two moves `revealBlock` makes: scroll it into view, then
