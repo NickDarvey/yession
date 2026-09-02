@@ -87,6 +87,13 @@ module Gen =
             let n = rng.NextIntSmall (range.Lo, range.Hi)
             System.String (Array.init n (fun _ -> ch rng)))
 
+    /// One element of a non-empty list, uniformly.
+    let item (xs : 'a list) : Gen<'a> =
+        Gen (fun rng -> List.item (rng.NextIntSmall (0, List.length xs - 1)) xs)
+
+    let bool : Gen<bool> =
+        Gen (fun rng -> rng.NextIntSmall (0, 1) = 1)
+
     let option (Gen g : Gen<'a>) : Gen<'a option> =
         Gen (fun rng -> if rng.NextIntSmall (0, 4) = 0 then None else Some (g rng))
 
