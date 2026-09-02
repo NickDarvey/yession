@@ -103,7 +103,7 @@ let private startDev (granted: ResourceLeaf list) (spec: EnvironmentSpec) : Asyn
         let name = SessionId.value (SessionId.mint ())
         let createSandbox = Sandboxes.forBackend DockerBackend name spec |> expect
         let resolve = fun secret -> async { return Error (sprintf "no secrets here for '%s'" (SecretName.value secret)) }
-        match! Sandboxes.preparePolicy DockerBackend resolve None None None (fun _ _ -> Ok granted) spec () with
+        match! Sandboxes.preparePolicy DockerBackend resolve None None None (fun _ _ -> Ok (granted, Set.empty)) spec () with
         | Error reason -> return failwithf "policy refused: %s" reason
         | Ok policy ->
             match! createSandbox policy with

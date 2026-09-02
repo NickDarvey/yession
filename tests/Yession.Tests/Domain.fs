@@ -1263,6 +1263,48 @@ let private configTests =
                 [ name "needed"; name "offered" ]
                 "the offered want joins the selection; the absent one vanishes; the need stays whether or not it resolves later"
 
+        // `grants` is the whole answer — leaves plus the wants-only subset the policy may
+        // drop where the HOST cannot realise it. Which leaf is droppable is decided here,
+        // in the domain, which is what makes the posture's second "absent" half testable
+        // without a composition root.
+        testCase "a want's leaves are marked droppable; anything uses reaches is not" <| fun () ->
+            let profile =
+                OperatorProfile.parse
+                    """{ "version": 1,
+                         "resources": {
+                           "tools": { "mount": { "from": "/opt/tools" } },
+                           "warm-store": { "volume": { "name": "warm", "at": "/nix" } } } }"""
+                |> expect
+            let name raw = ResourceName.create raw |> expect
+            let leaves, optional =
+                ResourceProfile.grants profile.Resources [] [ name "tools" ] [ name "warm-store" ] |> expect
+            Expect.isTrue (leaves |> List.contains (Volume ("warm", "/nix"))) "the offered want is held"
+            Expect.equal optional (Set.ofList [ Volume ("warm", "/nix") ]) "and only the want's leaf is droppable"
+
+        testCase "a leaf both used and wanted is not droppable" <| fun () ->
+            let profile =
+                OperatorProfile.parse
+                    """{ "version": 1,
+                         "resources": { "warm-store": { "volume": { "name": "warm", "at": "/nix" } } } }"""
+                |> expect
+            let name raw = ResourceName.create raw |> expect
+            let _, optional =
+                ResourceProfile.grants profile.Resources [] [ name "warm-store" ] [ name "warm-store" ] |> expect
+            Expect.equal optional Set.empty "something needs it, so withholding it must still refuse"
+
+        testCase "a conflict between a use and a want still refuses" <| fun () ->
+            let profile =
+                OperatorProfile.parse
+                    """{ "version": 1,
+                         "resources": {
+                           "cache-ro": { "mount": { "from": "/cache" } },
+                           "cache-rw": { "mount": { "from": "/cache", "mode": "write" } } } }"""
+                |> expect
+            let name raw = ResourceName.create raw |> expect
+            match ResourceProfile.grants profile.Resources [] [ name "cache-ro" ] [ name "cache-rw" ] with
+            | Ok _ -> failwith "expected the conflicting pair to refuse"
+            | Error e -> Expect.isTrue (e.Contains "/cache") (sprintf "the refusal names the colliding path, said: %s" e)
+
         // The file's whole claim: it says nothing a command could not be told. So what a
         // declaration becomes is the ask itself, with the one thing a file cannot know —
         // where the session put the checkout — filled in.

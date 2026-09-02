@@ -373,6 +373,7 @@ let private sandboxPolicyTests =
                 Sandboxes.policyFor
                     DockerBackend (Sandboxes.limitsFor DockerBackend "linux") Map.empty Map.empty None None None
                     []
+                    Set.empty
                     EnvironmentSpec.defaults
                 |> expect
             Expect.equal (policy.Env |> Map.tryFind "GIT_CONFIG_KEY_0") (Some "safe.directory") "the key"
@@ -385,6 +386,7 @@ let private sandboxPolicyTests =
                     (Map.ofList [ "GIT_CONFIG_COUNT", "0" ])
                     None None None
                     []
+                    Set.empty
                     EnvironmentSpec.defaults
                 |> expect
             Expect.equal (policy.Env |> Map.tryFind "GIT_CONFIG_COUNT") (Some "0") "a baseline, not a mandate"
@@ -400,6 +402,7 @@ let private sandboxPolicyTests =
                     [ Mount { From = "/host/cache"; At = "/cache"; Mode = ResourceMountMode.Write }
                       Socket "/run/thing.sock"
                       Volume ("warm", "/nix") ]
+                    Set.empty
                     EnvironmentSpec.defaults
                 |> expect
             // The start-up checks probe these from INSIDE the container, so the host
@@ -439,10 +442,25 @@ let private sandboxPolicyTests =
                 Sandboxes.policyFor
                     SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
                     [ Volume ("warm", "/nix") ]
+                    Set.empty
                     EnvironmentSpec.defaults
             with
             | Ok _ -> failwith "expected the sandbox to be refused"
             | Error reason -> Expect.isTrue (reason.Contains "container") (sprintf "names the fix, said: %s" reason)
+
+        // The same leaf held through `wants:` alone keeps the posture's promise instead:
+        // silently absent, exactly as it would be on a host whose operator never offered
+        // it. Before this, a want the operator DID declare but the host could not realise
+        // refused the whole sandbox — the one word `wants:` exists to avoid.
+        testCase "a want this host cannot realise degrades to absent instead of refusing" <| fun () ->
+            let policy =
+                Sandboxes.policyFor
+                    SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
+                    [ Volume ("warm", "/nix") ]
+                    (Set.ofList [ Volume ("warm", "/nix") ])
+                    EnvironmentSpec.defaults
+                |> expect
+            Expect.equal policy.Volumes [] "the want is absent, not half-held"
 
         // The daemon workaround wraps the container's own process: a declared command
         // runs behind it, and nothing declared idles behind it. Symlinked /etc files
@@ -472,6 +490,7 @@ let private sandboxPolicyTests =
                     // case. On darwin there is nothing to coarsen and nothing to report.
                     SrtBackend (Sandboxes.limitsFor SrtBackend "linux") Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
                     [ Socket "/run/docker.sock" ]
+                    Set.empty
                     EnvironmentSpec.defaults
                 |> expect
             Expect.equal policy.Sockets [ "/run/docker.sock" ] "still granted"
@@ -490,6 +509,7 @@ let private sandboxPolicyTests =
                     SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
                     [ Mount { From = "/opt/tools"; At = "/opt/tools"; Mode = ResourceMountMode.Read }
                       Variable ("LANG", "C.UTF-8") ]
+                    Set.empty
                     EnvironmentSpec.defaults
                 |> expect
             Expect.equal policy.Realisation [] "nothing to say"
@@ -676,6 +696,7 @@ let private sandboxPolicyTests =
                 Sandboxes.policyFor
                     SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") Map.empty Map.empty
                     (Some "/data/workspace") None (Some "/data/home") []
+                    Set.empty
                     { EnvironmentSpec.defaults with WorkingDirectory = Some "repos/octo/hello" }
                 |> expect
             Expect.equal
@@ -690,7 +711,7 @@ let private sandboxPolicyTests =
             let workdir spec =
                 Sandboxes.policyFor
                     SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") Map.empty Map.empty
-                    (Some "/data/workspace") None (Some "/data/home") [] spec
+                    (Some "/data/workspace") None (Some "/data/home") [] Set.empty spec
                 |> expect
                 |> fun policy -> policy.WorkingDirectory
             Expect.equal
@@ -878,7 +899,7 @@ let private sandboxPolicyTests =
             let ambient = Map.ofList [ "PATH", "/usr/bin"; "HOME", "/home/u" ]
             let resolved = Map.ofList [ "HOME", "/workspace-home"; "TOKEN", "t" ]
             let host =
-                Sandboxes.policyFor HostBackend (Sandboxes.limitsFor HostBackend "linux") ambient resolved (Some "/ws") (Some "/repos") (Some "/ws/home") [] EnvironmentSpec.defaults
+                Sandboxes.policyFor HostBackend (Sandboxes.limitsFor HostBackend "linux") ambient resolved (Some "/ws") (Some "/repos") (Some "/ws/home") [] Set.empty EnvironmentSpec.defaults
                 |> expect
             Expect.equal (Map.tryFind "HOME" host.Env) (Some "/workspace-home") "the spec's variable wins"
             Expect.equal (Map.tryFind "PATH" host.Env) (Some "/usr/bin") "the baseline fills the rest"
@@ -886,7 +907,7 @@ let private sandboxPolicyTests =
             Expect.isTrue
                 (List.contains "/repos" host.WritePaths)
                 "the repos dir is a write path of its own (Plan 14)"
-            let docker = Sandboxes.policyFor DockerBackend (Sandboxes.limitsFor DockerBackend "linux") ambient resolved None None None [] EnvironmentSpec.defaults |> expect
+            let docker = Sandboxes.policyFor DockerBackend (Sandboxes.limitsFor DockerBackend "linux") ambient resolved None None None [] Set.empty EnvironmentSpec.defaults |> expect
             Expect.equal (Map.tryFind "PATH" docker.Env) None "a docker image supplies its own base env"
             Expect.equal (Map.tryFind "TOKEN" docker.Env) (Some "t") "only the spec's variables inject"
 
@@ -905,6 +926,7 @@ let private sandboxPolicyTests =
                     (Some "/data/s/workspace/repos")
                     (Some "/data/s/home")
                     []
+                    Set.empty
                     EnvironmentSpec.defaults
                 |> expect
             Expect.equal (Map.tryFind "HOME" policy.Env) (Some "/data/s/home") "not the operator's, which it is denied"
@@ -936,6 +958,7 @@ let private sandboxPolicyTests =
                       Socket "/nix/var/nix/daemon-socket"
                       Endpoint "cache.nixos.org"
                       Variable ("SSL_CERT_FILE", "/nix/ca.crt") ]
+                    Set.empty
                     EnvironmentSpec.defaults
                 |> expect
             Expect.isTrue (List.contains "/nix" policy.ReadPaths) "a read mount is readable"
@@ -954,6 +977,7 @@ let private sandboxPolicyTests =
                 Sandboxes.policyFor
                     SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
                     [ Endpoint "cache.nixos.org" ]
+                    Set.empty
                     EnvironmentSpec.defaults
                 |> expect
             Expect.equal
@@ -968,6 +992,7 @@ let private sandboxPolicyTests =
                 Sandboxes.policyFor
                     SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
                     [ Mount { From = "/h/.npm"; At = "/h/.npm"; Mode = ResourceMountMode.Overlay } ]
+                    Set.empty
                     EnvironmentSpec.defaults
             with
             | Ok _ -> failwith "expected a refusal"
@@ -986,6 +1011,7 @@ let private sandboxPolicyTests =
                 Sandboxes.policyFor
                     HostBackend (Sandboxes.limitsFor HostBackend "darwin") Map.empty Map.empty (Some "/ws") None (Some "/ws/home")
                     [ Mount { From = "/h/.npm"; At = "/h/.npm"; Mode = ResourceMountMode.Overlay } ]
+                    Set.empty
                     EnvironmentSpec.defaults
             with
             | Ok _ -> failwith "expected a refusal"
@@ -1000,6 +1026,7 @@ let private sandboxPolicyTests =
                 Sandboxes.policyFor
                     SrtBackend (Sandboxes.limitsFor SrtBackend "darwin") (Map.ofList [ "PATH", "/usr/bin" ]) Map.empty (Some "/ws") None (Some "/ws/home")
                     [ Exec "/nix/store/abc/bin/git" ]
+                    Set.empty
                     EnvironmentSpec.defaults
                 |> expect
             Expect.equal
@@ -1026,6 +1053,7 @@ let private sandboxPolicyTests =
                     (Some "/data/s/workspace/repos")
                     (Some "/data/s/home")
                     []
+                    Set.empty
                     declared
                 |> expect
             Expect.equal
@@ -1051,6 +1079,7 @@ let private sandboxPolicyTests =
                     (Some "/data/s/workspace/repos")
                     (Some "/data/s/home")
                     []
+                    Set.empty
                     declared
                 |> expect
             // Containment rather than equality: what this pins is that declaring a workdir
@@ -1555,7 +1584,7 @@ let private hostEnvironment (log: Yession.SessionProcess.EventLog<SessionEvent>)
     Yession.SessionProcess.SessionEnvironment.create
         log
         createSandbox
-        (Sandboxes.preparePolicy HostBackend noSecrets None None None (fun _ _ -> Ok []) EnvironmentSpec.defaults)
+        (Sandboxes.preparePolicy HostBackend noSecrets None None None (fun _ _ -> Ok ([], Set.empty)) EnvironmentSpec.defaults)
         (Sandboxes.summaryFor HostBackend EnvironmentSpec.defaults)
         (sprintf "env-%s" name)
 
@@ -1885,7 +1914,7 @@ let private acceptanceE2eTests =
                 let name = SessionId.value (SessionId.mint ())
                 let spec = { EnvironmentSpec.defaults with Runtime = Container { ContainerSpec.defaults with Image = Some { Name = "alpine"; Tag = Some "3" } } }
                 let createSandbox = Sandboxes.forBackend DockerBackend name spec |> expect
-                match! createSandbox ((Sandboxes.policyFor DockerBackend (Sandboxes.limitsFor DockerBackend "linux") Map.empty Map.empty None None None [] EnvironmentSpec.defaults |> expect)) with
+                match! createSandbox ((Sandboxes.policyFor DockerBackend (Sandboxes.limitsFor DockerBackend "linux") Map.empty Map.empty None None None [] Set.empty EnvironmentSpec.defaults |> expect)) with
                 | Error reason -> failwithf "docker sandbox failed: %s" reason
                 | Ok sandbox ->
                     let! run, out, _ = runInSandbox sandbox "echo" [ "hello-from-docker" ] Map.empty None

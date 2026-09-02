@@ -614,3 +614,34 @@ module ResourceProfile =
             match ResourceLeaf.conflicts (ResourceClosure.leaves closure) with
             | [] -> Ok closure
             | (left, right) :: _ -> Error (conflictSentence "this selection" left right)
+
+    /// The whole of one sandbox's grant: the operator's `defaults`, plus what the sandbox
+    /// selected — resolved as ONE closure, so a conflict between any two of them refuses
+    /// exactly as it always has. Beside the leaves comes the subset held through `wants:`
+    /// ALONE, which the policy may drop where the HOST cannot realise it: a want's promise
+    /// is "warm where the host makes it so and silently absent where not", `selected`
+    /// honours the first half of "not" (a name nobody declared selects nothing), and this
+    /// set is what lets the realisation honour the second (a declared name this host
+    /// cannot express). A leaf also reachable through `uses:` or the defaults is not in
+    /// the set — something NEEDS it, so withholding it still refuses.
+    ///
+    /// Written HERE rather than at the composition root because it computes: two resolves
+    /// and a set difference are exactly the arithmetic a root cannot have tested cheaply.
+    let grants
+        (profile: ResourceProfile)
+        (defaults: ResourceLeaf list)
+        (uses: ResourceName list)
+        (wants: ResourceName list)
+        : Result<ResourceLeaf list * Set<ResourceLeaf>, string> =
+        match selected profile uses wants with
+        | [] -> Ok (defaults, Set.empty)
+        | selection ->
+            match resolve profile selection with
+            | Error e -> Error e
+            | Ok closure ->
+                let all = (ResourceClosure.leaves closure |> Set.toList) @ defaults |> List.distinct
+                match resolve profile (List.distinct uses) with
+                | Error e -> Error e
+                | Ok required ->
+                    let held = Set.union (ResourceClosure.leaves required) (Set.ofList defaults)
+                    Ok (all, Set.difference (Set.ofList all) held)
