@@ -464,9 +464,14 @@ let policyFor
     // The trio is `safe.directory` in git's own env spelling. The session bind-mounts
     // its checkouts into the container, so they arrive owned by the operator's uid
     // while the container runs as the image's user — and git refuses to read a
-    // repository its caller does not own. Scoped to nothing narrower because every
-    // repository this container can see is one this session put there. Baseline, so a
-    // spec that names any of these keys still wins, like the rest of the baseline.
+    // repository its caller does not own. The `*` is wider than "the session's own
+    // checkouts" now that mountPlan mounts operator-granted binds and volumes too: it
+    // trusts a git repository ANYWHERE the sandbox can see, including one sitting in a
+    // granted bind. That is still the right scope — a mount is granted by the operator
+    // or declared by the repo, so everything visible was put there by somebody this
+    // trio answers for — but the sentence it rests on is "every mount is consented",
+    // not "every mount is a checkout". Baseline, so a spec that names any of these
+    // keys still wins, like the rest of the baseline.
     let dockerBaseline =
         Map.ofList
             [ "GIT_CONFIG_COUNT", "1"
@@ -912,9 +917,20 @@ module DockerSandbox =
     /// refuses the ABSOLUTE symlinks such images use for /etc/passwd and /etc/group: so
     /// `docker run` works and every `docker exec` dies with "path escapes from parent".
     /// Materialising the files at start (the run path, which works) makes every later
-    /// exec resolve against real files. Measured on 29.2.1; drop the wrap when the
-    /// daemon handles symlinked /etc again. Harmless elsewhere — a real file is left
-    /// alone, and a missing one skipped.
+    /// exec resolve against real files. Measured on 29.2.1; the regression is
+    /// containerd's (https://github.com/containerd/containerd/issues/12683, Go 1.24's
+    /// stricter os.Root) — drop the wrap when a fix ships in the daemons people run.
+    /// Harmless elsewhere — a real file is left alone, and a missing one skipped.
+    ///
+    /// The wrap COSTS three things, stated here because nothing else will say them: the
+    /// image must carry `sh` and `cat`/`rm`/`mv` (a distroless image with a declared
+    /// command cannot start — the daemon reports whatever exec'ing `sh` fails as); a
+    /// materialised /etc/shadow is re-created with the shell's umask, not the
+    /// symlink target's mode (container root reads it either way, but an image that
+    /// added an unprivileged user changes observably); and the declared command is
+    /// pasted after the fixes without `exec`, so sh stays PID 1 and signals reach the
+    /// command only as sh forwards them — the idle arm execs, a declared one does not,
+    /// because a declared string may be a sequence.
     ///
     /// The daemon's regression, so the backend carries the workaround: it sat in
     /// yession.yaml for a while, where every repo adopting a nix-built image would have

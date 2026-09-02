@@ -92,7 +92,10 @@ let
     # arm CI leg while the same tree builds on x86_64-linux, on aarch64-darwin, and
     # in the arm64 work containers (whose nix runs unsandboxed). Disabling it here
     # affects only the BUILD-TIME compilers — what this derivation ships is the
-    # JavaScript they emit, not a CLR process.
+    # JavaScript they emit, not a CLR process. No upstream issue tracks this pairing
+    # (searched dotnet/runtime and nixpkgs, 2026-09), so the drop condition is a
+    # probe rather than a watch: delete this line, build on aarch64-linux with the
+    # sandbox on, and keep the deletion if fable survives.
     export DOTNET_EnableWriteXorExecute=0
   '';
 
