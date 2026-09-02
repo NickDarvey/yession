@@ -87,6 +87,16 @@ module SandboxDecl =
 
     /// One declaration, written back as the file would have written it.
     ///
+    /// Everything a set of declarations selects, each list deduplicated — the ONE assembly
+    /// of "what these sandboxes ask for", however many declarations a repo carries. It was
+    /// hand-collected at three sites, which is the missing-abstraction smell: a third
+    /// selection posture beside `uses`/`wants` would have had to find every copy, and the
+    /// copy it missed would have silently asked for less. Now a new posture changes this
+    /// function and the type it returns, and the compiler walks to the consumers.
+    let selectionOf (decls: SandboxDecl list) : ResourceName list * ResourceName list =
+        decls |> List.collect (fun decl -> decl.Uses) |> List.distinct,
+        decls |> List.collect (fun decl -> decl.Wants) |> List.distinct
+
     /// Exists so the command gate can carry a declaration (see `ConfigFile.parseSandbox`).
     /// The round trip through `parseSandbox` is what makes that safe: anything this writes,
     /// the file's own schema must be willing to read, so a gated call cannot smuggle a shape
