@@ -84,24 +84,16 @@ let private reposDirWith (checkout: string -> unit) : string =
 
 /// The `dev` request exactly as the session builds it: this repo's own file through the
 /// real decoder, the workdir resolved against the CONTAINER's view of the checkout
-/// (`workCheckoutAt`), and the one thing the session adds — the /repos bind.
+/// (`workCheckoutAt`), and the one thing the session adds — the /repos bind — through
+/// the same `withSessionRepos` the session calls, not a hand-kept copy of it.
 let private declaredDev (reposDir: string) : EnvironmentSpec =
     let file = RepoConfig.read reposDir repoRef |> expect |> Option.get
     let decl = file.Sandboxes |> Map.find (SandboxName.create "dev" |> expect)
     let request = SandboxDecl.toRequest (Some (Sandboxes.checkoutViewsAt reposDir repoRef)) decl |> expect
-    let container =
-        match request.Spec.Runtime with
-        | Container container -> container
-        | Confinement -> failwith "yession.yaml declares no container, and a repo work sandbox is one"
-    { request.Spec with
-        Runtime =
-            Container
-                { container with
-                    Mounts =
-                        container.Mounts
-                        @ [ { Source = HostPath reposDir
-                              Target = Sandboxes.reposVisibleAt DockerBackend reposDir
-                              Mode = ReadWrite } ] } }
+    match request.Spec.Runtime with
+    | Container _ -> ()
+    | Confinement -> failwith "yession.yaml declares no container, and a repo work sandbox is one"
+    Sandboxes.withSessionRepos reposDir DockerBackend request.Spec
 
 /// Start the declared container through the production composition, with `granted` as what
 /// the operator's profile came to (empty = a host offering nothing, so the file's `wants:`
