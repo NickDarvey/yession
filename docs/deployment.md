@@ -19,7 +19,7 @@ answerable without a table.
 |---|---|---|
 | `YESSION_*` | **you**, the operator. Ordinary configuration. | `YESSION_MANAGER_URL`, `YESSION_IDLE_TIMEOUT` |
 | `YESSION_BIN_*` | you, and it names an executable on this host. | `YESSION_BIN_GIT`, `YESSION_BIN_BWRAP` |
-| `YESSION_SESSION_*` | you, per session. What a sandbox may HOLD is no longer here: it is named in the resources profile (`YESSION_SESSION_RESOURCES`), which a repo selects from and can never exceed. | `YESSION_SESSION_WORK_BACKEND`, `YESSION_SESSION_RESOURCES` |
+| `YESSION_SESSION_*` | you, per session. | `YESSION_SESSION_WORK_BACKEND`, `YESSION_SESSION_RESOURCES` |
 | `YESSION_LAUNCH` | **nobody.** The Manager mints it per launch and the session decodes it. | — |
 
 `YESSION_LAUNCH` carries the launch's control secret, which is custody of that session's
@@ -28,21 +28,16 @@ be a session the Manager started. It never reaches a sandboxed command — the h
 is an allowlist — and nothing but the Manager should ever write it.
 
 The split matters most for the middle two. Anything under `YESSION_BIN_*` names a binary
-this host will execute, so it is the operator's alone and always will be. Anything under
-`YESSION_SESSION_*` is a per-session policy that happens, today, to be set once for the whole
-host.
+this host will execute, so it is the operator's alone. Anything under `YESSION_SESSION_*` is
+a per-session policy that happens, today, to be set once for the whole host.
 
-What a sandbox may READ, WRITE and REACH is no longer among them. That is declared in a
-**resources profile** — `YESSION_SESSION_RESOURCES` names the file — where each resource has a
-name, and a repo's `yession.yaml` selects names rather than writing paths and hostnames of its
-own. The two acts an operator performs there are deliberately separate: `resources:` is what
-this host CAN offer, and `default:` is what every sandbox gets without asking. A name declared
-and not defaulted is available and not granted.
-
-That separation is the point. `YESSION_SESSION_READ` used to be both at once — a ceiling a
-repo's `read:` was held to AND an unconditional grant to every sandbox — so an operator could
-not offer a path without forcing it on everything, and a repo asking for one could never
-obtain it.
+What a sandbox may READ, WRITE and REACH is declared in a **resources profile** —
+`YESSION_SESSION_RESOURCES` names the file — where each resource has a name, and a repo's
+`yession.yaml` selects names rather than writing paths and hostnames of its own, so a repo
+can never exceed what the operator declared. The operator's two acts there are deliberately
+separate: `resources:` is what this host CAN offer, and `default:` is what every sandbox
+gets without asking. A name declared and not defaulted is available and not granted —
+offering a path never forces it on everything.
 
 ---
 
@@ -64,10 +59,9 @@ yession-manager --auth trusted-headers   # an authenticating proxy in front
 | `localhost` | Any loopback request is the single unattributed subject `local`. |
 | `trusted-headers` | The proxy in front asserts the user in canonical `x-yession-*` headers, trusted verbatim. |
 
-An unknown name fails the boot loudly rather than defaulting to anything — as does an
-unknown OPTION, which matters more than it sounds: `--auht localhost` used to be ignored,
-and an ignored `--auth` is deny-everything, so a typo presented as a Manager that refused
-everyone. Every bin answers `--help` with what it accepts.
+An unknown name — or an unknown OPTION — fails the boot loudly rather than defaulting to
+anything: a silently ignored `--auth` is deny-everything, so a typo would present as a
+Manager that refuses everyone. Every bin answers `--help` with what it accepts.
 
 `trusted-headers` **replaces** `localhost` and must never compose with it. Behind a
 loopback-terminating proxy every request arrives over loopback, so composing them would
@@ -139,23 +133,22 @@ that wrong sends remote logins to an address only the host can resolve.
 YESSION_IDLE_TIMEOUT=30m                 # or 90s, 2h; unset means never
 ```
 
-`YESSION_IDLE_TIMEOUT` lets the Manager stop sessions nobody is using. A session
-reports busy or idle over its control channel — a connected peer, a running turn, a command in
-a terminal, a non-empty queue — and the Manager reaps on **silence**, so no single report has
-to arrive; unset is the default, because stopping a session nobody asked to have stopped is not
-a behaviour to acquire by upgrading.
+`YESSION_IDLE_TIMEOUT` lets the Manager stop sessions nobody is using. A session reports
+busy or idle over its control channel — a connected peer, a running turn, a command in a
+terminal, a non-empty queue — and the Manager reaps on **silence**, so no single report has
+to arrive. Unset means never, and is the default.
 
 Two costs to decide on first: a reaped launch takes its OAuth client registration and
 per-launch user bindings with it, so the next visitor signs in again (invisible under `--auth
 localhost`, a re-bounce under `trusted-headers`); and a session wedged after readiness stops
 beating and is stopped as `NeverReported` rather than diagnosed.
 
-What it buys beyond the Node process, Yjs replica and loaded event log an idle session holds:
-point `YESSION_SPAWN_BIN` at a path that floats with your builds, and sessions upgrade
-continuously as they idle out and relaunch, while the Manager — whose own restart evicts
+Beyond freeing the Node process, Yjs replica and loaded event log an idle session holds, it
+buys rolling upgrades: point `YESSION_SPAWN_BIN` at a path that floats with your builds and
+sessions upgrade as they idle out and relaunch, while the Manager — whose own restart evicts
 everybody — is left alone until nothing is running. A MAJOR version difference refuses the
-launch rather than pairing two processes whose control protocol may disagree, which drains the
-running set and hands you that quiet moment.
+launch rather than pairing two processes whose control protocol may disagree, which drains
+the running set and hands you that quiet moment.
 
 ### Addressing
 
@@ -210,11 +203,10 @@ per launch, so a session that stops and comes back arrives at an origin the brow
 seen. Browser storage is partitioned by origin, so anything its user wrote **while it was
 away** is stranded in a database nothing will open again.
 
-Everything already sent is safe — it is on the server — so this is a real constraint of not
-path-mounting rather than a defect. Yession says so in the product: a deployment whose
-sessions move emits `<meta name="yession-ephemeral-storage" content="1">` on the session
-shell, and the client's offline copy tells the truth instead of promising a sync it cannot
-deliver. Under an `{id}` template the tag is absent and the promise holds.
+Everything already sent is on the server and safe. A deployment whose sessions move says so
+in the product: the session shell emits `<meta name="yession-ephemeral-storage" content="1">`
+and the client's offline copy stops promising a sync it cannot deliver. Under an `{id}`
+template the tag is absent and the promise holds.
 
 #### The registry stream
 
@@ -340,9 +332,8 @@ Tailscale-User-Profile-Pic  avatar URL
 ```
 
 and it **overwrites** these on inbound requests, so a client that sends its own
-`Tailscale-User-Login` does not get to choose who it is. That is what makes them safe to trust,
-and it is the whole reason this integration can attribute work to real people rather than to a
-shared subject.
+`Tailscale-User-Login` does not get to choose who it is. The overwrite is what makes them
+safe to trust, and what lets this integration attribute work to real people.
 
 Yession reads only its own canonical set and `serve` cannot rename headers, so a small
 rewriting proxy sits between them. With Caddy:
@@ -385,18 +376,17 @@ silent.
 `serve` terminates on loopback, so **every** tailnet visitor reaches the Manager over
 `127.0.0.1` — which is exactly what the `localhost` rule trusts. The device authorization that
 let them onto the tailnet is real, but Yession never sees it: every visitor becomes the single
-**unattributed** subject `local`. Nothing errors. Sessions open, work is saved, and all of it
-is attributed to one shared identity.
+**unattributed** subject `local`. Nothing errors — sessions open, work is saved, all of it
+attributed to one shared identity.
 
-On a personal tailnet that is coherent — there is one human, and `local` is their name. On a
-tailnet with anyone else on it, it means the audit trail says `local` for work several people
-did, and there is no way to tell afterwards which of them did what.
+On a personal tailnet that is coherent: there is one human, and `local` is their name. With
+anyone else on it, the audit trail says `local` for work several people did, and nothing can
+tell afterwards which of them did what.
 
-It costs more than the audit trail. Because every visitor is that one subject, a Claude account
-connected for "all my sessions" belongs to the **deployment**: any tailnet visitor's agent turn
-runs on it, and spends against it. That is the same boundary as the rest of the rule — they
-could already open your sessions and read everything in them — but it is worth deciding rather
-than discovering.
+It costs more than the audit trail. Because every visitor is that one subject, a Claude
+account connected for "all my sessions" belongs to the **deployment**: any tailnet visitor's
+agent turn runs on it, and spends against it. That is the same boundary as the rest of the
+rule — they could already open your sessions — but worth deciding rather than discovering.
 
 Two ways to bound it, and they answer different questions:
 
