@@ -66,7 +66,7 @@ module DK = Fable.Dockerode
 [<Emit("$0.getVolume($1).remove()")>]
 let private removeVolume (client: obj) (name: string) : JS.Promise<unit> = jsNative
 
-[<Emit("$0.createVolume({ Name: $1, Labels: { 'yession-session': $1 } })")>]
+[<Emit("((client, name) => client.createVolume({ Name: name, Labels: { 'yession-session': name } }))($0, $1)")>]
 let private createLabelledVolume (client: obj) (name: string) : JS.Promise<obj> = jsNative
 
 let private repoRef = RepoRef.create "trinketworks/yession" |> expect
