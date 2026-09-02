@@ -1125,6 +1125,9 @@ module Style =
     /// because it is a surface OVER the conversation and has to be told from it.
     let itemMenu =
         cls [ "absolute right-0 top-7 z-30 min-w-[12rem] py-1"
+              // Chrome, not content: a menu is a list of things to press, and dragging across
+              // one should never start selecting its labels.
+              "select-none"
               "bg-panel"
               Stroke.ring
               Stroke.hair ]
@@ -1139,7 +1142,10 @@ module Style =
     /// the listener would have to be added, removed and reasoned about against a view that
     /// re-renders, while this exists exactly as long as the menu does. Transparent and over
     /// everything below the menu.
-    let itemMenuBackdrop = "fixed inset-0 z-20 bg-transparent cursor-default"
+    /// `select-none` because it is the size of the screen. A backdrop is chrome and holds no
+    /// words, so nothing is lost by making it unselectable — and what is gained is that no
+    /// selection in flight when it mounts can ever paint across the viewport.
+    let itemMenuBackdrop = "fixed inset-0 z-20 bg-transparent cursor-default select-none"
 
     /// A repo note in the timeline (Plan 14): one quiet act-line, indented past the
     /// avatar gutter so the reading edge lines up with message bodies.

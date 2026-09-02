@@ -1911,6 +1911,37 @@ let editorTests =
                 let! menus = await (page.EvaluateAsync<int> "() => document.querySelectorAll('#shell [data-item-menu]').length")
                 Expect.equal menus 0 "the list moved, so the hold was a scroll"
             }
+        // The concession, and the reason it is not optional. Every platform binds its own long
+        // press on text to selecting that text, at about the same half second the hold waits,
+        // so a finger on a paragraph is two gestures at once. Left unyielded, this shipped as
+        // "long-pressing a message selects the entire screen": the menu's backdrop is a
+        // `fixed inset-0` element, so opening it put a viewport-sized box under the finger at
+        // the exact moment the platform was deciding what the selection covered.
+        //
+        // `selectstart` is the platform saying which gesture this is. What the case pins is
+        // that the hold hears it — not what a phone's selection then does, which no headless
+        // browser can be made to reproduce.
+        editorCaseIn 390 844 "a hold the platform is selecting text with opens nothing" (EDITOR_PORT + 34) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-conversation] [data-message-id]")
+                let! _ =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 const item = document.querySelector('#shell [data-conversation] [data-message-id]')
+                                 const b = item.getBoundingClientRect()
+                                 const at = { clientX: b.left + 20, clientY: b.top + 8, pointerType: 'touch', bubbles: true }
+                                 item.dispatchEvent(new PointerEvent('pointerdown', at))
+                                 // What the platform raises once it has decided the gesture is
+                                 // a selection. Dispatched on the words themselves, which is
+                                 // where it would come from.
+                                 const body = item.querySelector('[data-message-body]') || item
+                                 body.dispatchEvent(new Event('selectstart', { bubbles: true }))
+                                 return true
+                               }""")
+                do! Async.Sleep 900
+                let! menus = await (page.EvaluateAsync<int> "() => document.querySelectorAll('#shell [data-item-menu]').length")
+                Expect.equal menus 0 "the platform is selecting text, so the hold is not a hold"
+            }
         // The DVR (Plan 14, stage 7). What only a browser can answer: that rewinding a LIVE
         // terminal really mounts a player over what it has recorded so far — the same player
         // and the same cast a finished terminal's replay uses, which is what "rewound like

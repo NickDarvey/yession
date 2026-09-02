@@ -20,6 +20,7 @@ module Yession.Browser.LongPress
 //   pointerup     a tap
 //   pointercancel the platform took the gesture (a scroll it decided to own)
 //   scroll        the list moved under a finger that never moved itself
+//   selectstart   the platform is selecting text with it, and text wins
 //
 // A mouse is excluded rather than handled: it has the ellipsis, and a mouse held still on a
 // message for half a second is somebody reading.
@@ -113,6 +114,24 @@ let watch (opened: string -> unit) : unit =
     // are unchanged, so nothing above sees it. Capture, because the scroller is a descendant
     // and scroll does not bubble.
     window.document.addEventListener ("scroll", (fun _ -> cancel ()), true)
+
+    // And the one that is not a cancel so much as a CONCESSION. Every platform binds its own
+    // long press on text to selecting that text, at about the same half second this waits —
+    // so a finger held on a paragraph is two gestures at once, and the reader only ever meant
+    // one of them. Whichever this is, the platform knows first: `selectstart` is it saying so.
+    //
+    // Text wins, and not as a tie-break. Selecting what somebody said is a thing every page
+    // can do and this one was quietly taking away; opening the menu is a shortcut to a control
+    // already on the screen, which is where a device with no pointer reaches for it anyway
+    // (`Style.itemActions` keeps the ellipsis visible at half strength there). What is left
+    // for the hold is the rest of the row — the gutter, the padding, the space past a short
+    // line — which on a phone is most of it, because the ground runs edge to edge.
+    //
+    // Left unyielded, this did not merely open a menu over a selection. The menu's backdrop is
+    // a `fixed inset-0` element, so a hold on a paragraph put a viewport-sized box under the
+    // finger at the exact moment the platform was deciding what the selection covered, and it
+    // answered: the whole screen.
+    window.document.addEventListener ("selectstart", (fun _ -> cancel ()), true)
 
     // The two events a fired hold leaves behind. Suppressed rather than ignored: the click
     // would land on the menu this gesture just opened, and the platform's own menu would
