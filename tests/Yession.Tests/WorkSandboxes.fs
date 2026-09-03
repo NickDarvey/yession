@@ -164,7 +164,16 @@ let private ensureTests =
                 let! second = sandboxes.Ensure caller (sandbox "test") (forwarding [])
                 let one = expect first
                 let two = expect second
-                Expect.equal one.Ref two.Ref "the same sandbox comes back"
+                Expect.equal
+                    (WorkSandboxes.SandboxOutcome.sandbox one).Ref
+                    (WorkSandboxes.SandboxOutcome.sandbox two).Ref
+                    "the same sandbox comes back"
+                // And the answer says which ask put it there. A consequence that belongs
+                // only to the start — a repo's `setup:` — reads this rather than firing
+                // again on every re-ask, and the fold re-asks after every repo verb.
+                match one, two with
+                | WorkSandboxes.SandboxStarted _, WorkSandboxes.SandboxAlreadyRunning _ -> ()
+                | _ -> failwith "the first ask started it and the second found it running"
                 Expect.equal
                     (built |> Seq.filter (fun (name, _) -> name = "test") |> Seq.length)
                     1
@@ -247,7 +256,10 @@ let private ensureTests =
                 let! stopped = sandboxes.Stop caller (sandbox "test")
                 Expect.isTrue (Result.isOk stopped) "it stops"
                 let! restarted = sandboxes.Ensure caller (sandbox "test") (forwarding [ "github" ])
-                Expect.equal (expect restarted).Request.Forward [ "github" ] "the new configuration takes"
+                Expect.equal
+                    (WorkSandboxes.SandboxOutcome.sandbox (expect restarted)).Request.Forward
+                    [ "github" ]
+                    "the new configuration takes"
                 let! events = eventsOf log
                 Expect.equal (List.length (startedEvents events)) 2 "both starts are recorded"
             }
@@ -320,7 +332,10 @@ let private credentialTests =
                 let log = newLog ()
                 let sandboxes, built = registry log [ githubCredential (Some "ghp_secret") ]
                 let! started = sandboxes.Ensure caller (sandbox "test") (forwarding [ "github" ])
-                Expect.equal (expect started).Request.Forward [ "github" ] "it forwards what was asked"
+                Expect.equal
+                    (WorkSandboxes.SandboxOutcome.sandbox (expect started)).Request.Forward
+                    [ "github" ]
+                    "it forwards what was asked"
 
                 let _, env = built |> Seq.find (fun (name, _) -> name = "test")
                 Expect.equal (Map.tryFind "GITHUB_TOKEN" env) (Some "ghp_secret") "the value is in the sandbox env"

@@ -85,10 +85,35 @@ type WorkSandboxesConfig =
       Log : EventLog<SessionEvent>
       Clock : unit -> DateTimeOffset }
 
+/// What an `Ensure` did, which is not the same question as what it returned.
+///
+/// A get-or-create tells its caller the sandbox is up; it does not tell them whether this
+/// ask is what put it there, and some consequences belong only to the ask that did. A
+/// repo's `setup:` is one: the fold that re-asks runs at boot and after every repo verb, so
+/// a consequence attached to "the sandbox is up" would fire each time somebody touched a
+/// checkout, while one attached to "this started it" fires once.
+///
+/// The registry is the only thing that can answer it — the equality that decides idempotence
+/// is in here — so it says so rather than leaving each caller to infer it from a timestamp.
+type SandboxOutcome =
+    /// It was not running, and this ask started it.
+    | SandboxStarted of RunningSandbox
+    /// It was already running on this exact configuration. Nothing changed, and the
+    /// timeline records nothing.
+    | SandboxAlreadyRunning of RunningSandbox
+
+module SandboxOutcome =
+
+    /// The sandbox, however it came to be up — for the readers that do not care which.
+    let sandbox =
+        function
+        | SandboxStarted entry
+        | SandboxAlreadyRunning entry -> entry
+
 type WorkSandboxes =
     { /// Get-or-create by name. Idempotent when the configuration matches; a legible
-      /// error when it does not.
-      Ensure : SandboxCaller -> SandboxRef -> SandboxRequest -> Async<Result<RunningSandbox, string>>
+      /// error when it does not. The answer says which of those happened.
+      Ensure : SandboxCaller -> SandboxRef -> SandboxRequest -> Async<Result<SandboxOutcome, string>>
       Stop : SandboxCaller -> SandboxRef -> Async<Result<unit, string>>
       /// The environment a terminal runs in. Total, because a terminal has to be told no
       /// in the same shape it is told anything else — an unknown name resolves to an
@@ -190,7 +215,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
             | None -> return Ok resolved
         }
 
-    let ensure (caller: SandboxCaller) (name: SandboxRef) (request: SandboxRequest) : Async<Result<RunningSandbox, string>> =
+    let ensure (caller: SandboxCaller) (name: SandboxRef) (request: SandboxRequest) : Async<Result<SandboxOutcome, string>> =
         async {
             let wanted = normalise request
             match find name with
@@ -200,7 +225,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                 // ask changed nothing, so the timeline should not claim it did.
                 match! existing.Environment.Ensure None (sprintf "sandbox '%s' was asked for" (SandboxRef.render name)) with
                 | EnvironmentUnavailable reason -> return Error reason
-                | EnvironmentAvailable -> return Ok existing
+                | EnvironmentAvailable -> return Ok (SandboxAlreadyRunning existing)
             | Some existing ->
                 // Say what differs, never recreate. `differences` is total over unequal
                 // requests, so this branch always has something to say — which is why the
@@ -247,7 +272,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                                           // never sees one.
                                           Realisation = environment.Realisation ()
                                           Actor = caller.Actor })
-                            return Ok entry
+                            return Ok (SandboxStarted entry)
         }
 
     let stop (caller: SandboxCaller) (name: SandboxRef) : Async<Result<unit, string>> =
@@ -316,7 +341,11 @@ let singleton (backend: string) (environment: SessionEnvironment.SessionEnvironm
                 else
                     match! environment.Ensure None "the sandbox was asked for" with
                     | EnvironmentUnavailable reason -> return Error reason
-                    | EnvironmentAvailable -> return Ok entry
+                    // Always the already-running answer: this degenerate registry has one
+                    // sandbox that exists from boot, so no ask of it is the ask that
+                    // started it — and the safe direction for a once-only consequence is
+                    // the one that does not fire.
+                    | EnvironmentAvailable -> return Ok (SandboxAlreadyRunning entry)
             }
       Stop =
         fun _ name ->
