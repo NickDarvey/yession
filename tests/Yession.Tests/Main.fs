@@ -63,6 +63,10 @@ let all =
         // The same loop, closed around a provider written in another language on somebody
         // else's SDK: our client, their server, two real processes — see `Jumpstarter`.
         Tag.needs "The jumpstarter provider" [ Tag.Jumpstarter ] (fun () -> Jumpstarter.tests)
+        // The other kind of integration: not a server the session talks to, but the process a
+        // deployment's reverse proxy is fed by. A real Manager, a real session (so there is a
+        // port to render), and the example following the one between them.
+        Tag.needs "The proxy example" [ Tag.Ports; Tag.Native ] (fun () -> ProxyMap.tests)
         Tag.needs "SessionProcess" [] (fun () -> SessionProcess.tests)
         Tag.needs "Sync" [] (fun () -> Sync.tests)
         Tag.needs "TerminalPattern" [] (fun () -> TerminalPattern.tests)

@@ -69,6 +69,7 @@
     <Compile Include="Resilience.fs" />
     <Compile Include="Oidc.fs" />
     <Compile Include="Phase4.fs" />
+    <Compile Include="ProxyMap.fs" />
     <Compile Include="Hedgehog.fs" />
     <Compile Include="Resources.fs" />
     <Compile Include="SeededFiles.fs" />

@@ -1,0 +1,66 @@
+# One reverse proxy in front of a Yession deployment, behind whatever terminated TLS and
+# authenticated the caller. Here that is `tailscale serve`, which asserts the calling tailnet
+# user in `Tailscale-User-*` headers and overwrites any a client sent — so a single mapping,
+#
+#   tailscale serve --bg --https=8321 9000
+#
+# is the whole of the ingress, and everything else (routing, the identity translation) is
+# in this file, where it can be read, versioned and tested.
+#
+# Three variables, read once when the Caddyfile is adapted, and one with a default:
+#
+#   YESSION_PROXY_PORT      the port this proxy listens on — what `serve` targets, e.g. 9000
+#   YESSION_PROXY_MANAGER   the Manager, e.g. 127.0.0.1:8321
+#   YESSION_PROXY_SESSIONS  a glob over the session map ../main.mjs writes,
+#                           e.g. /var/lib/yession/proxy/sessions*.caddy
+#   YESSION_PROXY_BIND      the interface, default 127.0.0.1 — see `bind` below
+#
+# Run it with `--watch`: Caddy re-adapts this file every second, which re-reads the import,
+# so a rewritten map is live within a second and nothing has to tell Caddy to reload.
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+# The site address is a bare port on purpose, twice over. A host in it (`127.0.0.1:9000`)
+# becomes a Host MATCHER, and every request through `serve` carries the tailnet name as its
+# Host — so nothing matched and Caddy answered an empty 200 to everything. And a host in it
+# is served over TLS by default, `auto_https off` notwithstanding: that only stops the
+# certificate machinery. `http://` says TLS is the ingress's job; `bind` says where to listen.
+http://:{$YESSION_PROXY_PORT} {
+	# Loopback, or the translation below is a hole: anything that can dial this port directly
+	# can write its own `Tailscale-User-Login`, and the proxy would believe it. `serve` is the
+	# only thing that should be able to reach here.
+	bind {$YESSION_PROXY_BIND:127.0.0.1}
+
+	# Sessions first. Each is a `handle` over its own `/s/<id>` mount, rendered per frame by
+	# main.mjs through the template the deployment gives it. A glob matching nothing is a
+	# warning at adapt time and not an error, so a cold boot with no map yet still serves the
+	# Manager — and the `/open` page waits on the mapping rather than racing it. Under
+	# `--watch` that adapt runs every second, so give main.mjs `--empty '# no sessions'`:
+	# an EMPTY import is a warning too, and one a line a second for as long as nothing runs.
+	import {$YESSION_PROXY_SESSIONS}
+
+	# Everything else is the Manager's. The identity translation happens here and ONLY here:
+	# a session authenticates its visitors through the Manager as OIDC issuer, never by
+	# header, so the session routes above carry nothing of the kind.
+	handle {
+		reverse_proxy {$YESSION_PROXY_MANAGER} {
+			# SET the three Yession reads from the three `serve` asserts. `header_up` with a
+			# value replaces whatever the client sent under that name — that IS the strip for
+			# these three, and `serve` has already overwritten the source of each.
+			header_up x-yession-user {header.Tailscale-User-Login}
+			header_up x-yession-user-name {header.Tailscale-User-Name}
+			header_up x-yession-user-picture {header.Tailscale-User-Profile-Pic}
+			# DELETE the two it reads that `serve` does not assert, or a client chooses its own
+			# email and claims. Named one by one rather than `-x-yession-*`: Caddy applies
+			# deletions AFTER sets, so the wildcard would take the three above with it
+			# (measured on Caddy 2.11.2 — the request arrived with no identity at all).
+			header_up -x-yession-user-email
+			header_up -x-yession-user-claims
+			# Translated, so nothing downstream reads an identity Yession did not sanction.
+			header_up -tailscale-*
+		}
+	}
+}

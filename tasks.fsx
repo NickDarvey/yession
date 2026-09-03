@@ -629,6 +629,16 @@ let example (name: string) =
         failwithf "no example called '%s' (have: %s)" name available
     if File.Exists (Path.Combine (dir, "pyproject.toml")) then pythonExample dir name else
 
+    // The third shape: plain Node, no dependencies, nothing to bundle. There is no build to
+    // run, so the verb does what a build would have caught — a file node cannot parse — and
+    // says so. What the example DOES is proved by the suite (`ProxyMap.fs`), which needs a
+    // Manager to drive it against, which is why it is not smoked here.
+    let plain = Path.Combine (dir, "main.mjs")
+    if File.Exists plain then
+        run "node" [ "--check"; plain ] |> ignore
+        printfn "examples/%s/main.mjs parses; nothing to build — run it with node, see its README" name
+    else
+
     let project = Directory.GetFiles (dir, "*.fsproj") |> Array.exactlyOne
     restore ()
     printfn "building example %s" name
