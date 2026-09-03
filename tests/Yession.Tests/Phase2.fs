@@ -975,6 +975,43 @@ let private sandboxPolicyTests =
             Expect.equal layout.Home None "the image has a home this process did not make"
             Expect.equal layout.SharedRepos None "and the checkouts arrive as a bind mount instead"
 
+        // A file that has to work on a laptop, in CI, in a Claude Code container and in one
+        // of these can branch on this instead of sniffing for clues — which is what it did
+        // before, badly. Asserted through `preparePolicy`, because that is where a
+        // contribution becomes an environment.
+        testCaseAsync "a sandbox's environment names the sandbox" <|
+            async {
+                let named = SandboxRef.inScope (RepoRef.create "octo/hello" |> expect) (SandboxName.create "gate" |> expect)
+                let noSecrets = fun (n: SecretName) -> async { return Error (SecretName.value n) }
+                let layout = Sandboxes.SessionLayout.forSandbox "/data/s" SrtBackend named
+                match! Sandboxes.preparePolicy SrtBackend noSecrets layout (fun _ _ -> Ok ([], Set.empty)) EnvironmentSpec.defaults () with
+                | Error reason -> return failwithf "policy refused: %s" reason
+                | Ok policy ->
+                    Expect.equal
+                        (Map.tryFind "YESSION_SANDBOX" policy.Env)
+                        (Some "gate")
+                        "the name the repo wrote, which is the name it can branch on"
+            }
+
+        // The `YESSION_LAUNCH` rule, for the same reason: a name that can be spoofed is a
+        // name nothing can be decided on. A repo says what its sandbox HOLDS; it does not
+        // get to say which sandbox it is.
+        testCaseAsync "a repo cannot tell its sandbox it is a different one" <|
+            async {
+                let noSecrets = fun (n: SecretName) -> async { return Error (SecretName.value n) }
+                let layout = Sandboxes.SessionLayout.forSandbox "/data/s" SrtBackend SandboxRef.defaultRef
+                let spec =
+                    { EnvironmentSpec.defaults with
+                        EnvironmentVariables = Map.ofList [ "YESSION_SANDBOX", PlainValue "somewhere-else" ] }
+                match! Sandboxes.preparePolicy SrtBackend noSecrets layout (fun _ _ -> Ok ([], Set.empty)) spec () with
+                | Error reason -> return failwithf "policy refused: %s" reason
+                | Ok policy ->
+                    Expect.equal
+                        (Map.tryFind "YESSION_SANDBOX" policy.Env)
+                        (Some "default")
+                        "the session's answer, not the file's"
+            }
+
         testCase "the two host-family backends are one family here" <| fun () ->
             // srt confines the host's own paths rather than replacing them, so a
             // contribution that differed between the two would be a difference in what the
@@ -1622,7 +1659,7 @@ let private hostEnvironment (log: Yession.SessionProcess.EventLog<SessionEvent>)
     Yession.SessionProcess.SessionEnvironment.create
         log
         createSandbox
-        (Sandboxes.preparePolicy HostBackend noSecrets Sandboxes.SessionLayout.nothing (fun _ _ -> Ok ([], Set.empty)) EnvironmentSpec.defaults)
+        (Sandboxes.preparePolicy HostBackend noSecrets (Sandboxes.SessionLayout.nothing SandboxRef.defaultRef) (fun _ _ -> Ok ([], Set.empty)) EnvironmentSpec.defaults)
         (Sandboxes.summaryFor HostBackend EnvironmentSpec.defaults)
         (sprintf "env-%s" name)
 
