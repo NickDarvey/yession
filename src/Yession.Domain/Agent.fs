@@ -734,12 +734,12 @@ module AgentWake =
             |> Set.ofList
         events
         |> List.fold
-            (fun (background: Map<string, ActorRef>, lastAgent: Map<string, ActorRef>, owed) event ->
+            (fun (background: Map<string, ActorRef>, lastAgent: Map<string, ActorRef>, pendingCommands: (string * ActorRef) list, owed) event ->
                 match event with
                 // A new turn takes everything before it: whatever those blocks did, that
                 // turn's digest reported it. `lastAgent` is NOT reset — it is not a debt, it
                 // is who the agent has been in that terminal, and that outlives the turn.
-                | AgentTurnStarted _ -> Map.empty, lastAgent, None
+                | AgentTurnStarted _ -> Map.empty, lastAgent, [], None
                 | SessionEvent.TerminalBlockStarted b ->
                     let lastAgent =
                         match Authority.onBehalfOf b.Authority with
@@ -749,13 +749,32 @@ module AgentWake =
                         match b.Background, Authority.onBehalfOf b.Authority with
                         | true, Some owner -> Map.add (BlockId.value b.BlockId) owner background
                         | _ -> background
-                    background, lastAgent, owed
+                    background, lastAgent, pendingCommands, owed
+                // A finished background command is a debt HELD, not owed yet: the same turn
+                // that started it may still pick the outcome up itself. `check_pending`
+                // delivers a completion by a `ToolUseFinished` naming the block (below), so
+                // recording the debt here and retracting it there is what tells the two apart
+                // — a completion the agent read in-turn from one it walked away from. The
+                // debt is settled only in the digest window at the end, once every delivery
+                // in the log has had its chance to retract it.
                 | SessionEvent.TerminalBlockCompleted b ->
-                    let owed =
+                    let pendingCommands =
                         match Map.tryFind (BlockId.value b.BlockId) background with
-                        | Some owner -> better (CommandFinished, owner) owed
-                        | None -> owed
-                    background, lastAgent, owed
+                        | Some owner -> pendingCommands @ [ BlockId.value b.BlockId, owner ]
+                        | None -> pendingCommands
+                    background, lastAgent, pendingCommands, owed
+                // A tool call that became a block, reporting its outcome to the turn that made
+                // it. If that block was a background command now owed, the agent has just been
+                // told — so the debt is paid and no wake is owed for it. A `ToolUseFinished`
+                // can only carry a completed block's outcome AFTER the completion, so a
+                // still-running poll (which names the block too) reaches here before any debt
+                // exists and retracts nothing; only the delivering call finds one to clear.
+                | SessionEvent.ToolUseFinished e ->
+                    let pendingCommands =
+                        match e.Block with
+                        | Some blk -> pendingCommands |> List.filter (fun (id, _) -> id <> BlockId.value blk)
+                        | None -> pendingCommands
+                    background, lastAgent, pendingCommands, owed
                 // Only a terminal the agent has worked in, and only the loss — the RESTORE
                 // needs no turn, because a queue that started moving again says so by moving.
                 | SessionEvent.TerminalIntegrationLost e ->
@@ -763,16 +782,16 @@ module AgentWake =
                         match Map.tryFind (TerminalId.value e.TerminalId) lastAgent with
                         | Some owner -> better (IntegrationLost e.TerminalId, owner) owed
                         | None -> owed
-                    background, lastAgent, owed
+                    background, lastAgent, pendingCommands, owed
                 | SessionEvent.TerminalClosed e when Set.contains (TerminalId.value e.TerminalId) attached ->
                     let owed =
                         match Map.tryFind (TerminalId.value e.TerminalId) lastAgent with
                         | Some owner -> better (StreamEnded e.TerminalId, owner) owed
                         | None -> owed
-                    background, lastAgent, owed
+                    background, lastAgent, pendingCommands, owed
                 // A watched pull request moved. The owner is the WATCHER on the payload,
                 // never the envelope's `System`: the wake runs as whoever asked to be told.
-                | SessionEvent.PrTransitioned p -> background, lastAgent, better (PrChanged p.Pr, p.Watcher) owed
+                | SessionEvent.PrTransitioned p -> background, lastAgent, pendingCommands, better (PrChanged p.Pr, p.Watcher) owed
                 // Unwatching clears what that pull request owed. A person who has just said
                 // they no longer care must not get a turn about it a moment later.
                 | SessionEvent.PrUnwatched p ->
@@ -780,10 +799,16 @@ module AgentWake =
                         match owed with
                         | Some (PrChanged pr, _) when pr = p.Pr -> None
                         | _ -> owed
-                    background, lastAgent, owed
-                | _ -> background, lastAgent, owed)
-            (Map.empty, Map.empty, None)
-        |> fun (_, _, owed) -> owed
+                    background, lastAgent, pendingCommands, owed
+                | _ -> background, lastAgent, pendingCommands, owed)
+            (Map.empty, Map.empty, [], None)
+        // The background commands nobody retracted are the ones the agent walked away from:
+        // fold them into `owed` now, with the same precedence and first-completed-wins
+        // coalescing they had when they were owed the instant they completed.
+        |> fun (_, _, pendingCommands, owed) ->
+            match pendingCommands with
+            | (_, owner) :: _ -> better (CommandFinished, owner) owed
+            | [] -> owed
 
     /// The actor a woken turn would run AS, for the readers that do not need the reason.
     let pending (events: SessionEvent list) : ActorRef option = pendingReason events |> Option.map snd
