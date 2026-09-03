@@ -12,12 +12,14 @@ Build one from the repository root, whichever ecosystem it belongs to:
 ```bash
 dotnet fsi tasks.fsx example serial        # Fable + esbuild
 dotnet fsi tasks.fsx example jumpstarter   # uv, and its own pytest suite
+dotnet fsi tasks.fsx example proxy         # plain Node; nothing to build, so it only parses it
 ```
 
 | | |
 |---|---|
 | [serial](serial/) | An MCP server that lends the host's serial devices to an agent. Shows the shape of a provider that owns a **resource**: arbitration, a session-scoped claim, and a second transport for the bytes a tool call cannot carry. |
 | [jumpstarter](jumpstarter/) | An MCP server that lends a [Jumpstarter](https://jumpstarter.dev) exporter to an agent. Shows a provider that owns a **service**, written in the language that service's SDK is written in — Python here, and none the worse for it. |
+| [proxy](proxy/) | The other direction: not something a session talks to, but what a deployment's **reverse proxy** is fed by. Renders the registry stream into the proxy's own config through a template, and shows one Caddy composition — behind `tailscale serve`, translating its identity headers — end to end. |
 
 ## Why a provider rather than a feature
 

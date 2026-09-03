@@ -222,10 +222,14 @@ The stream is gated by the Manager's trust rule like every other management rout
 `localhost` a same-machine binding just works; under `trusted-headers` the binding asserts its
 own `x-yession-user` on the subscribe, from inside the loopback trust boundary the proxy
 already defines. A binding that forgets it does not fail loudly — it gets 401s, sees no frames,
-and reconciles every mapping away as though the Manager had gone.
+and reconciles every mapping away as though the Manager had gone. The same is true of anything
+else on the loopback side that asks the Manager a question — a health check, a tracker — so
+each such caller names a subject of its own.
 
 The template is deliberately **not** on the wire. The stream carries `id` and `port`; the
-deployment applies its own template, so the prefix has exactly one home.
+deployment applies its own template, so the prefix has exactly one home. A reference
+reconciler that does exactly this — the stream in, a file in the proxy's own syntax out — is
+[`examples/proxy/main.mjs`](../examples/proxy/); §Tailscale below composes it.
 
 ---
 
@@ -318,7 +322,20 @@ than more configuration.
 
 ### Tailscale
 
-One listener carries everything: the Manager at `/`, each session at `/s/<id>`.
+One origin carries everything — the Manager at `/`, each session at `/s/<id>` — and one
+reverse proxy of your own sits behind `tailscale serve` and answers for all of it:
+
+```
+browser ──tailnet──▶ tailscale serve ──▶ your proxy ──┬──▶ manager      /
+                     TLS + identity      one mapping    └──▶ session i    /s/<id>
+```
+
+`serve` does the two things only it can — terminate TLS on the tailnet and say who is
+calling — through exactly one mapping. Routing, the identity translation, and what gets
+stripped all live in the proxy, in a file. The pieces are in
+[`examples/proxy`](../examples/proxy/): a reconciler that renders the registry stream into the
+proxy's own syntax, and a Caddyfile that composes it with the translation below. The rest of
+this section is what they implement, so a deployment on another proxy can implement the same.
 
 #### Authorizing
 
@@ -328,45 +345,56 @@ the identity of the calling tailnet node on every request —
 ```
 Tailscale-User-Login        the user's login name
 Tailscale-User-Name         display name
-Tailscale-User-Profile-Pic  avatar URL
+Tailscale-User-Profile-Pic  avatar URL (empty where the account has none)
 ```
 
 and it **overwrites** these on inbound requests, so a client that sends its own
 `Tailscale-User-Login` does not get to choose who it is. The overwrite is what makes them
-safe to trust, and what lets this integration attribute work to real people.
+safe to trust, and what lets this integration attribute work to real people. It does **not**
+touch `x-yession-*`: a client's forged `x-yession-user` arrives at the proxy intact, which is
+why the translation below is also a strip.
 
-Yession reads only its own canonical set and `serve` cannot rename headers, so a small
-rewriting proxy sits between them. With Caddy:
+Yession reads only its own canonical set and `serve` cannot rename headers, so the proxy
+translates. With Caddy, on the Manager's route:
 
 ```caddyfile
-:9000 {
-    reverse_proxy 127.0.0.1:8321 {
-        header_up x-yession-user         {header.Tailscale-User-Login}
-        header_up x-yession-user-name    {header.Tailscale-User-Name}
-        header_up x-yession-user-picture {header.Tailscale-User-Profile-Pic}
-        header_up -tailscale-*
-    }
+reverse_proxy 127.0.0.1:8321 {
+	header_up x-yession-user         {header.Tailscale-User-Login}
+	header_up x-yession-user-name    {header.Tailscale-User-Name}
+	header_up x-yession-user-picture {header.Tailscale-User-Profile-Pic}
+	header_up -x-yession-user-email
+	header_up -x-yession-user-claims
+	header_up -tailscale-*
 }
 ```
 
-Point the Manager's own mapping at Caddy rather than at the Manager, leaving session paths
-untouched — sessions authenticate through the Manager as OIDC issuer, not by header:
+Three details are load-bearing:
 
-```sh
-tailscale serve --bg --http=8321 9000     # / -> caddy -> manager
-```
+- **Set what `serve` asserts; delete what it does not.** A `header_up` with a value replaces
+  whatever the client sent under that name, so the three sets are also the strip for those
+  three. The two Yession reads that `serve` never asserts — email and claims — must be deleted
+  by name, or a client chooses its own.
+- **Delete by name, not `-x-yession-*`.** Caddy applies deletions *after* sets, so the wildcard
+  strips the three just asserted and the Manager sees nobody. Measured (Caddy 2.11.2); it
+  reads as correct and denies every visitor.
+- **The Manager must be reachable only through the proxy.** An exposed `127.0.0.1:8321` on a
+  shared box lets anyone local set `x-yession-user` to whatever they like, because under
+  `trusted-headers` that header *is* the subject. On a single-user machine loopback is that
+  user's already; on a shared one, bind the Manager somewhere only the proxy can dial.
 
-and start the Manager with `--auth trusted-headers`.
+Session routes carry none of this: a session authenticates its visitors through the Manager as
+OIDC issuer, never by header, so the proxy forwards to a session untranslated.
 
-Two details are load-bearing. `header_up -tailscale-*` strips the upstream headers after
-translating them, so nothing downstream can read an identity Yession did not sanction. And the
-Manager must be reachable **only** through the proxy — an exposed `127.0.0.1:8321` on a shared
-box lets anyone local set `x-yession-user` to whatever they like, because under
-`trusted-headers` that header *is* the subject.
+**Loopback callers assert themselves.** The Manager's gate is the same for a request that
+never left the machine, so the reconciler, a health check and a tracker each send an
+`x-yession-user` naming what they are (`examples/proxy/main.mjs --as proxy-map`). Under
+`localhost` the header is read by nothing and costs nothing; under `trusted-headers` a caller
+that forgets it gets 401s — and a reconciler that then treated "no frames" as "no sessions"
+would unmap the deployment, which is why the reference one does not.
 
-> The identity headers and the overwrite behaviour above are verified against a live tailnet
-> (Tailscale 1.98, plain HTTP). The Caddy composition is not: the directives were written
-> alongside the trusted-headers design and have not been stood up end to end.
+> Verified against a live tailnet: Tailscale 1.102.3 with HTTPS certificates, Caddy 2.11.2,
+> macOS — the identity headers, the overwrite, the `x-yession-*` pass-through, the deletion
+> ordering, and the full composition below with the Manager and a session behind it.
 
 ##### What `--auth localhost` costs here
 
@@ -399,22 +427,18 @@ Two ways to bound it, and they answer different questions:
 
 #### Addressing
 
+The ingress is one mapping, made once — `serve` config lives in tailscaled's own state and
+survives reboots:
+
 ```sh
-# the Manager's own mapping, made once
-tailscale serve --bg --http=8321 8321
-
-# one session
-tailscale serve --bg --http=8321 --set-path=/s/$id "http://127.0.0.1:$port/s/$id"
-
-# remove it
-tailscale serve --http=8321 --set-path=/s/$id off
+tailscale serve --bg --https=8321 9000        # everything -> your proxy
 ```
 
 with the Manager started as:
 
 ```sh
-YESSION_MANAGER_URL=http://host.example.ts.net:8321 \
-YESSION_SESSION_URL=http://host.example.ts.net:8321/s/{id} \
+YESSION_MANAGER_URL=https://host.example.ts.net:8321 \
+YESSION_SESSION_URL=https://host.example.ts.net:8321/s/{id} \
   yession-manager --auth trusted-headers
 ```
 
@@ -422,15 +446,15 @@ Both URLs name the tailnet origin, not loopback. The Manager is the OIDC issuer 
 bounce users through, so a loopback issuer here sends every remote login to an address only
 this machine can resolve.
 
-**The mount appears twice on purpose.** `--set-path` *strips* its prefix before proxying, but
-a Yession session serves **under** its mount — it answers at `/s/<id>/…` and 404s at `/`.
-Repeating the mount in the proxy target puts back exactly what `--set-path` removed. Serving
-under its own mount is deliberate on the session's part: it does not assume a stripping proxy
-in front of it.
+The proxy then routes `/` to the Manager and each `/s/<id>` to that session's port — **without
+stripping the mount**. A Yession session serves *under* its mount: it answers at `/s/<id>/…`
+and 404s at `/`, because the mount fixes its `<base href>`, its cookie `Path` and the prefix it
+removes itself. So a Caddy route is `handle`, never `handle_path`, and the upstream is the bare
+port.
 
-Use `--https` instead of `--http` on a tailnet with certificates, and match the scheme in both
-URLs. Derive it from one variable — the Manager and its sessions must land on the *same*
-listener, or they are two origins and the shared-origin arrangement quietly stops being one.
+Use `--https` on a tailnet with certificates, and match the scheme in both URLs. Derive it from
+one variable — the Manager and its sessions must land on the *same* listener, or they are two
+origins and the shared-origin arrangement quietly stops being one.
 
 Prefer `--https` for a second reason the certificate note does not name. A browser withholds
 the Cache API and service workers outside a secure context, so a session reached over plain
@@ -439,33 +463,41 @@ network — it degrades to today's behaviour rather than breaking, and the setti
 but the remedy is this flag and nothing on the client side can substitute for it. Loopback is a
 secure context, so the zero-config default is unaffected.
 
-##### Keeping mappings in step
+##### Keeping the session routes in step
 
-Subscribe to the registry stream and reconcile level-based, applying the whole desired set per
-frame. Two details earn their keep.
-
-**Re-apply rather than diff on the path alone.** A session that is reaped and relaunched keeps
-its path and changes its port, so "already served" would leave a handler aimed at a dead port
-forever. `serve` is idempotent for an unchanged pair.
-
-**Prune by prefix.** Everything under `/s/` belongs to the reconciler; the Manager's `/` does
-not, so it cannot be torn down by a naive "current minus desired". That makes ownership
-structural and retires any state file recording which mappings were created:
+A session's port is OS-assigned per launch, so its route is written by a process that follows
+the registry stream, not by a person. `examples/proxy/main.mjs` is that process: it renders
+every running session through a template in the two placeholders into one file, and the proxy
+reads the file.
 
 ```sh
-tailscale serve status -json \
-  | jq -r '(.Web["host.example.ts.net:8321"].Handlers // {}) | keys[] | select(startswith("/s/"))'
+node examples/proxy/main.mjs --manager http://127.0.0.1:8321 --as proxy-map \
+  --out /var/lib/yession/proxy/sessions.caddy \
+  --empty '# no running sessions' \
+  --template '@s_{id} path /s/{id} /s/{id}/*
+handle @s_{id} {
+	reverse_proxy 127.0.0.1:{port}
+}'
 ```
 
-Run it at boot as well as on every frame. `serve --bg` config is persisted, so mappings survive
-a reboot, a Manager SIGKILL, and the reconciler's own crash — while the sessions they point at
-survive none of those. Nothing prunes a stale `/s/` handler unless something reconciles before
-the Manager launches anything new.
+Caddy under `--watch` re-adapts its config every second and re-reads the import, so a rewritten
+map is live within a second; a proxy that does not watch its own config gets `--reload`. Three
+details earn their keep, and any reconciler written against the stream should keep them:
 
-A frame that never arrives is not an empty set. A Manager restart ends the stream, and
-reconnecting yields a fresh snapshot that heals whatever was missed. Only a connect that
-produces **no** frame at all means the Manager is unreachable — and since sessions cannot
-outlive it, that is when the desired set is genuinely empty.
+**Render the whole set, every frame.** A frame is the running set, not a change to it, so the
+file is rewritten from scratch and a missed frame costs nothing. A session that is reaped and
+relaunched keeps its path and changes its port; a diff on the path alone would leave a route
+aimed at a dead port forever. Rewrite only when the rendering changed, and beside-then-rename,
+so the proxy never reads half a file.
+
+**Nothing persists between runs.** The file *is* the state, and the next frame replaces it. A
+restart of the reconciler, of the proxy or of the machine needs no cleanup pass — unlike routes
+pushed into an ingress's own persisted state, which outlive the sessions they point at.
+
+**Which silence means what.** The stream ending is not the sessions ending: a Manager restart
+closes it, and the reconnect's first frame is a fresh snapshot that heals whatever was missed.
+A connection *refused* is — sessions cannot outlive the Manager, so that is the one case where
+the map is written empty. A 401 is neither: log it, keep the map, retry.
 
 ##### Rough edges
 
@@ -492,14 +524,22 @@ inputs.yession.url = "github:trinketworks/yession";
 # overriding that trades a cached, tested build for an untested one.
 ```
 
-Then one module declares the Manager, its policy, and its addresses together:
+Then one module declares the Manager, its policy, its addresses, and the proxy in front of it
+together — the three agents below are the whole of §Tailscale, with the example's files used
+as they ship:
 
 ```nix
 { config, pkgs, inputs, ... }:
 let
   yession = inputs.yession.packages.${pkgs.stdenv.hostPlatform.system}.default;
+  # The proxy pieces, straight from the input: a Caddyfile parameterised by env,
+  # and the reconciler that keeps the session routes in step.
+  proxy = "${inputs.yession}/examples/proxy";
   # Scheme + host spelled once, feeding both URLs — see §Tailscale.
   origin = "https://host.example.ts.net:8321";
+  managerPort = 8321;
+  proxyPort = 9000;           # what `tailscale serve --bg --https=8321 9000` targets
+  proxyDir = "${config.home.homeDirectory}/.local/state/yession/proxy";
   logDir = "${config.home.homeDirectory}/Library/Logs/yession";
 
   # The resources profile (§What the variable names tell you). Paths are written
@@ -522,7 +562,7 @@ in
   launchd.agents.yession-manager = {
     enable = true;
     config = {
-      ProgramArguments = [ "${yession}/bin/yession-manager" "--auth" "localhost" ];
+      ProgramArguments = [ "${yession}/bin/yession-manager" "--auth" "trusted-headers" ];
       RunAtLoad = true;
       KeepAlive = true;
       EnvironmentVariables = {
@@ -530,6 +570,7 @@ in
         # The default data dir is RELATIVE (`.yession`), and launchd does not
         # start agents in $HOME.
         YESSION_DATA_DIR = "${config.home.homeDirectory}/.yession";
+        YESSION_PORT = toString managerPort;
         YESSION_IDLE_TIMEOUT = "30m";
         YESSION_SESSION_RESOURCES = "${resources}";
         YESSION_MANAGER_URL = origin;
@@ -540,10 +581,61 @@ in
       StandardErrorPath = "${logDir}/manager.err.log";
     };
   };
+
+  # The one proxy, watching its config so a rewritten session map is live within a
+  # second. Loopback only: `serve` is the only way in from the tailnet.
+  launchd.agents.yession-proxy = {
+    enable = true;
+    config = {
+      ProgramArguments = [
+        "${pkgs.caddy}/bin/caddy" "run"
+        "--config" "${proxy}/caddy/Caddyfile" "--adapter" "caddyfile" "--watch"
+      ];
+      RunAtLoad = true;
+      KeepAlive = true;
+      EnvironmentVariables = {
+        HOME = config.home.homeDirectory;
+        YESSION_PROXY_PORT = toString proxyPort;
+        YESSION_PROXY_MANAGER = "127.0.0.1:${toString managerPort}";
+        YESSION_PROXY_SESSIONS = "${proxyDir}/sessions*.caddy";
+        XDG_DATA_HOME = "${proxyDir}/caddy";
+        XDG_CONFIG_HOME = "${proxyDir}/caddy";
+      };
+      StandardOutPath = "${logDir}/proxy.out.log";
+      StandardErrorPath = "${logDir}/proxy.err.log";
+    };
+  };
+
+  # The session routes, from the registry stream. KeepAlive because it holds the
+  # stream open for its whole life; `--as` because the stream is gated like every
+  # management route and this is a loopback caller naming itself.
+  launchd.agents.yession-proxy-map = {
+    enable = true;
+    config = {
+      ProgramArguments = [
+        "${pkgs.nodejs_24}/bin/node" "${proxy}/main.mjs"
+        "--manager" "http://127.0.0.1:${toString managerPort}"
+        "--as" "proxy-map"
+        "--out" "${proxyDir}/sessions.caddy"
+        "--empty" "# no running sessions"
+        "--template" ''
+          @s_{id} path /s/{id} /s/{id}/*
+          handle @s_{id} {
+            reverse_proxy 127.0.0.1:{port}
+          }
+        ''
+      ];
+      RunAtLoad = true;
+      KeepAlive = true;
+      EnvironmentVariables.HOME = config.home.homeDirectory;
+      StandardOutPath = "${logDir}/proxy-map.out.log";
+      StandardErrorPath = "${logDir}/proxy-map.err.log";
+    };
+  };
 }
 ```
 
-Three choices in it are load-bearing:
+Four choices in it are load-bearing:
 
 - **A user agent, not a root LaunchDaemon.** The default `--secrets` behaviour is durable
   through the OS credential manager, and on macOS that means the login Keychain — which
@@ -551,11 +643,17 @@ Three choices in it are load-bearing:
   §Credentials' fallback rules decide for you.
 - **The profile rides the store.** `pkgs.writeText` gives the sandbox policy the same
   lifecycle as the process that enforces it: one switch moves both, one rollback restores
-  both, and there is no live file for a later hand-edit to drift.
+  both, and there is no live file for a later hand-edit to drift. The Caddyfile rides it
+  the same way, from the input itself: a bump of the input is a bump of the proxy's rules.
+- **The session map does not.** It is the one live file here, and deliberately so — it is
+  written by a process, not a person, from state that changes on every launch. It lives
+  under `.local/state`, beside the rest of the deployment's runtime state, and nothing
+  else writes there.
 - **A plist change restarts the Manager, and a Manager restart evicts every session.**
   Nix redeploys by rewriting the agent's plist whenever anything above changes — the
   store path of the bin included. For frequent upgrades, §Session lifetime's advice
   applies doubly: point `YESSION_SPAWN_BIN` at a path outside the store that floats with
   your builds (a symlink you promote), keep the agent's `ProgramArguments` constant, and
   sessions roll onto new builds as they idle out — reserving the eviction for changes to
-  the Manager itself.
+  the Manager itself. The proxy and the map are unaffected by a Manager restart: the
+  map empties while the Manager is unreachable and refills from the first frame after.
