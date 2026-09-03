@@ -135,6 +135,43 @@ module SessionLayout =
     let reposDir (dataDir: string) : string =
         sprintf "%s/repos" (workspaceFor dataDir SandboxRef.defaultRef)
 
+    /// What the SESSION gives a sandbox of its own filesystem, and what it leaves to the
+    /// backend.
+    ///
+    /// Three facts in one answer for the reason this module exists at all: they are decided
+    /// by the same thing — which backend this sandbox runs on — so a caller deciding them
+    /// one at a time is a caller that can decide two of them one way and the third the
+    /// other, and nothing here would say so.
+    type Contribution =
+        { /// Where a terminal in this sandbox starts.
+          Workspace : string option
+          /// The session's checkouts, reachable at this absolute path.
+          SharedRepos : string option
+          /// The sandbox's own HOME, which it may write.
+          Home : string option }
+
+    /// The contribution `backend` takes, for the sandbox `sandbox` names.
+    ///
+    /// The host family works in directories this session makes and owns. A CONTAINER
+    /// brings its own filesystem — the image has a home, the spec's `workdir` says where a
+    /// terminal starts, and the checkouts arrive as a bind mount (`withSessionRepos`)
+    /// rather than as a host path it could not reach anyway — so the session contributes
+    /// none of the three, and that is said once here instead of three times wherever a
+    /// sandbox is composed.
+    ///
+    /// It DERIVES the repos directory rather than accepting one, which is the difference
+    /// between a rule and a convention: a caller holding its own `reposDir` could hand this
+    /// a different one, and a sandbox pointed at checkouts nobody else can see fails in a
+    /// way that reads as an empty repo list.
+    let forSandbox (dataDir: string) (backend: SandboxBackend) (sandbox: SandboxRef) : Contribution =
+        match backend with
+        | HostBackend
+        | SrtBackend ->
+            { Workspace = Some (workspaceFor dataDir sandbox)
+              SharedRepos = Some (reposDir dataDir)
+              Home = Some (homeFor dataDir sandbox) }
+        | DockerBackend -> { Workspace = None; SharedRepos = None; Home = None }
+
     /// The agent CLI's per-session scratch HOME. The CLI writes `~/.claude` state, which
     /// lives — and dies — with the session's data directory rather than the real HOME.
     /// Here with the other paths derived from a data dir, so the layout has one owner.
