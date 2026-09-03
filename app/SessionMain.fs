@@ -471,6 +471,11 @@ let mutable private repoSandboxes : RepoSandboxes.RepoSandboxes = RepoSandboxes.
 // reason: the Host owns the log both are built over.
 let mutable private terminals : SessionTerminals.SessionTerminals = SessionTerminals.unavailable
 
+/// The block-queueing door, filled from the Host beside `terminals` for the same reason: a
+/// declared `setup:` becomes a command on the record, and the thing that puts one there is
+/// built by the Host, which owns the doc every queue entry is written into.
+let mutable private terminalCommands : TerminalCommands.TerminalCommands = TerminalCommands.unavailable
+
 // The MCP servers this session was given (Plan 17). Composed HERE rather than by the Host,
 // unlike the other reverse legs, because what arrives on that leg has two consumers: a
 // turn's registry, which the Host builds, and the `mcp_servers` query, which is this
@@ -559,6 +564,7 @@ let private commandServices : Commands.CommandServices =
       Sandboxes = fun () -> workSandboxes
       WorkCheckout = Sandboxes.checkoutViewsAt reposDir
       Terminals = fun () -> terminals
+      RunCommand = fun () -> terminalCommands
       Prs = fun () -> prWatchService
       Invalidate = fun name -> queryRegistry.Invalidate name
       // What a repo verb does to the configuration. Handed as a function rather than the
@@ -922,6 +928,7 @@ Async.StartImmediate (
         // readiness line, and therefore before any turn or any browser can ask.
         workSandboxes <- host.Sandboxes
         terminals <- host.Terminals
+        terminalCommands <- host.TerminalCommands
         repoSandboxes <-
             RepoSandboxes.create
                 reposDir

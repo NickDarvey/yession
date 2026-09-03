@@ -50,6 +50,11 @@ type CommandServices =
       WorkCheckout : RepoRef -> CheckoutViews
       /// The terminal manager, which owns the shell profile (Plan 25).
       Terminals : unit -> SessionTerminals.SessionTerminals
+      /// Queueing a command as a recorded block — the same door `execute_command` goes
+      /// through, which is the point: a sandbox's declared `setup:` is a command somebody
+      /// can watch, edit before it runs, and read the outcome of afterwards, not a private
+      /// spawn this layer arranges on the side.
+      RunCommand : unit -> TerminalCommands.TerminalCommands
       /// Watching pull requests, absent when the session could not start the poller.
       Prs : unit -> PrWatches.PrWatchService option
       /// Say a query's answer changed. A command is the only thing that can change one, so
@@ -340,6 +345,43 @@ let dispatch (services: CommandServices) : CommandDispatch =
                                 | Ok outcome ->
                                     let entry = WorkSandboxes.SandboxOutcome.sandbox outcome
                                     services.Invalidate WorkSandboxes.queryName
+                                    // What the repo declared to make this sandbox ready,
+                                    // queued as a block anyone can watch — the same door
+                                    // `execute_command` goes through, so it is on the record
+                                    // and its failure is readable where every other
+                                    // command's is.
+                                    //
+                                    // Only for a sandbox this ask STARTED. The fold re-asks
+                                    // at boot and after every repo verb, and a setup block
+                                    // appearing each time somebody touched a checkout is
+                                    // noise nobody asked for.
+                                    //
+                                    // BACKGROUND, and not awaited: a setup worth declaring
+                                    // is the slow thing the first command would otherwise
+                                    // pay for, and blocking here would move that cost onto
+                                    // the boot fold instead. The terminal serialises, so the
+                                    // agent's next command in this sandbox queues behind it
+                                    // without anyone arranging that.
+                                    let! setup =
+                                        match entry.Request.Spec.Setup, outcome with
+                                        | Some command, WorkSandboxes.SandboxStarted _ ->
+                                            async {
+                                                match!
+                                                    (services.RunCommand ()).Execute
+                                                        { CommandRequest.ofCommand command with
+                                                            Target = Some (InSandbox entry.Ref)
+                                                            Background = true }
+                                                        invocation.Authority
+                                                    with
+                                                | Ok _ -> return " — running its setup"
+                                                // Said, never fatal: the sandbox is up, and
+                                                // a setup that could not be QUEUED is worth
+                                                // reading rather than a start that reports
+                                                // failure for something already running.
+                                                | Error reason ->
+                                                    return sprintf " — its setup could not be queued: %s" reason
+                                            }
+                                        | _ -> async { return "" }
                                     let forwarding =
                                         match entry.Request.Forward with
                                         | [] -> "nothing forwarded into it"
@@ -347,10 +389,11 @@ let dispatch (services: CommandServices) : CommandDispatch =
                                     return
                                         Ok (
                                             sprintf
-                                                "sandbox '%s' is up on %s, %s — run things in it with execute_command"
+                                                "sandbox '%s' is up on %s, %s — run things in it with execute_command%s"
                                                 (SandboxRef.render entry.Ref)
                                                 entry.Backend
-                                                forwarding)
+                                                forwarding
+                                                setup)
                 | other ->
                     return
                         Error (
