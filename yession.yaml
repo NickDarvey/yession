@@ -33,6 +33,23 @@ sandboxes:
     # build runs cold. `uses:` would refuse on every host that offers none.
     wants: [ nix-container-store ]
 
+    # Assemble the devshell as soon as the sandbox is up, rather than inside whatever
+    # command happens to be first. This is not an optimisation of the total: the shell
+    # has to be built either way. It moves the cost off the first command, which is
+    # where it is least legible — measured here at ~3.5 min of flake evaluation and
+    # ~4 min of substitution, all of it inside one `check` that looked like a hang.
+    #
+    # `--command true` because the point is the SHELL, not anything run in it. The
+    # store is what it leaves behind, so whatever comes next — `check`, a build, the
+    # gate — finds it there. Idempotent by nature: a shell already assembled is a
+    # no-op, which matters because a sandbox is restarted by things this file cannot
+    # see.
+    #
+    # Only on `dev`. `gate` shares the same store volume, so the first shell built on
+    # this host warms both, and two containers substituting the same paths at once is
+    # work done twice.
+    setup: nix develop --command true
+
     # Which nix features this repo's build needs, plus where its artifacts substitute
     # from. In the container this is the whole nix configuration the devshell sees —
     # there is no /etc/nix/nix.conf story to inherit, which is the point.
