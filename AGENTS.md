@@ -49,6 +49,14 @@ The dev environment, tasks, and build outputs are all declared in **devenv.nix**
 On a laptop / in CI: `devenv shell` drops you in with `node`, `dotnet`, and the task scripts on
 PATH.
 
+**Inside a yession work sandbox** (`YESSION_SANDBOX` is set, and names which one): the
+container brings nix and the checkout brings the toolchain, so the devshell is assembled by
+the flake — `nix develop --command check`, and the same for any other task. Do NOT install
+devenv here and do NOT run `.claude/setup.sh`, which is for a Claude Code container and
+correctly no-ops in this one; a session that reconstructed the laptop's route from the prose
+below spent two minutes installing a second devenv it did not need. `yession.yaml` declares
+the sandboxes (`dev` for work, `gate` for the long `verify`).
+
 A fresh Claude Code container: run `bash .claude/setup.sh` once (idempotent; minutes cold,
 cheap to re-run). It installs single-user Nix with the container-specific fixes, makes every
 later shell inherit it, writes the gitignored `devenv.local.yaml` that lets devenv resolve

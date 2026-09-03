@@ -143,7 +143,15 @@ module SessionLayout =
     /// one at a time is a caller that can decide two of them one way and the third the
     /// other, and nothing here would say so.
     type Contribution =
-        { /// Where a terminal in this sandbox starts.
+        { /// What this sandbox is called, which is what it is told it is called.
+          ///
+          /// Here rather than as a parameter beside the paths, because it is the same fact
+          /// they are all derived FROM: a contribution is what the session gives one
+          /// sandbox, and the name it answers to is part of that. A caller holding the name
+          /// separately could hand one sandbox's paths another's name, and nothing would
+          /// report it.
+          Name : SandboxName
+          /// Where a terminal in this sandbox starts.
           Workspace : string option
           /// The session's checkouts, reachable at this absolute path.
           SharedRepos : string option
@@ -153,7 +161,11 @@ module SessionLayout =
     /// A composition with no session directories to give: the in-process Manager, and the
     /// test harnesses that stand in for one. Not the same statement as the docker arm
     /// below, which is a sandbox whose backend brings its own — this is having none.
-    let nothing : Contribution = { Workspace = None; SharedRepos = None; Home = None }
+    ///
+    /// It still NAMES the sandbox, because a command running here is running in one: what
+    /// this composition lacks is directories, not an identity.
+    let nothing (sandbox: SandboxRef) : Contribution =
+        { Name = SandboxRef.name sandbox; Workspace = None; SharedRepos = None; Home = None }
 
     /// The contribution `backend` takes, for the sandbox `sandbox` names.
     ///
@@ -172,10 +184,11 @@ module SessionLayout =
         match backend with
         | HostBackend
         | SrtBackend ->
-            { Workspace = Some (workspaceFor dataDir sandbox)
+            { Name = SandboxRef.name sandbox
+              Workspace = Some (workspaceFor dataDir sandbox)
               SharedRepos = Some (reposDir dataDir)
               Home = Some (homeFor dataDir sandbox) }
-        | DockerBackend -> { Workspace = None; SharedRepos = None; Home = None }
+        | DockerBackend -> nothing sandbox
 
     /// The agent CLI's per-session scratch HOME. The CLI writes `~/.claude` state, which
     /// lives — and dies — with the session's data directory rather than the real HOME.
@@ -691,6 +704,18 @@ let preparePolicy
             match! resolveVariables resolveSecret spec.EnvironmentVariables with
             | Error e -> return Error e
             | Ok resolved ->
+                // What a sandbox is told it is. A file that has to work on a laptop, in CI,
+                // in a Claude Code container and in one of these can then BRANCH rather than
+                // sniff — and sniffing is what it did, badly: an agent in this repo's own
+                // dev container reconstructed the wrong shell incantation from prose written
+                // for a laptop, because nothing in the environment said where it was.
+                //
+                // Added over the resolved spec rather than under it, unlike the baseline: a
+                // repo may say what its sandbox holds, but not what sandbox it is. That is
+                // `YESSION_LAUNCH`'s rule — the session mints it, nobody else writes it —
+                // and the reason is the same, that a name which can be spoofed is a name
+                // nothing can be decided on.
+                let resolved = Map.add "YESSION_SANDBOX" (SandboxName.value layout.Name) resolved
                 match grantsFor spec.Uses spec.Wants with
                 | Error e -> return Error e
                 | Ok (granted, optional) ->
