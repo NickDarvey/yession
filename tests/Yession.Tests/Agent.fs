@@ -492,6 +492,14 @@ let private turnStarted (n: string) =
           TriggeredByMessageId = Some (MessageId.create ("m-" + n) |> expect)
           Woke = None }
 
+/// A tool call reporting its outcome — `Some n` when it became block `n`, which is how
+/// `check_pending` delivers a finished command back to the turn that made the call.
+let private toolFinished (block: string option) =
+    SessionEvent.ToolUseFinished
+        { ToolUseId = ToolUseId.create "u1" |> expect
+          Outcome = Yession.Domain.Tools.ToolCallOk
+          Block = block |> Option.map (fun n -> BlockId.create n |> expect) }
+
 let private wakeTests =
     testList "The wake (Plan 20, stage 2)" [
 
@@ -554,6 +562,32 @@ let private wakeTests =
                 (Digest.window page |> Set.count)
                 2
                 "and the turn it starts is told about both"
+
+        testCase "a background command the agent picked up in-turn owes nothing" <| fun () ->
+            // The double-delivery fix: `check_pending` returned the completion to the same
+            // turn (a `ToolUseFinished` naming the block), so a wake would report it a second
+            // time — the very second channel the foreground case above exists to avoid.
+            Expect.isFalse
+                (AgentWake.due
+                    [ turnStarted "1"; blockStarted "b1" true (Some (PeerRef ada)); blockCompleted "b1"; toolFinished (Some "b1") ])
+                "its own check_pending already answered it"
+
+        testCase "a still-running poll before completion does not pre-settle the debt" <| fun () ->
+            // Every `check_pending` on a background handle names the block, running or not —
+            // so a poll that returned STILL RUNNING must not clear a debt that only comes to
+            // exist when the block later completes. Ordering is what keeps them apart: the
+            // poll reaches the fold before the completion, finds nothing owed, retracts
+            // nothing.
+            Expect.isTrue
+                (AgentWake.due
+                    [ turnStarted "1"; blockStarted "b1" true (Some (PeerRef ada)); toolFinished (Some "b1"); blockCompleted "b1" ])
+                "the completion after the poll is still owed"
+
+        testCase "delivering a different block does not settle this one" <| fun () ->
+            Expect.isTrue
+                (AgentWake.due
+                    [ turnStarted "1"; blockStarted "b1" true (Some (PeerRef ada)); blockCompleted "b1"; toolFinished (Some "b2") ])
+                "b1 was never picked up"
     ]
 
 // --- The rest of the wake vocabulary (Plan 20, stage 5) ------------------------------------
