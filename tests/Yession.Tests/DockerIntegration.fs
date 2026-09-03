@@ -62,7 +62,10 @@ let private start (resolve: SecretName -> Async<Result<string, string>>) (spec: 
     async {
         let name = SessionId.value (SessionId.mint ())
         let createSandbox = Sandboxes.forBackend DockerBackend name spec |> expect
-        match! Sandboxes.preparePolicy DockerBackend resolve None None None (fun _ _ -> Ok ([], Set.empty)) spec () with
+        // Asked, not written: see the note in DevContainer.fs — a docker sandbox's
+        // contribution is the product's answer, not this test's copy of it.
+        let layout = Sandboxes.SessionLayout.forSandbox "/session" DockerBackend SandboxRef.defaultRef
+        match! Sandboxes.preparePolicy DockerBackend resolve layout (fun _ _ -> Ok ([], Set.empty)) spec () with
         | Error reason -> return Error reason
         | Ok policy ->
             let! created = createSandbox policy

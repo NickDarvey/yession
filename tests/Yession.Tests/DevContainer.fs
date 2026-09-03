@@ -103,7 +103,13 @@ let private startDev (granted: ResourceLeaf list) (spec: EnvironmentSpec) : Asyn
         let name = SessionId.value (SessionId.mint ())
         let createSandbox = Sandboxes.forBackend DockerBackend name spec |> expect
         let resolve = fun secret -> async { return Error (sprintf "no secrets here for '%s'" (SecretName.value secret)) }
-        match! Sandboxes.preparePolicy DockerBackend resolve None None None (fun _ _ -> Ok (granted, Set.empty)) spec () with
+        // What the session gives a docker sandbox, ASKED rather than written. This was
+        // `None None None` — the flagship container test carrying its own copy of the
+        // product's answer, which would have stayed green had that answer changed. The data
+        // directory is immaterial under docker, and that is precisely the answer being asked
+        // for rather than assumed.
+        let layout = Sandboxes.SessionLayout.forSandbox "/session" DockerBackend SandboxRef.defaultRef
+        match! Sandboxes.preparePolicy DockerBackend resolve layout (fun _ _ -> Ok (granted, Set.empty)) spec () with
         | Error reason -> return failwithf "policy refused: %s" reason
         | Ok policy ->
             match! createSandbox policy with

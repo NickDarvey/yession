@@ -205,10 +205,11 @@ let private tmpDir = Sandboxes.SessionLayout.prepareTmpDir dataDir
 /// themselves, and the path a repo verb ANSWERS with — which is relative to the terminal's
 /// working directory or it is not relative to anything.
 let private workspaceFor (sandbox: SandboxRef) =
-    match SandboxRuntime.scopedBackend workBackend (SandboxRef.scope sandbox) with
-    | HostBackend
-    | SrtBackend -> Some (Sandboxes.SessionLayout.workspaceFor dataDir sandbox)
-    | DockerBackend -> EnvironmentSpec.defaults.WorkingDirectory
+    (Sandboxes.SessionLayout.forSandbox
+        dataDir
+        (SandboxRuntime.scopedBackend workBackend (SandboxRef.scope sandbox))
+        sandbox)
+        .Workspace
 
 /// The session's WorkSandboxes (Plan 15, stage 2), by name — each in the workspace
 /// `SessionLayout` gives it, all of them sharing the one repos directory, which is what
@@ -220,11 +221,6 @@ let private makeSandboxes
     (credentials: WorkSandboxes.CredentialSource list)
     : Yession.SessionProcess.EventLog<SessionEvent> -> WorkSandboxes.WorkSandboxes =
     let name = SessionId.value sessionId
-    let sharedRepos (backend: SandboxBackend) =
-        match backend with
-        | HostBackend
-        | SrtBackend -> Some reposDir
-        | DockerBackend -> None
     fun log ->
         let create (sandbox: SandboxRef) (requested: EnvironmentSpec) (credentialEnv: Map<string, string>) =
             // The scope decides the backend (`SandboxRuntime.backendFor`): the session's
@@ -242,25 +238,20 @@ let private makeSandboxes
             match Sandboxes.forBackend backend (SandboxRef.objectName sessionId sandbox) workSpec with
             | Error e -> Error e
             | Ok createSandbox ->
-                let workspace = workspaceFor sandbox
-                workspace |> Option.iter Fs.ensureDir
-                // Its own HOME, created here beside its workspace. Docker's image brings a
-                // home this process did not make, so only the host-family backends get one.
-                let home =
-                    match backend with
-                    | HostBackend
-                    | SrtBackend -> Some (Sandboxes.SessionLayout.homeFor dataDir sandbox)
-                    | DockerBackend -> None
+                // What this session gives the sandbox: its workspace, its home, and whether
+                // the checkouts are shared. One answer, from the sandbox's own identity —
+                // these were three matches on the backend here, where nothing cheap could
+                // read them and the container e2e hand-copied the docker answer instead.
+                let layout = Sandboxes.SessionLayout.forSandbox dataDir backend sandbox
+                layout.Workspace |> Option.iter Fs.ensureDir
                 // Made AND seeded in one call: whatever this sandbox declared it needs to
                 // find in its own home is there before anything runs in it.
-                home |> Option.iter (fun path -> Sandboxes.SessionLayout.prepareHome path workSpec.Files)
+                layout.Home |> Option.iter (fun path -> Sandboxes.SessionLayout.prepareHome path workSpec.Files)
                 let prepare =
                     Sandboxes.preparePolicy
                         backend
                         resolveSecretRef
-                        workspace
-                        (sharedRepos backend)
-                        home
+                        layout
                         grantsFor
                         workSpec
                 Ok (
