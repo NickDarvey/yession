@@ -79,9 +79,9 @@ let createFull
                                     Sandboxes.preparePolicy
                                         HostBackend
                                         (fun secret -> async { return Error (sprintf "no secrets channel for '%s'" (SecretName.value secret)) })
-                                        None
-                                        None
-                                        None
+                                        // This composition has no session data directory to
+                                        // give a sandbox any of.
+                                        Sandboxes.SessionLayout.nothing
                                         // The in-process Manager composition declares no
                                         // resources, so a sandbox here can only select
                                         // nothing — and says so if it tries. A want is

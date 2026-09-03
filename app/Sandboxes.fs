@@ -150,6 +150,11 @@ module SessionLayout =
           /// The sandbox's own HOME, which it may write.
           Home : string option }
 
+    /// A composition with no session directories to give: the in-process Manager, and the
+    /// test harnesses that stand in for one. Not the same statement as the docker arm
+    /// below, which is a sandbox whose backend brings its own — this is having none.
+    let nothing : Contribution = { Workspace = None; SharedRepos = None; Home = None }
+
     /// The contribution `backend` takes, for the sandbox `sandbox` names.
     ///
     /// The host family works in directories this session makes and owns. A CONTAINER
@@ -666,9 +671,12 @@ let ambientEnv () : Map<string, string> = ambientEntries () |> Map.ofArray
 let preparePolicy
     (backend: SandboxBackend)
     (resolveSecret: SecretName -> Async<Result<string, string>>)
-    (workspace: string option)
-    (reposDir: string option)
-    (home: string option)
+    // What the session gives this sandbox of its own filesystem, as ONE value
+    // (`SessionLayout.forSandbox`). Three separate options is what this took until the
+    // composition root was deciding all three by hand, one match each — and a caller can
+    // get that combination wrong in ways nothing reports: a workspace with no home, a home
+    // with checkouts nobody else can see. Asking the layout removes the combination.
+    (layout: SessionLayout.Contribution)
     // What this sandbox holds, resolved: the operator's `default` together with whatever the
     // sandbox itself selected. ONE function rather than a list and a resolver, because the
     // two are the same question asked about different names, and a caller that could resolve
@@ -686,7 +694,11 @@ let preparePolicy
                 match grantsFor spec.Uses spec.Wants with
                 | Error e -> return Error e
                 | Ok (granted, optional) ->
-                    return policyFor backend (limitsHere backend) (ambientEnv ()) resolved workspace reposDir home granted optional spec
+                    return
+                        policyFor
+                            backend (limitsHere backend) (ambientEnv ()) resolved
+                            layout.Workspace layout.SharedRepos layout.Home
+                            granted optional spec
         }
 
 // --- A buffered one-shot: settle once, deliver to every (even late) awaiter --------------
