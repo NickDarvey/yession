@@ -147,6 +147,7 @@ let private servicesOver (service: Repos.ReposService) : Commands.CommandService
             { InSandbox = "/repos/" + RepoRef.relativePath repo
               OnHost = "/data/repos/" + RepoRef.relativePath repo }
       Terminals = fun () -> SessionTerminals.unavailable
+      RunCommand = fun () -> TerminalCommands.unavailable
       Prs = fun () -> None
       Invalidate = ignore
       Refold = fun _ -> async { return () } }
@@ -188,6 +189,52 @@ let private answered (result: Result<string, string>) : string =
     match result with
     | Ok text -> text
     | Error reason -> failwithf "the call did not happen: %s" reason
+
+/// A registry that reports one named sandbox, and says whether this ask is what started it
+/// — the distinction a declared `setup:` turns on. `spec` is what the sandbox was asked to
+/// be, so a test can give it a setup command and see what becomes of it.
+let private registryReporting (outcome: WorkSandboxes.RunningSandbox -> WorkSandboxes.SandboxOutcome) (spec: EnvironmentSpec) =
+    { WorkSandboxes.unavailable with
+        Ensure =
+            fun _ name _ ->
+                async {
+                    return
+                        Ok (
+                            outcome
+                                { Ref = name
+                                  Backend = "srt"
+                                  Request = { SandboxRequest.defaults with Spec = spec }
+                                  StartedBy = None
+                                  StartedAt = None
+                                  Environment = SessionEnvironment.unavailable })
+                } }
+
+/// Services whose queued commands land in `seen` instead of a terminal.
+let private servicesQueueing (seen: ResizeArray<CommandRequest>) (sandboxes: WorkSandboxes.WorkSandboxes) =
+    { servicesOver (reposAnswering (fun repo -> async { return Ok { Repo = repo; Branch = "main"; Dirty = false; Path = "/repos" } })) with
+        Sandboxes = fun () -> sandboxes
+        RunCommand =
+            fun () ->
+                { TerminalCommands.unavailable with
+                    Execute =
+                        fun request _ ->
+                            async {
+                                seen.Add request
+                                return
+                                    Ok
+                                        { Terminal = TerminalId.create "setup-term" |> expect
+                                          Handle = QueueId.create "setup-queue" |> expect
+                                          Block = None
+                                          Status = TerminalCommandRunning
+                                          OutputTail = ""
+                                          Elided = 0 }
+                            } } }
+
+let private declaring (setup: string option) : EnvironmentSpec =
+    { EnvironmentSpec.defaults with Setup = setup }
+
+let private startSandbox (session: ToolSession) =
+    session.Call "start_work_sandbox" """{"name":"dev"}"""
 
 let private tests' =
     testList "A tool call, end to end" [
@@ -287,6 +334,49 @@ let private tests' =
                 Expect.stringContains text "check_pending" "with the way to pick it up"
                 Expect.isFalse (text.Contains "APPROVE") "and still nobody to approve anything"
                 finish ()
+            }
+
+        // A declared `setup:` is the repo MAKING its sandbox ready, and it becomes an
+        // ordinary recorded block so the people in the session can watch it and read why it
+        // failed. Background, because a setup worth declaring is the slow thing the first
+        // command would otherwise pay for.
+        testCaseAsync "a sandbox that just started runs the setup its repo declared" <|
+            async {
+                let seen = ResizeArray<CommandRequest> ()
+                let session =
+                    openToolSession (
+                        servicesQueueing seen (registryReporting WorkSandboxes.SandboxStarted (declaring (Some "make deps"))))
+                let! answer = startSandbox session
+                Expect.stringContains (answered answer) "setup" "the answer says it is running"
+                Expect.equal (seen |> Seq.map (fun r -> r.Command) |> List.ofSeq) [ "make deps" ] "the declared command, once"
+                Expect.isTrue (seen |> Seq.forall (fun r -> r.Background)) "in the background, so the start does not wait it out"
+            }
+
+        // The fold re-asks at boot and after every repo verb. A setup block appearing in
+        // somebody's terminal each time they touched a checkout is noise nobody asked for,
+        // and it is why the registry reports which ask started the sandbox.
+        testCaseAsync "a sandbox that was already running runs nothing again" <|
+            async {
+                let seen = ResizeArray<CommandRequest> ()
+                let session =
+                    openToolSession (
+                        servicesQueueing seen (registryReporting WorkSandboxes.SandboxAlreadyRunning (declaring (Some "make deps"))))
+                let! answer = startSandbox session
+                // The call has to have SUCCEEDED for the emptiness to mean anything — an
+                // arguments typo would empty `seen` just as well, and pass.
+                Expect.stringContains (answered answer) "is up" "the sandbox came back"
+                Expect.isEmpty seen "nothing was started, so nothing is prepared"
+            }
+
+        testCaseAsync "a sandbox that declared no setup queues nothing" <|
+            async {
+                let seen = ResizeArray<CommandRequest> ()
+                let session =
+                    openToolSession (
+                        servicesQueueing seen (registryReporting WorkSandboxes.SandboxStarted (declaring None)))
+                let! answer = startSandbox session
+                Expect.stringContains (answered answer) "is up" "the sandbox came back"
+                Expect.isEmpty seen "saying nothing is not asking to run nothing"
             }
 
     ]
