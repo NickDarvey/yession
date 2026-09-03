@@ -946,6 +946,44 @@ let private sandboxPolicyTests =
                 (Sandboxes.SessionLayout.homeFor "/data/s" SandboxRef.defaultRef)
                 "and a named sandbox does not share it"
 
+        // The three facts a sandbox's composition used to decide one at a time, in a place
+        // no cheap test could reach. Asserted against the sibling functions rather than
+        // restated, so a contribution that stopped deriving from them goes red here — the
+        // one path a literal on its own would let drift.
+        testCase "the host family works in the directories this session made" <| fun () ->
+            let named = SandboxRef.inScope (RepoRef.create "octo/hello" |> expect) (SandboxName.create "dev" |> expect)
+            let layout = Sandboxes.SessionLayout.forSandbox "/data/s" SrtBackend named
+            Expect.equal
+                layout.Workspace
+                (Some (Sandboxes.SessionLayout.workspaceFor "/data/s" named))
+                "the workspace the layout gives it"
+            Expect.equal
+                layout.Home
+                (Some (Sandboxes.SessionLayout.homeFor "/data/s" named))
+                "and the home beside it"
+            Expect.equal
+                layout.SharedRepos
+                (Some "/data/s/workspace/repos")
+                "and the ONE repos directory, which is the whole point of it being shared"
+
+        // Nothing here is a policy about containers; it is what a container already is.
+        // Hand-copied into the container e2e as `None None None`, which is a test proving
+        // its own copy of the answer rather than the product's.
+        testCase "a container is given none of them, because its image brings its own" <| fun () ->
+            let layout = Sandboxes.SessionLayout.forSandbox "/data/s" DockerBackend SandboxRef.defaultRef
+            Expect.equal layout.Workspace None "the spec's workdir says where a terminal starts"
+            Expect.equal layout.Home None "the image has a home this process did not make"
+            Expect.equal layout.SharedRepos None "and the checkouts arrive as a bind mount instead"
+
+        testCase "the two host-family backends are one family here" <| fun () ->
+            // srt confines the host's own paths rather than replacing them, so a
+            // contribution that differed between the two would be a difference in what the
+            // session made, which is not something confinement changes.
+            Expect.equal
+                (Sandboxes.SessionLayout.forSandbox "/data/s" HostBackend SandboxRef.defaultRef)
+                (Sandboxes.SessionLayout.forSandbox "/data/s" SrtBackend SandboxRef.defaultRef)
+                "confinement changes what a sandbox may reach, not what it was given"
+
         // The operator's half of the ceiling/grant split. `YESSION_SESSION_READ` was a bound
         // AND an unconditional grant at once, so an operator could not offer a path without
         // forcing it on everything, and a repo asking for one could never obtain it. A
