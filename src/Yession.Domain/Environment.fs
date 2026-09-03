@@ -247,7 +247,14 @@ type EnvironmentSpec =
       /// secret's whole handling is that it is resolved at spawn and never written down,
       /// and a file on disk in the session's data directory is written down.
       Files : Map<HomePath, string>
-      Runtime : SandboxRuntime }
+      Runtime : SandboxRuntime
+      /// One command the sandbox runs before anything else does (`setup:`).
+      ///
+      /// A repo's chance to MAKE its environment ready rather than describe it and hope the
+      /// next reader does the same thing. It is not the container's `cmd`: that is the
+      /// container's own process, and one that exits takes the sandbox with it, so setup
+      /// written there would end the thing it prepared. This runs in a sandbox already up.
+      Setup : string option }
 
 module EnvironmentSpec =
 
@@ -258,7 +265,8 @@ module EnvironmentSpec =
           Uses = []
           Wants = []
           Files = Map.empty
-          Runtime = Confinement }
+          Runtime = Confinement
+          Setup = None }
 
     /// The same, as a container — what the docker backend starts from when nothing asked for
     /// anything in particular.

@@ -72,7 +72,19 @@ type SandboxDecl =
       Files : Map<HomePath, string>
       /// Credential NAMES to forward. Resolved for a human at spawn; a value never appears
       /// in a file, and could not: the type is a name.
-      Forward : string list }
+      Forward : string list
+      /// One command to run in this sandbox before anything else does — the repo's chance
+      /// to make the environment ready rather than describe it and hope.
+      ///
+      /// NOT `container.cmd`, which is the container's own process and carries a service's
+      /// semantics: a `cmd` that exits takes the sandbox down with it, so setup written
+      /// there would end the thing it was preparing. This runs INSIDE a sandbox that is
+      /// already up, as a recorded block like any other, and finishing is what it is for.
+      ///
+      /// Idempotence is the repo's business, for the reason it is everywhere else here: a
+      /// sandbox is restarted by things this file cannot see, and a setup that only works
+      /// once is a sandbox that only works once.
+      Setup : string option }
 
 module SandboxDecl =
 
@@ -83,7 +95,8 @@ module SandboxDecl =
           Uses = []
           Wants = []
           Files = Map.empty
-          Forward = [] }
+          Forward = []
+          Setup = None }
 
     /// One declaration, written back as the file would have written it.
     ///
@@ -159,7 +172,8 @@ module SandboxDecl =
                         decl.Files
                         |> Map.toList
                         |> List.map (fun (path, content) -> HomePath.value path, Encode.string content))
-                  if not (List.isEmpty decl.Forward) then "forward", strings decl.Forward ])
+                  if not (List.isEmpty decl.Forward) then "forward", strings decl.Forward
+                  if decl.Setup.IsSome then "setup", Encode.string decl.Setup.Value ])
 
     /// What a declaration ASKS the session for, given where this repo's checkout is.
     ///
@@ -243,7 +257,8 @@ module SandboxDecl =
                       Uses = decl.Uses
                       Wants = decl.Wants
                       Files = decl.Files
-                      Runtime = runtime }
+                      Runtime = runtime
+                      Setup = decl.Setup }
                   Forward = decl.Forward }
 
 /// One repo's whole file.
@@ -426,7 +441,7 @@ module ConfigFile =
                   Mounts = get.Optional.Field "volumes" (Decode.list mount) |> Option.defaultValue []
                   Command = get.Optional.Field "cmd" Decode.string }))
 
-    let private sandboxKeys = [ "container"; "workdir"; "env"; "uses"; "wants"; "files"; "forward" ]
+    let private sandboxKeys = [ "container"; "workdir"; "env"; "uses"; "wants"; "files"; "forward"; "setup" ]
 
     /// `files:` — a path inside the sandbox's home to the content written there.
     ///
@@ -456,7 +471,8 @@ module ConfigFile =
                   Uses = get.Optional.Field "uses" resourceNames |> Option.defaultValue []
                   Wants = get.Optional.Field "wants" resourceNames |> Option.defaultValue []
                   Files = get.Optional.Field "files" seededFiles |> Option.defaultValue Map.empty
-                  Forward = get.Optional.Field "forward" stringList |> Option.defaultValue [] }))
+                  Forward = get.Optional.Field "forward" stringList |> Option.defaultValue []
+                  Setup = get.Optional.Field "setup" Decode.string }))
 
     /// Sandbox names, refusing a clash INSIDE one file.
     ///

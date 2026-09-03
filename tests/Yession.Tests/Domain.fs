@@ -1168,6 +1168,30 @@ let private configTests =
             Expect.equal (dev.Uses |> List.map ResourceName.value) [ "npm" ] "the resources it selects"
             Expect.equal dev.Forward [ "github" ] "the credentials by name"
 
+        // `setup:` is a repo MAKING its environment ready rather than describing it and
+        // hoping. Deliberately not `container.cmd`, which is beside it in the same file and
+        // means something else: the container's own process, one that takes the sandbox
+        // down when it exits.
+        testCase "a setup command reaches the spec the sandbox is built from" <| fun () ->
+            let file =
+                ConfigFile.parse """
+                    { "version": 2,
+                      "sandboxes": {
+                        "dev": {
+                          "container": { "image": "nixos/nix" },
+                          "setup": "nix develop --command true" } } }"""
+                |> expect
+            let dev = file.Sandboxes |> Map.find (sandboxName "dev")
+            Expect.equal dev.Setup (Some "nix develop --command true") "the command as written"
+            let request = SandboxDecl.toRequest None dev |> expect
+            Expect.equal request.Spec.Setup (Some "nix develop --command true") "and it survives to the spec"
+
+        testCase "a sandbox that declares no setup asks for none" <| fun () ->
+            let file = ConfigFile.parse """{ "version": 2, "sandboxes": { "dev": {} } }""" |> expect
+            let dev = file.Sandboxes |> Map.find (sandboxName "dev")
+            Expect.equal dev.Setup None "saying nothing is not saying to run nothing"
+            Expect.equal ((SandboxDecl.toRequest None dev |> expect).Spec.Setup) None "and the spec agrees"
+
         // A file is authored by whoever can push to the repo, so a path it writes is that
         // author naming a place on somebody else's machine. Refused where it is WRITTEN,
         // because that is where the person who can fix it is standing.
@@ -1443,6 +1467,7 @@ let private configTests =
                           "env": { "NODE_ENV": "development", "DB": { "secret": "db-url" } },
                           "uses": [ "npm" ],
                           "uses": [ "npm" ],
+                          "setup": "npm ci",
                           "forward": [ "github" ] } } }"""
                  |> expect).Sandboxes
                 |> Map.find (sandboxName "dev")
