@@ -337,7 +337,8 @@ let dispatch (services: CommandServices) : CommandDispatch =
                             | Ok request ->
                                 match! (services.Sandboxes ()).Ensure (sandboxCaller invocation) name request with
                                 | Error e -> return Error e
-                                | Ok entry ->
+                                | Ok outcome ->
+                                    let entry = WorkSandboxes.SandboxOutcome.sandbox outcome
                                     services.Invalidate WorkSandboxes.queryName
                                     let forwarding =
                                         match entry.Request.Forward with
