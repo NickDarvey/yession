@@ -41,9 +41,10 @@ type LaunchActivity =
 /// How long a session may go unused before the Manager stops it, as configured.
 module IdleWindow =
 
-    /// Parse `YESSION_IDLE_TIMEOUT`. Unset (or blank) is `None` — reaping off, the
-    /// default, because stopping a session the operator did not ask to have stopped is not
-    /// a behaviour to acquire by upgrading.
+    /// Parse what `--idle-timeout` was given. Blank is `None` — reaping off, the default,
+    /// because stopping a session the operator did not ask to have stopped is not a
+    /// behaviour to acquire by upgrading. The option being ABSENT is answered by its caller,
+    /// which knows the difference between not asking and asking for nothing.
     ///
     /// `90s` / `30m` / `2h`, or a bare number meaning seconds. Rejected rather than guessed
     /// at: a window silently read as 30 seconds when 30 minutes was meant would reap
@@ -73,7 +74,7 @@ module IdleWindow =
                 // moment ago. That is never what anyone means, and "off" already has a
                 // spelling: leave it unset.
                 | Some w when w <= TimeSpan.Zero ->
-                    Error (sprintf "idle timeout '%s' must be greater than zero (unset the variable to disable reaping)" raw)
+                    Error (sprintf "idle timeout '%s' must be greater than zero (omit --idle-timeout to disable reaping)" raw)
                 | _ -> Ok window)
 
 module Reaper =

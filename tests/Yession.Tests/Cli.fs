@@ -118,6 +118,22 @@ let tests =
             for expected in [ "--auth <rule>"; "--secrets <mode>"; "--webhook <name>..."; "-v, --version"; "-h, --help" ] do
                 Expect.isTrue (text.Contains expected) (sprintf "usage mentions %s" expected)
 
+        // `--port`, resolved beside the port it configures. `0` is the case worth pinning:
+        // it is the one place an unpredictable address is deliberate, and refusing it broke
+        // every smoke boot at once — a bin nothing could start, discovered by CI.
+        testCase "a port argument resolves, and 0 asks the OS for one" <| fun () ->
+            Expect.equal (ProcessManager.ManagerPort.ofName None) (Ok ProcessManager.ManagerPort.Default) "absent = the default"
+            Expect.equal (ProcessManager.ManagerPort.ofName (Some "9000")) (Ok 9000) "a port"
+            Expect.equal (ProcessManager.ManagerPort.ofName (Some "0")) (Ok 0) "and 0, which the OS answers"
+
+        testCase "a port argument that is not a port number is refused, not defaulted" <| fun () ->
+            // Refused because the alternative reaches `listen` as NaN, which BINDS — on a
+            // random port, reporting itself as a Manager answering somewhere nobody was told.
+            for bad in [ "banana"; ""; "65536"; "-1"; "80.5" ] do
+                match ProcessManager.ManagerPort.ofName (Some bad) with
+                | Error message -> Expect.isTrue (message.Contains bad) (sprintf "names %A back" bad)
+                | Ok port -> failwithf "expected %A to be refused, got port %d" bad port
+
         // Retirements: a setting that MOVED, and an environment that has not caught up.
         testCase "a retired variable the environment still sets is found, and named with its option" <| fun () ->
             let retirements = [ { Retirements.Was = "YESSION_PORT"; Retirements.Now = "--port" } ]

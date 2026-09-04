@@ -32,7 +32,7 @@ let private secretsOption =
     Cli.value "secrets" "mode" "whether secrets persist across restarts: durable, ephemeral"
 
 let private portOption =
-    Cli.value "port" "port" "the port the Manager listens on (default 8321)"
+    Cli.value "port" "port" "the port the Manager listens on; 0 lets the OS choose (default 8321)"
 
 let private dataDirOption =
     Cli.value "data-dir" "path" "where this Manager keeps its state (default .yession)"
@@ -73,26 +73,27 @@ let private expect =
 let private defaultSession =
     Cli.valueOf defaultSessionOption args |> Option.defaultValue (SessionId.value SessionId.local)
 let private dataDir = Cli.valueOf dataDirOption args |> Option.defaultValue ".yession"
-// The management UI wants a bookmarkable address, so its default is fixed; a second
-// Manager instance must choose its own port (bind conflicts fail loudly). A port that is
-// not a number is refused here rather than reaching `listen` as NaN, where the failure is
-// the server binding a random port and the UI answering somewhere nobody was told about.
+// Where the management UI answers. Parsed by `ManagerPort.ofName`, beside the port it
+// configures and where the cheap tier can reach it, for the reason `--secrets` is.
 let private managerPort =
-    match Cli.valueOf portOption args with
-    | None -> 8321
-    | Some given ->
-        match System.Int32.TryParse given with
-        | true, port when port > 0 && port < 65536 -> port
-        | _ -> Cli.rejectValue cli (sprintf "--port %s is not a port number" given)
+    match ProcessManager.ManagerPort.ofName (Cli.valueOf portOption args) with
+    | Ok port -> port
+    | Error e -> Cli.rejectValue cli e
 
 // How long a session may go unused before the Manager stops it (Plan 11). Unset = never,
 // which is the default: reaping trades a launch on the next visit for everything an idle
 // session holds, and on a deployment that tracks a fast-moving build, for sessions that
 // return on the new one without the Manager having to restart. Both are choices.
 let private idleTimeout =
-    match Yession.Manager.IdleWindow.parse (Cli.valueOf idleTimeoutOption args |> Option.defaultValue "") with
-    | Ok window -> window
-    | Error e -> Cli.rejectValue cli e
+    // Not given is answered HERE, rather than handed down as an empty string: absence is the
+    // default (reaping off), and spelling it `""` would ask the parser to rediscover from a
+    // value what this already knows from the option.
+    match Cli.valueOf idleTimeoutOption args with
+    | None -> None
+    | Some given ->
+        match Yession.Manager.IdleWindow.parse given with
+        | Ok window -> window
+        | Error e -> Cli.rejectValue cli e
 
 // Who the humans at this Manager are (Plan 07): `--auth localhost` trusts the
 // loopback interface (single-machine deployment), `--auth trusted-headers` trusts the
