@@ -33,6 +33,10 @@ type Opt =
           Short : string option
           /// None = a boolean switch; Some placeholder = takes a value.
           Placeholder : string option
+          /// May it be given more than once? Declared, because the parse is checked against
+          /// it in BOTH directions: a repeatable option collects every value, and one that
+          /// is not repeatable is refused a second (Node's parser silently keeps the last).
+          Repeatable : bool
           Help : string }
 
 /// Everything a bin accepts, in one value — the thing `--help` prints and the parser is
@@ -46,6 +50,9 @@ type Spec =
 type Parsed =
     private
         { Present : Set<string>
+          /// Every value given, in the order given. `Values` is the last of these, so the
+          /// two views of one option cannot disagree — there is one parse behind both.
+          Many : Map<string, string list>
           Values : Map<string, string> }
 
 // --- the Node parser ---------------------------------------------------------------------
@@ -79,11 +86,19 @@ let abort (message: string) : 'a = jsNative
 
 /// A boolean switch: present or not.
 let flag (long: string) (short: string option) (help: string) : Opt =
-    { Long = long; Short = short; Placeholder = None; Help = help }
+    { Long = long; Short = short; Placeholder = None; Repeatable = false; Help = help }
 
-/// An option that takes a value. `placeholder` is what `--help` shows in the angle brackets.
+/// An option that takes a value, once. `placeholder` is what `--help` shows in the angle
+/// brackets. Given twice, it is refused — see `values` for the option that is not.
 let value (long: string) (placeholder: string) (help: string) : Opt =
-    { Long = long; Short = None; Placeholder = Some placeholder; Help = help }
+    { Long = long; Short = None; Placeholder = Some placeholder; Repeatable = false; Help = help }
+
+/// An option that takes a value and may be given more than once, collecting every value in
+/// order. For configuration that is a SET rather than a choice — one webhook endpoint per
+/// service, say — where a single option would otherwise carry a separator this parser would
+/// have to invent, and a repeat would silently mean "the last one".
+let values (long: string) (placeholder: string) (help: string) : Opt =
+    { Long = long; Short = None; Placeholder = Some placeholder; Repeatable = true; Help = help }
 
 /// Every bin answers these two identically, so they belong to what a spec IS rather than to
 /// what each bin remembers to declare.
@@ -98,8 +113,14 @@ let spec (bin: string) (options: Opt list) : Spec =
 /// Was this option given? Takes the `Opt` that declared it, so there is no name to mistype.
 let isSet (opt: Opt) (parsed: Parsed) : bool = Set.contains opt.Long parsed.Present
 
-/// The value given for this option, or None when it was not given.
+/// The value given for this option, or None when it was not given. For a repeatable option
+/// this is the last value; `valuesOf` is the whole of it.
 let valueOf (opt: Opt) (parsed: Parsed) : string option = Map.tryFind opt.Long parsed.Values
+
+/// Every value given for this option, in order — empty when it was not given. An option
+/// that is not repeatable answers with at most one, because a second was refused.
+let valuesOf (opt: Opt) (parsed: Parsed) : string list =
+    Map.tryFind opt.Long parsed.Many |> Option.defaultValue []
 
 // --- usage --------------------------------------------------------------------------------
 
@@ -110,9 +131,11 @@ let usage (spec: Spec) : string =
             | Some short -> sprintf "-%s, --%s" short opt.Long
             | None -> sprintf "    --%s" opt.Long
         let names =
-            match opt.Placeholder with
-            | Some placeholder -> sprintf "%s <%s>" names placeholder
-            | None -> names
+            match opt.Placeholder, opt.Repeatable with
+            // `...` says the option may be repeated, where an operator is already looking.
+            | Some placeholder, true -> sprintf "%s <%s>..." names placeholder
+            | Some placeholder, false -> sprintf "%s <%s>" names placeholder
+            | None, _ -> names
         sprintf "  %-26s %s" names opt.Help
     let options = spec.Options |> List.map line |> String.concat "\n"
     sprintf "usage: %s [options]\n\noptions:\n%s" spec.Bin options
@@ -125,6 +148,10 @@ let private configFor (spec: Spec) (args: string array) : obj =
     for opt in spec.Options do
         let entry = newObject ()
         setField entry "type" (box (if opt.Placeholder.IsSome then "string" else "boolean"))
+        // Every value option is parsed as a LIST, whatever its declared arity, so that a
+        // repeat is a fact this module can see. Without it Node keeps the last silently, and
+        // `--auth localhost --auth none` would run as `none` with nothing said.
+        if opt.Placeholder.IsSome then setField entry "multiple" (box true)
         opt.Short |> Option.iter (fun short -> setField entry "short" (box short))
         setField options opt.Long entry
     createObj
@@ -153,19 +180,28 @@ let parse (spec: Spec) (args: string array) : Result<Parsed, string> =
         let values = field (parseArgs (configFor spec args)) "values"
         // Walk the DECLARATION, not the result: every name here is one this spec knows, so
         // nothing can arrive that `isSet`/`valueOf` could not name.
-        let present, given =
+        let given =
             spec.Options
-            |> List.fold
-                (fun (present, given) opt ->
-                    let raw = field values opt.Long
-                    if absent raw then present, given
-                    else
-                        Set.add opt.Long present,
-                        (match opt.Placeholder with
-                         | Some _ -> Map.add opt.Long (unbox<string> raw) given
-                         | None -> given))
-                (Set.empty, Map.empty)
-        Ok { Present = present; Values = given }
+            |> List.choose (fun opt ->
+                let raw = field values opt.Long
+                if absent raw then None
+                elif opt.Placeholder.IsSome then Some (opt, unbox<string array> raw |> List.ofArray)
+                else Some (opt, []))
+        // The declared arity, enforced. `configFor` asked for every value as a list precisely
+        // so this is answerable: Node keeps the last of a repeat and says nothing, which is
+        // the silent-ignore this module exists to end.
+        match given |> List.tryFind (fun (opt, vs) -> not opt.Repeatable && List.length vs > 1) with
+        | Some (opt, vs) ->
+            Error (complaint spec (sprintf "--%s was given %d times, and takes one value" opt.Long (List.length vs)))
+        | None ->
+            Ok
+                { Present = given |> List.map (fun (opt, _) -> opt.Long) |> Set.ofList
+                  Many = given |> List.map (fun (opt, vs) -> opt.Long, vs) |> Map.ofList
+                  // The last of the same list, so one parse answers both readers.
+                  Values =
+                    given
+                    |> List.choose (fun (opt, vs) -> vs |> List.tryLast |> Option.map (fun v -> opt.Long, v))
+                    |> Map.ofList }
     with error ->
         Error (complaint spec error.Message)
 
