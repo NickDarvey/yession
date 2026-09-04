@@ -118,6 +118,65 @@ let tests =
             for expected in [ "--auth <rule>"; "--secrets <mode>"; "--webhook <name>..."; "-v, --version"; "-h, --help" ] do
                 Expect.isTrue (text.Contains expected) (sprintf "usage mentions %s" expected)
 
+        // `--port`, resolved beside the port it configures. `0` is the case worth pinning:
+        // it is the one place an unpredictable address is deliberate, and refusing it broke
+        // every smoke boot at once — a bin nothing could start, discovered by CI.
+        testCase "a port argument resolves, and 0 asks the OS for one" <| fun () ->
+            Expect.equal (ProcessManager.ManagerPort.ofName None) (Ok ProcessManager.ManagerPort.Default) "absent = the default"
+            Expect.equal (ProcessManager.ManagerPort.ofName (Some "9000")) (Ok 9000) "a port"
+            Expect.equal (ProcessManager.ManagerPort.ofName (Some "0")) (Ok 0) "and 0, which the OS answers"
+
+        testCase "a port argument that is not a port number is refused, not defaulted" <| fun () ->
+            // Refused because the alternative reaches `listen` as NaN, which BINDS — on a
+            // random port, reporting itself as a Manager answering somewhere nobody was told.
+            for bad in [ "banana"; ""; "65536"; "-1"; "80.5" ] do
+                match ProcessManager.ManagerPort.ofName (Some bad) with
+                | Error message -> Expect.isTrue (message.Contains bad) (sprintf "names %A back" bad)
+                | Ok port -> failwithf "expected %A to be refused, got port %d" bad port
+
+        // Retirements: a setting that MOVED, and an environment that has not caught up.
+        testCase "a retired variable the environment still sets is found, and named with its option" <| fun () ->
+            let retirements = [ { Retirements.Was = "YESSION_PORT"; Retirements.Now = "--port" } ]
+            let set = dict [ "YESSION_PORT", "8321" ]
+            let lookup name = if set.ContainsKey name then set.[name] else ""
+            let found = Retirements.found retirements lookup
+            Expect.equal (found |> List.map (fun r -> r.Was)) [ "YESSION_PORT" ] "the variable"
+            let message = Retirements.complaint found
+            Expect.isTrue (message.Contains "YESSION_PORT") "says which variable"
+            Expect.isTrue (message.Contains "--port") "and what to write instead"
+
+        testCase "a retirement the environment does not set is not found" <| fun () ->
+            // Unset and empty are the same thing to a bin, and `Interop.envOr name ""` cannot
+            // tell them apart — so an empty value must not refuse a boot that set nothing.
+            let retirements = [ { Retirements.Was = "YESSION_PORT"; Retirements.Now = "--port" } ]
+            Expect.equal (Retirements.found retirements (fun _ -> "")) [] "unset"
+            Expect.equal (Retirements.found retirements (fun _ -> "   ")) [] "or blank"
+
+        testCase "every retirement still set is reported at once" <| fun () ->
+            // One boot, one report. A deployment that moved one of these moved all of them at
+            // the same time, and learning about the next only after fixing this one is a boot
+            // cycle spent per variable — which is exactly how the renames that motivated this
+            // were found in the first place.
+            let found = Retirements.found Retirements.manager (fun _ -> "x")
+            Expect.equal (List.length found) (List.length Retirements.manager) "all of them"
+            let message = Retirements.complaint found
+            for r in Retirements.manager do
+                Expect.isTrue (message.Contains r.Was) (sprintf "names %s" r.Was)
+                Expect.isTrue (message.Contains r.Now) (sprintf "and its option %s" r.Now)
+
+        testCase "every option a retirement points at is one the Manager declares" <| fun () ->
+            // The two halves are written in different files, and a retirement naming an option
+            // that does not exist would send an operator to a flag the parser refuses.
+            let manager =
+                Cli.spec
+                    "yession-manager"
+                    [ Cli.value "port" "port" ""; Cli.value "data-dir" "path" ""
+                      Cli.value "idle-timeout" "window" ""; Cli.value "default-session" "id" ""
+                      Cli.value "spawn-bin" "command" "" ]
+            let usage = Cli.usage manager
+            for r in Retirements.manager do
+                Expect.isTrue (usage.Contains (r.Now + " <")) (sprintf "%s is a declared option" r.Now)
+
         testCase "a bin with no options of its own still answers version and help" <| fun () ->
             // `yession-session` and `yession-serial` take everything from the environment.
             let bare = Cli.spec "yession-session" []

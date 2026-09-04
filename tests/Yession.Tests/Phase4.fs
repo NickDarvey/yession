@@ -1378,8 +1378,13 @@ let private spawnRaw : obj = Fable.Core.Util.jsNative
 // Run the packaged manager bundle on this Node, pointing it at the packaged session
 // bundle (what the `yession` bin shim does in an install). `--auth localhost` mirrors a
 // single-machine operator's choice — the shipped default (`none`) denies everything.
-[<Emit("$0(process.execPath, [$1, '--auth', 'localhost'], { env: { ...process.env, YESSION_SPAWN_MAIN: $3, ...Object.fromEntries($2) }, stdio: ['pipe', 'pipe', 'inherit'] })")>]
-let private spawnBundle (spawn: obj) (managerJs: string) (env: (string * string) array) (sessionJs: string) : obj = Fable.Core.Util.jsNative
+//
+// `args` and `env` are both here because the shipped bin reads both: what this Manager
+// decides is argv, what its children inherit is the environment. `YESSION_SPAWN_MAIN` is
+// on the env side for the same reason it is in the real shim — packaging tells the Manager
+// where the packaged session bundle is; an operator does not.
+[<Emit("$0(process.execPath, [$1, '--auth', 'localhost', ...$2], { env: { ...process.env, YESSION_SPAWN_MAIN: $4, ...Object.fromEntries($3) }, stdio: ['pipe', 'pipe', 'inherit'] })")>]
+let private spawnBundle (spawn: obj) (managerJs: string) (args: string array) (env: (string * string) array) (sessionJs: string) : obj = Fable.Core.Util.jsNative
 
 [<Emit("$0.stdout.on('data', $1)")>]
 let private onStdout (child: obj) (handler: obj -> unit) : unit = Fable.Core.Util.jsNative
@@ -1400,10 +1405,10 @@ type private PackagedManager =
       UiUrl : string
       Shutdown : unit -> Async<unit> }
 
-let private startPackagedManager (env: (string * string) list) : Async<PackagedManager> =
+let private startPackagedManager (args: string list) (env: (string * string) list) : Async<PackagedManager> =
     Async.FromContinuations (fun (cont, econt, _) ->
         let child =
-            spawnBundle spawnRaw "dist/npm/manager.js" (Array.ofList env) "dist/npm/session.js"
+            spawnBundle spawnRaw "dist/npm/manager.js" (Array.ofList args) (Array.ofList env) "dist/npm/session.js"
         let mutable sessionUrl = None
         let mutable uiUrl = None
         let mutable settled = false
@@ -1456,14 +1461,13 @@ let private compositionTests =
             async {
                 let dataDir =
                     sprintf "tests/Yession.Tests/out/.data/composed-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                let args = [ "--data-dir"; dataDir; "--port"; "0" ]
                 let env =
-                    [ "YESSION_DATA_DIR", dataDir
-                      "YESSION_PORT", "0"
-                      // Children inherit this: the built-in diagnostic agent exercises
-                      // the control RPC on the shipped binaries, credential-free.
-                      "YESSION_SESSION_AGENT", "diagnostic" ]
+                    // Children inherit this: the built-in diagnostic agent exercises
+                    // the control RPC on the shipped binaries, credential-free.
+                    [ "YESSION_SESSION_AGENT", "diagnostic" ]
 
-                let! manager = startPackagedManager env
+                let! manager = startPackagedManager args env
 
                 // Create and launch a session from the management UI. The redirect is not
                 // followed: creating now launches and opens, and this case wants the launch
@@ -1507,7 +1511,7 @@ let private compositionTests =
                 // Kill the manager (its children die with it), restart over the same
                 // data directory: the registry survives, and resume still works.
                 do! manager.Shutdown ()
-                let! manager2 = startPackagedManager env
+                let! manager2 = startPackagedManager args env
                 let! page = Interop.getText manager2.UiUrl |> Async.AwaitPromise
                 Expect.isTrue (page.Contains (Dom.attr Dom.Manager.session "composed")) "the registry survived the manager restart"
                 let! relaunched = postForm (manager2.UiUrl + "sessions/composed/launch") "" |> Async.AwaitPromise

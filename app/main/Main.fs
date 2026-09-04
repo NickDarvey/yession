@@ -3,8 +3,16 @@ module Yession.Host.Main
 // The Manager entry point (`start`; the `yession` binary). The Manager is a
 // process supervisor + management surface: sessions run as CHILD OS PROCESSES
 // (`yession-session`; in development, node over the Fable output), so a crashing
-// session never takes the Manager down. Configuration comes from the environment so
-// the repo interface stays declarative.
+// session never takes the Manager down.
+//
+// What this Manager DECIDES is said on its command line; what it PASSES DOWN stays in the
+// environment, because inheritance is how a child gets it. So the addresses this deployment
+// answers at (`YESSION_MANAGER_URL`, `YESSION_SESSION_URL`), the per-session policy
+// (`YESSION_SESSION_*`) and the binaries a session runs (`YESSION_BIN_*`) are read from the
+// environment here and by the session alike, while the port, the data directory, the idle
+// window, the default session and the spawn command are options — nothing downstream reads
+// them, and an option that is mistyped is refused where a variable that is mistyped is
+// ignored.
 //
 // For product continuity a default session is ensured and launched at boot; creating,
 // launching, resuming, and stopping further sessions arrives with the management UI
@@ -23,8 +31,35 @@ let private authOption =
 let private secretsOption =
     Cli.value "secrets" "mode" "whether secrets persist across restarts: durable, ephemeral"
 
-let private cli = Cli.spec "yession-manager" [ authOption; secretsOption ]
+let private portOption =
+    Cli.value "port" "port" "the port the Manager listens on; 0 lets the OS choose (default 8321)"
+
+let private dataDirOption =
+    Cli.value "data-dir" "path" "where this Manager keeps its state (default .yession)"
+
+let private idleTimeoutOption =
+    Cli.value "idle-timeout" "window" "stop a session unused for this long: 90s, 30m, 2h (default never)"
+
+let private defaultSessionOption =
+    Cli.value "default-session" "id" "the session ensured and launched at boot (default local-session)"
+
+let private spawnBinOption =
+    Cli.value "spawn-bin" "command" "the command that runs a session (default this Node on the packaged entry)"
+
+let private cli =
+    Cli.spec
+        "yession-manager"
+        [ authOption; secretsOption; portOption; dataDirOption; idleTimeoutOption
+          defaultSessionOption; spawnBinOption ]
+
 let private args = Cli.parseOrExit cli Version.current
+
+// Before anything is read: is the environment still setting something that moved onto the
+// command line above? Refused, and every one of them named at once — see Retirements for
+// why a moved setting must never be merely ignored.
+match Retirements.found Retirements.manager (fun name -> Interop.envOr name "") with
+| [] -> ()
+| stale -> Cli.rejectValue cli (Retirements.complaint stale)
 
 let private expect =
     function
@@ -36,20 +71,29 @@ let private expect =
 // (`Launch.Variable`) — one name meaning two different things in two processes, on opposite
 // sides of the trust boundary.
 let private defaultSession =
-    Interop.envOr "YESSION_DEFAULT_SESSION" (SessionId.value SessionId.local)
-let private dataDir = Interop.envOr "YESSION_DATA_DIR" ".yession"
-// The management UI wants a bookmarkable address, so its default is fixed; a second
-// Manager instance must choose its own port (bind conflicts fail loudly).
-let private managerPort = Interop.envOr "YESSION_PORT" "8321" |> int
+    Cli.valueOf defaultSessionOption args |> Option.defaultValue (SessionId.value SessionId.local)
+let private dataDir = Cli.valueOf dataDirOption args |> Option.defaultValue ".yession"
+// Where the management UI answers. Parsed by `ManagerPort.ofName`, beside the port it
+// configures and where the cheap tier can reach it, for the reason `--secrets` is.
+let private managerPort =
+    match ProcessManager.ManagerPort.ofName (Cli.valueOf portOption args) with
+    | Ok port -> port
+    | Error e -> Cli.rejectValue cli e
 
 // How long a session may go unused before the Manager stops it (Plan 11). Unset = never,
 // which is the default: reaping trades a launch on the next visit for everything an idle
 // session holds, and on a deployment that tracks a fast-moving build, for sessions that
 // return on the new one without the Manager having to restart. Both are choices.
 let private idleTimeout =
-    match Yession.Manager.IdleWindow.parse (Interop.envOr "YESSION_IDLE_TIMEOUT" "") with
-    | Ok window -> window
-    | Error e -> Cli.abort e
+    // Not given is answered HERE, rather than handed down as an empty string: absence is the
+    // default (reaping off), and spelling it `""` would ask the parser to rediscover from a
+    // value what this already knows from the option.
+    match Cli.valueOf idleTimeoutOption args with
+    | None -> None
+    | Some given ->
+        match Yession.Manager.IdleWindow.parse given with
+        | Ok window -> window
+        | Error e -> Cli.rejectValue cli e
 
 // Who the humans at this Manager are (Plan 07): `--auth localhost` trusts the
 // loopback interface (single-machine deployment), `--auth trusted-headers` trusts the
@@ -82,14 +126,18 @@ let private publicAccess =
 [<Fable.Core.Emit("process.execPath")>]
 let private nodePath : string = Fable.Core.Util.jsNative
 
-// The session process command: this Node running the session entry. In the npm
-// package both bins live in one install, and the `yession` bin shim sets
-// `YESSION_SPAWN_MAIN` to the packaged `session.js`; in development it defaults to
-// the Fable output. `YESSION_SPAWN_BIN` overrides with a standalone command.
+// The session process command: this Node running the session entry. `--spawn-bin` overrides
+// with a standalone command, which is what a deployment doing rolling upgrades points at a
+// path that floats with its builds (Plan 11).
+//
+// `YESSION_SPAWN_MAIN` stays a VARIABLE, and the difference is who sets it: the npm `yession`
+// bin shim does, to name the packaged `session.js` beside itself. That is a packaging fact
+// like `YESSION_BIN_*`, not a decision an operator takes — a shim that had to append an
+// argument would also have to know whether the operator had already given one.
 let private sessionCommand, sessionArgs =
-    match Interop.envOr "YESSION_SPAWN_BIN" "" with
-    | "" -> nodePath, [ Interop.envOr "YESSION_SPAWN_MAIN" "app/SessionMain.js" ]
-    | binary -> binary, []
+    match Cli.valueOf spawnBinOption args with
+    | None -> nodePath, [ Interop.envOr "YESSION_SPAWN_MAIN" "app/SessionMain.js" ]
+    | Some binary -> binary, []
 
 Async.StartImmediate(
     async {

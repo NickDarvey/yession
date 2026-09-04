@@ -122,9 +122,10 @@ let private startHost () : unit =
     // the login bounce would 401 before any page ever connects).
     psi.ArgumentList.Add "--auth"
     psi.ArgumentList.Add "localhost"
+    psi.ArgumentList.Add "--data-dir"
+    psi.ArgumentList.Add dataDir
     psi.UseShellExecute <- false
     psi.RedirectStandardOutput <- true   // stderr inherits → visible in the log
-    psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- dataDir
     let p = new Process (StartInfo = psi)
     let ready = TaskCompletionSource<bool> ()
     // Keep draining stdout (like the JS 'data' handler) so the pipe never blocks the host;
@@ -2172,11 +2173,16 @@ let private startMountedHost () : unit =
     psi.ArgumentList.Add "app/out/Main.js"
     psi.ArgumentList.Add "--auth"
     psi.ArgumentList.Add "localhost"
+    psi.ArgumentList.Add "--port"
+    psi.ArgumentList.Add (string MOUNT_MANAGER_PORT)
+    psi.ArgumentList.Add "--default-session"
+    psi.ArgumentList.Add MOUNT_SESSION
+    psi.ArgumentList.Add "--data-dir"
+    psi.ArgumentList.Add mountDataDir
     psi.UseShellExecute <- false
     psi.RedirectStandardOutput <- true
-    psi.EnvironmentVariables.["YESSION_PORT"] <- string MOUNT_MANAGER_PORT
-    psi.EnvironmentVariables.["YESSION_DEFAULT_SESSION"] <- MOUNT_SESSION
-    psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- mountDataDir
+    // The two ADDRESSES stay variables: a session inherits them and parses them the same way,
+    // which is the whole reason they are not options.
     psi.EnvironmentVariables.["YESSION_MANAGER_URL"] <- sprintf "http://127.0.0.1:%d" MOUNT_MANAGER_PORT
     psi.EnvironmentVariables.["YESSION_SESSION_URL"] <- sprintf "http://127.0.0.1:%d/s/{id}" MOUNT_PROXY_PORT
     let p = new Process (StartInfo = psi)
@@ -2740,11 +2746,14 @@ let private startFrontedHost () : unit =
     psi.ArgumentList.Add "app/out/Main.js"
     psi.ArgumentList.Add "--auth"
     psi.ArgumentList.Add "localhost"
+    psi.ArgumentList.Add "--port"
+    psi.ArgumentList.Add (string FRONT_MANAGER_PORT)
+    psi.ArgumentList.Add "--default-session"
+    psi.ArgumentList.Add FRONT_SESSION
+    psi.ArgumentList.Add "--data-dir"
+    psi.ArgumentList.Add frontDataDir
     psi.UseShellExecute <- false
     psi.RedirectStandardOutput <- true
-    psi.EnvironmentVariables.["YESSION_PORT"] <- string FRONT_MANAGER_PORT
-    psi.EnvironmentVariables.["YESSION_DEFAULT_SESSION"] <- FRONT_SESSION
-    psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- frontDataDir
     psi.EnvironmentVariables.["YESSION_MANAGER_URL"] <- sprintf "http://127.0.0.1:%d" FRONT_PORT
     psi.EnvironmentVariables.["YESSION_SESSION_URL"] <- sprintf "http://127.0.0.1:%d/s/{id}" FRONT_PORT
     let p = new Process (StartInfo = psi)

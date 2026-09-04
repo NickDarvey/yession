@@ -225,6 +225,31 @@ module Options =
           Secrets = None
           IdleTimeout = None }
 
+module ManagerPort =
+
+    /// The port the management UI answers on, when the operator did not choose one. Fixed
+    /// rather than OS-assigned because the UI wants a bookmarkable address; a second Manager
+    /// on one host chooses its own, and a clash fails loudly at `listen`.
+    [<Literal>]
+    let Default = 8321
+
+    /// Resolve a `--port` argument. None is the default; anything that is not a port number
+    /// is an error the boot must fail loudly on — the same rule, and the same shape, as
+    /// `SecretsMode.ofName`.
+    ///
+    /// `0` is a port number here, and deliberately: it asks the OS for a free one, which is
+    /// what every smoke boot and test host wants. Refusing it would be refusing the only
+    /// case where an unpredictable address is the point. What is refused is a value that is
+    /// not a number at all — that reaches `listen` as NaN, which BINDS, on a random port,
+    /// and reports itself as a Manager answering somewhere nobody was told about.
+    let ofName (name: string option) : Result<int, string> =
+        match name with
+        | None -> Ok Default
+        | Some given ->
+            match System.Int32.TryParse (given.Trim ()) with
+            | true, port when port >= 0 && port < 65536 -> Ok port
+            | _ -> Error (sprintf "'%s' is not a port number (0-65535, where 0 lets the OS choose)" given)
+
 module SecretsMode =
 
     /// Resolve a `--secrets` argument. None (no argument) is `AutoSecrets`; an unknown
