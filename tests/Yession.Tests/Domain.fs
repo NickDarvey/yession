@@ -223,7 +223,8 @@ let private frameSerializationTests =
                       TriggeredByMessageId = None
                       Woke = Some (IntegrationLost (TerminalId.create "term-1" |> expect)) }
                   AgentContextBuilt { AgentTurnId = turnId; MessageCount = 3 }
-                  AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId }
+                  AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId; Antecedent = None }
+                  AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId; Antecedent = Some (MessageId.create "msg-0" |> expect) }
                   AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = "d" }
                   AgentMessageCompleted { AgentTurnId = turnId; MessageId = messageId; Body = "done" }
                   AgentTurnFailed { AgentTurnId = turnId; Reason = "overloaded" }
@@ -343,6 +344,21 @@ let private frameSerializationTests =
                       Author = ActorRef.System
                       Body = "old line" })
                 "a line without queueId decodes with QueueId = None"
+
+        testCase "an agent message started before messages had antecedents still decodes" <| fun () ->
+            // Every message started before the key existed was its turn's only one, which is
+            // what `None` says — and a Required field here would refuse to open every session
+            // recorded before it.
+            let legacy =
+                """{"type":"agentMessageStarted","payload":{"agentTurnId":"turn-legacy","messageId":"msg-legacy"}}"""
+            let decoded = Codec.fromString Codec.sessionEvent legacy |> expect
+            Expect.equal
+                decoded
+                (AgentMessageStarted
+                    { AgentTurnId = AgentTurnId.create "turn-legacy" |> expect
+                      MessageId = MessageId.create "msg-legacy" |> expect
+                      Antecedent = None })
+                "a line without antecedent decodes with Antecedent = None"
 
         testCase "a sandbox persisted before repos could declare one still decodes" <| fun () ->
             // The scope rides in the SAME string rather than a new field, so a log written

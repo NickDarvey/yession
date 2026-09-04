@@ -67,7 +67,16 @@ and AgentContextBuilt =
 
 and AgentMessageStarted =
     { AgentTurnId : AgentTurnId
-      MessageId : MessageId }
+      MessageId : MessageId
+      /// The message this one follows within the same turn — what the turn said before it
+      /// went off to call a tool. `None` for the turn's first message, whose cause is the
+      /// turn itself and is on `AgentTurnStarted`.
+      ///
+      /// The link is also the CLOSE: a message that names an antecedent is the model having
+      /// moved on, so the antecedent is complete at what it streamed. Nothing else says so —
+      /// `AgentMessageCompleted` is the turn's last word and two state machines read it as
+      /// the turn ending, so a mid-turn message cannot borrow it.
+      Antecedent : MessageId option }
 
 and AgentMessageDelta =
     { AgentTurnId : AgentTurnId

@@ -49,6 +49,7 @@ let private ada = PeerId.create "ada" |> expect
 let private bob = PeerId.create "bob" |> expect
 
 let private mintTurnId () = turnId
+let private laterMessageId = MessageId.create "msg-agent-2" |> expect
 let private mintMessageId () = agentMessageId
 
 let private newLog () =
@@ -107,7 +108,7 @@ let private turnTests =
                     events
                     [ AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (humanMessageId); Woke = None }
                       AgentContextBuilt { AgentTurnId = turnId; MessageCount = 1 }
-                      AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId }
+                      AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None }
                       AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "Hel" }
                       AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "lo!" }
                       AgentMessageCompleted { AgentTurnId = turnId; MessageId = agentMessageId; Body = "Hello!" } ]
@@ -140,7 +141,7 @@ let private turnTests =
         testCase "the streamed response projects deterministically (deltas -> completed)" <| fun () ->
             let events =
                 [ envelope 0L (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (humanMessageId); Woke = None })
-                  envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId })
+                  envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None })
                   envelope 2L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "Hel" })
                   envelope 3L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "lo!" }) ]
             let streaming, highWater = ConversationProjection.applyEvents None events ConversationProjection.empty
@@ -167,12 +168,59 @@ let private turnTests =
                     completed
             Expect.equal again completed "duplicate agent event pages do not double-apply"
 
+        // A turn that calls a tool speaks in more than one message: what it said before the
+        // call, and what it said after. The second names the first as its antecedent, and
+        // that naming is the first one's close — the model has moved on, so what it streamed
+        // is what it said. Nothing else can say so: `AgentMessageCompleted` is read as the
+        // TURN ending by both the process and the client.
+        testCase "a message that follows another closes it at what it streamed" <| fun () ->
+            let projection, _ =
+                ConversationProjection.applyEvents
+                    None
+                    [ envelope 0L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None })
+                      envelope 1L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "Let me run it again." })
+                      envelope 2L (AgentMessageStarted { AgentTurnId = turnId; MessageId = laterMessageId; Antecedent = Some agentMessageId })
+                      envelope 3L (AgentMessageDelta { AgentTurnId = turnId; MessageId = laterMessageId; Delta = "It finished." }) ]
+                    ConversationProjection.empty
+            Expect.equal
+                (projection.Items |> List.map (fun i -> i.Body, i.Status))
+                [ "Let me run it again.", Complete; "It finished.", Streaming ]
+                "the antecedent is complete at what it streamed; the follower is the one still streaming"
+
+        testCase "the turn's open message is the latest one, so its ending lands on that" <| fun () ->
+            let projection, _ =
+                ConversationProjection.applyEvents
+                    None
+                    [ envelope 0L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None })
+                      envelope 1L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "first" })
+                      envelope 2L (AgentMessageStarted { AgentTurnId = turnId; MessageId = laterMessageId; Antecedent = Some agentMessageId })
+                      envelope 3L (AgentTurnInterrupted { AgentTurnId = turnId; RequestedBy = PeerId.create "ada" |> expect }) ]
+                    ConversationProjection.empty
+            Expect.equal
+                (projection.Items |> List.map (fun i -> i.MessageId, i.Status))
+                [ agentMessageId, Complete; laterMessageId, ConversationItemStatus.Interrupted ]
+                "the interrupt marks the follower, and the antecedent keeps the close it already had"
+
+        testCase "only the turn's first message says why the turn ran" <| fun () ->
+            let projection, _ =
+                ConversationProjection.applyEvents
+                    None
+                    [ envelope 0L (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = None; Woke = Some CommandFinished })
+                      envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None })
+                      envelope 2L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "first" })
+                      envelope 3L (AgentMessageStarted { AgentTurnId = turnId; MessageId = laterMessageId; Antecedent = Some agentMessageId }) ]
+                    ConversationProjection.empty
+            Expect.equal
+                (projection.Items |> List.map (fun i -> i.Woke))
+                [ Some CommandFinished; None ]
+                "the reason is attribution for the turn, said once where the turn begins"
+
         testCase "an interrupt marks the streaming item Interrupted (partial body kept); late deltas no longer apply" <| fun () ->
             let interruptedBy = PeerId.create "ada" |> expect
             let projection, highWater =
                 ConversationProjection.applyEvents
                     None
-                    [ envelope 0L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId })
+                    [ envelope 0L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None })
                       envelope 1L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "partial" })
                       envelope 2L (AgentTurnInterrupted { AgentTurnId = turnId; RequestedBy = interruptedBy }) ]
                     ConversationProjection.empty
@@ -195,7 +243,7 @@ let private turnTests =
             let projection, _ =
                 ConversationProjection.applyEvents
                     None
-                    [ envelope 0L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId })
+                    [ envelope 0L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None })
                       envelope 1L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "partial" })
                       envelope 2L (AgentTurnFailed { AgentTurnId = turnId; Reason = "overloaded" }) ]
                     ConversationProjection.empty
@@ -212,7 +260,7 @@ let private turnTests =
             let projection, _ =
                 ConversationProjection.applyEvents
                     None
-                    [ envelope 0L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId })
+                    [ envelope 0L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None })
                       envelope 1L (AgentTurnFailed { AgentTurnId = turnId; Reason = "agent run ended: error_during_execution" }) ]
                     ConversationProjection.empty
             Expect.equal
@@ -230,7 +278,7 @@ let private turnTests =
             let projection, _ =
                 ConversationProjection.applyEvents
                     None
-                    [ envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId })
+                    [ envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None })
                       envelope 9L (AgentTurnFailed { AgentTurnId = turnId; Reason = "Reached maximum number of turns (32)" }) ]
                     ConversationProjection.empty
             Expect.equal
@@ -245,7 +293,7 @@ let private turnTests =
             let projection, _ =
                 ConversationProjection.applyEvents
                     None
-                    [ envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId })
+                    [ envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None })
                       envelope 2L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "on it" })
                       envelope 9L (AgentTurnFailed { AgentTurnId = turnId; Reason = "overloaded" }) ]
                     ConversationProjection.empty
@@ -872,7 +920,7 @@ let private attributionTests =
         let started (woke: WakeReason option) =
             envelope 0L (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = None; Woke = woke })
         let saidSomething =
-            envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId })
+            envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None })
 
         testCase "what a woken turn says is marked with why the turn exists" <| fun () ->
             let projection, _ =
@@ -914,7 +962,7 @@ let private attributionTests =
                 ConversationProjection.applyEvents
                     None
                     [ started (Some CommandFinished)
-                      envelope 1L (AgentMessageStarted { AgentTurnId = earlier; MessageId = agentMessageId }) ]
+                      envelope 1L (AgentMessageStarted { AgentTurnId = earlier; MessageId = agentMessageId; Antecedent = None }) ]
                     ConversationProjection.empty
             Expect.equal
                 (projection.Items |> List.map (fun i -> i.Woke))

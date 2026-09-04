@@ -258,11 +258,15 @@ module Codec =
             fun (p: AgentMessageStarted) ->
                 Encode.object
                     [ "agentTurnId", agentTurnId.Encode p.AgentTurnId
-                      "messageId", messageId.Encode p.MessageId ]
+                      "messageId", messageId.Encode p.MessageId
+                      "antecedent", Encode.option messageId.Encode p.Antecedent ]
           Decode =
             Decode.object (fun get ->
                 { AgentMessageStarted.AgentTurnId = get.Required.Field "agentTurnId" agentTurnId.Decode
-                  AgentMessageStarted.MessageId = get.Required.Field "messageId" messageId.Decode }) }
+                  AgentMessageStarted.MessageId = get.Required.Field "messageId" messageId.Decode
+                  // Optional on the way in: every message started before this key existed
+                  // was its turn's only one, which is exactly what `None` says.
+                  AgentMessageStarted.Antecedent = get.Optional.Field "antecedent" messageId.Decode }) }
 
     let private agentMessageDelta : Codec<AgentMessageDelta> =
         { Encode =

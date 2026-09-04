@@ -317,7 +317,7 @@ let private unchangedTests =
             let messageId = message "agent"
             let events =
                 [ at 1L 0.0 (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (message "1"); Woke = None })
-                  at 2L 1.0 (AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId })
+                  at 2L 1.0 (AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId; Antecedent = None })
                   at 3L 2.0 (AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = "hel" })
                   at 4L 3.0 (AgentMessageCompleted { AgentTurnId = turnId; MessageId = messageId; Body = "hello" }) ]
             let proj, _ = ConversationProjection.applyEvents None events ConversationProjection.empty
