@@ -473,7 +473,6 @@ let start
         | Some GitHubStatus
         | Some (GitHub _)
         | Some Queries
-        | Some Models
         | None -> handleWithExtraRoutes ()
 
     let server = createServer handler

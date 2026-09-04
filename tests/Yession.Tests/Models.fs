@@ -1,7 +1,7 @@
 module Yession.Tests.Models
 
 // The model catalogue, end to end below the browser: the provider lookup that produces it,
-// and the session route that serves it.
+// and the status reply that carries it.
 //
 // What is worth pinning here is not "a list comes back". It is the handful of properties
 // the picker leans on:
@@ -13,6 +13,7 @@ module Yession.Tests.Models
 //   * a failed lookup says why, and says it all the way to the browser — "nobody has
 //     connected an account" and "this provider offers nothing" are different facts and a
 //     picker that conflated them would show an empty menu with no way out;
+//   * it rides the credential status it is a fact about, so the two cannot disagree;
 //   * the door is shut: what this session can run on is for the people in the session.
 //
 // Ports, because the lookup IS an HTTP conversation. There is no in-memory stand-in for
@@ -177,25 +178,55 @@ let private stubAuth () : SessionAuth.Auth =
       HandleCallback = fun _ -> async { return Error (500, "not under test") }
       CookieName = "who" }
 
-let private startModelRoutes (list: ListModels) =
+/// A broker that refuses everything: what is under test here is the STATUS reply, and no
+/// case in this suite drives a write action.
+let private stubConnections : ControlClient.SessionConnections =
+    let refuse _ = async { return Error "not under test" }
+    { Begin = refuse
+      Complete = fun _ _ -> refuse ()
+      Put = fun _ _ -> refuse ()
+      PutGrant = refuse
+      Disconnect = refuse
+      Reject = fun _ _ -> refuse ()
+      Resolve = refuse }
+
+/// The Claude panel's status route over a stub catalogue — the one route that answers what
+/// this session can run a turn on.
+let private startClaudeRoutes (list: ListModels) =
     async {
-        let route = ModelRoutes.routes (stubAuth ()) list ""
+        let sessionId = SessionId.create "sess-models" |> expect
+        let route =
+            ClaudeConnection.routes
+                sessionId
+                (stubAuth ())
+                stubConnections
+                (fun _ -> None)
+                (fun () -> false)
+                list
+                ""
         let! url, server =
             serving (fun req res ->
                 if not (route req res) then
                     res.writeHead (404, JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
                     res.``end`` "not found")
-        return url + "/" + SessionRoute.relative SessionRoute.Models, server
+        return url + "/" + SessionRoute.relative SessionRoute.ClaudeStatus, server
     }
 
+/// The models off a status reply, as the browser reads them: the list, or the reason there
+/// is none.
+[<Emit("""(function (body) { const s = JSON.parse(body); return {
+  models: s.models ? JSON.stringify(s.models) : null,
+  unavailable: s.modelsUnavailable || null } })($0)""")>]
+let private catalogueOf (body: string) : {| models: string option; unavailable: string option |} = Util.jsNative
+
 let private routeTests =
-    testList "the /models route" [
+    testList "the catalogue on the status reply" [
 
         testCaseAsync "no identity, no catalogue" <|
             async {
                 // Which models this session can run on is a fact about the session, so it
                 // goes to the people in it and to nobody else.
-                let! url, server = startModelRoutes (fun _ -> async { return Ok [] })
+                let! url, server = startClaudeRoutes (fun _ -> async { return Ok [] })
                 let! reply = get url "" |> Async.AwaitPromise
                 server.close ignore
                 Expect.equal reply.status 401 "unauthenticated is refused"
@@ -205,7 +236,7 @@ let private routeTests =
             async {
                 let mutable askedFor : ActorRef option = None
                 let! url, server =
-                    startModelRoutes (fun actor ->
+                    startClaudeRoutes (fun actor ->
                         async {
                             askedFor <- Some actor
                             return Ok [ AgentModel.create (ModelId.create "model-a" |> expect) "Model A" ]
@@ -214,7 +245,7 @@ let private routeTests =
                 server.close ignore
                 Expect.equal reply.status 200 "an identity gets an answer"
                 Expect.equal
-                    (Codec.fromString Codec.modelCatalogue reply.body |> expect)
+                    (Codec.fromString Codec.modelCatalogue (catalogueOf reply.body).models.Value |> expect)
                     [ AgentModel.create (ModelId.create "model-a" |> expect) "Model A" ]
                     "and it is the catalogue, decoded by the codec the browser uses"
                 Expect.equal
@@ -227,11 +258,27 @@ let private routeTests =
             async {
                 // An empty menu with no explanation is the state this whole shape exists to
                 // avoid: the remedy is one panel up, and nothing would have pointed at it.
-                let! url, server = startModelRoutes (fun _ -> async { return Error "no Claude account connected" })
+                let! url, server = startClaudeRoutes (fun _ -> async { return Error "no Claude account connected" })
                 let! reply = get url "who=ada" |> Async.AwaitPromise
                 server.close ignore
-                Expect.equal reply.status 502 "a failed lookup is not a catalogue"
-                Expect.isTrue (reply.body.Contains "no Claude account connected") "and it carries the reason"
+                let catalogue = catalogueOf reply.body
+                Expect.isNone catalogue.models "a failed lookup is not a catalogue"
+                Expect.equal
+                    catalogue.unavailable
+                    (Some "no Claude account connected")
+                    "and the reason rides the same reply"
+            }
+
+        testCaseAsync "the credential status and the catalogue arrive together, or not at all" <|
+            async {
+                // The invariant the fold exists for. Two routes with two refresh triggers
+                // let the picker keep a refusal naming an account the panel beside it had
+                // already shown as connected; one reply cannot disagree with itself.
+                let! url, server = startClaudeRoutes (fun _ -> async { return Error "no Claude account connected" })
+                let! reply = get url "who=ada" |> Async.AwaitPromise
+                server.close ignore
+                Expect.isTrue (reply.body.Contains "\"owner\"") "the status is on the reply"
+                Expect.isTrue (reply.body.Contains "\"modelsUnavailable\"") "and so is what the picker can offer"
             }
     ]
 

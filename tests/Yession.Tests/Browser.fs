@@ -673,6 +673,45 @@ let tests =
                 do! awaitU (pageA.ClickAsync "[data-settings-toggle='close']")
             }
 
+        // The picker's note and the connection panel above it are two halves of one answer
+        // — what can a turn run on here — and this is the only tier that can watch them
+        // disagree. They did: the catalogue had a probe of its own, fired only by opening
+        // the drawer, while the sign-in flow (which runs with the drawer ALREADY open)
+        // re-probed the status alone. So the panel went green and the note went on naming
+        // an account that was by then connected. No cheap tier can see it: the markup is
+        // right in both states, and each half is right on its own.
+        testCaseAsync "connecting an account with the drawer open clears the picker's refusal" <|
+            async {
+                do! awaitU (pageA.ClickAsync "[data-settings-toggle='open']")
+                let! _ = await (pageA.WaitForSelectorAsync "[data-model-note='unavailable']")
+                let noteText = "() => document.querySelector('[data-model-note]')?.textContent ?? ''"
+                // The precondition, and the sentence a person actually read: this session
+                // has no credential, so the note says so and points at the panel above it.
+                let! before = await (pageA.EvaluateAsync<string> noteText)
+                Expect.isTrue
+                    (before.Contains "no Claude account connected")
+                    (sprintf "with nothing connected the picker says so, it said: %s" before)
+
+                // Connect one WITHOUT closing the drawer — the flow a person is actually in
+                // when they sign in, and the one that used to leave the note behind.
+                do! awaitU (pageA.FillAsync ("[data-claude-token]", "sk-ant-oat01-browser-case"))
+                do! awaitU (pageA.ClickAsync "[data-claude-save-token]")
+                let! _ = await (pageA.WaitForSelectorAsync "[data-claude-connected='mine']")
+
+                // Whatever the picker says now, it cannot still be that: an account IS
+                // connected. What it says instead is whatever the provider answered this
+                // box — a list, or why there is none — which is the design rather than
+                // something for a test to pin.
+                let! _ =
+                    await (pageA.WaitForFunctionAsync
+                            """!(document.querySelector('[data-model-note]')?.textContent ?? '')
+                                 .includes('no Claude account connected')""")
+
+                // Put the session back as the cases after this one expect to find it.
+                do! awaitU (pageA.ClickAsync "[data-claude-disconnect='mine']")
+                do! awaitU (pageA.ClickAsync "[data-settings-toggle='close']")
+            }
+
         testCaseAsync "the doc store is keyed by session" <|
             async {
                 // The store is keyed by SESSION (embedded in the served page), not by address.

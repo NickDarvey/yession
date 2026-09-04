@@ -144,6 +144,9 @@ type ModelsFailure = { Message : string; Refused : bool }
 /// 1000, so ten pages is ten thousand models and no provider is near it.
 [<Emit("""(async function (envVar, value, url) {
   try {
+    // Bounded, because the connection panel's status reply waits on this: a provider
+    // that accepts a socket and never answers would otherwise take the panel with it,
+    // and a lookup that cannot finish IS a lookup that failed.
     const headers = { 'anthropic-version': '2023-06-01' }
     if (envVar === 'ANTHROPIC_API_KEY') headers['x-api-key'] = value
     else { headers['authorization'] = 'Bearer ' + value; headers['anthropic-beta'] = 'oauth-2025-04-20' }
@@ -152,7 +155,7 @@ type ModelsFailure = { Message : string; Refused : bool }
     // the same name shadows it into a temporal dead zone and every lookup throws.
     let next = url + '?limit=1000'
     for (let page = 0; page < 10; page++) {
-      const r = await fetch(next, { headers })
+      const r = await fetch(next, { headers, signal: AbortSignal.timeout(10000) })
       if (!r.ok) {
         const detail = (await r.text()).slice(0, 200)
         return { ok: false, reason: 'the provider answered ' + r.status + ': ' + detail, status: r.status, models: [] }
@@ -264,17 +267,31 @@ let ownerOf (identity: CookieIdentity) : CredentialOwner =
     | AttributedUser user -> UserOwner user
     | UnattributedAccess -> LocalOwner
 
+/// The party a browser request's provider calls run on, so the catalogue it is answered
+/// with is the one this person's credential can actually see.
+///
+/// `ActorRef.System` where the deployment attributes nobody: an unattributed browser IS
+/// the deployment asking, and it reaches exactly the credentials a deployment may — the
+/// session's own and the local one — because that is what the turn-target precedence
+/// resolves it to. There is no separate rule here to keep in step.
+let private actorOf (identity: CookieIdentity) : ActorRef =
+    match identity.Attribution with
+    | AttributedUser user -> UserRef user
+    | UnattributedAccess -> ActorRef.System
+
 /// Build the /claude* route handler. `statusOf` reads the session's live status cache
 /// (fed by the Manager's connection stream); `agentAvailable` is the agent gate's own
 /// truth (any relevant credential OR the ambient env) — served so the client can say
-/// "no agent in this session" honestly; `connections` is the control-channel broker
-/// client. Composes into `Signalling.start` extra routes.
+/// "no agent in this session" honestly; `list` is the model catalogue, on the reply for
+/// the reason below; `connections` is the control-channel broker client. Composes into
+/// `Signalling.start` extra routes.
 let routes
     (sessionId: SessionId)
     (auth: SessionAuth.Auth)
     (connections: ControlClient.SessionConnections)
     (statusOf: SecretId -> ConnectionStatus option)
     (agentAvailable: unit -> bool)
+    (list: ListModels)
     /// The path this session is served under (`""` at an origin root), stripped off the
     /// request the same way the rest of the session's surface strips it.
     (mount: string)
@@ -320,9 +337,38 @@ let routes
                             match owner with
                             | UserOwner _ -> "user"
                             | LocalOwner -> "local"
-                        respondJson res 200
-                            (sprintf """{"session":%s,"mine":%s,"owner":"%s","agent":%b}"""
-                                (statusJson sessionTarget) (statusJson mineTarget) ownerLabel (agentAvailable ()))
+                        // The catalogue rides the status rather than answering on a route
+                        // of its own. It is the same question one line further on — what
+                        // can a turn run on here — and `agent` beside it is already the
+                        // first line of that answer. Split across two routes with two
+                        // refresh triggers, the second one drifted: the picker sat on a
+                        // refusal computed before the account it named existed, because
+                        // signing in re-probed the status and nothing re-asked for the
+                        // models. One reply cannot disagree with itself.
+                        //
+                        // `models` is the list or null, and `modelsUnavailable` the reason
+                        // it is null — the same null-or-reason shape as `signInRequired`
+                        // above, and never both. "This provider offers nothing" and
+                        // "nobody has connected an account" are different facts, and a
+                        // picker that could not tell them apart would show an empty menu
+                        // with no way to fix it.
+                        Async.StartImmediate (
+                            async {
+                                let! catalogue = list (actorOf identity)
+                                let models, unavailable =
+                                    match catalogue with
+                                    | Ok models -> Codec.toString Codec.modelCatalogue models, "null"
+                                    | Error reason -> "null", jsonString reason
+                                respondJson res 200
+                                    (sprintf
+                                        """{"session":%s,"mine":%s,"owner":"%s","agent":%b,"models":%s,"modelsUnavailable":%s}"""
+                                        (statusJson sessionTarget)
+                                        (statusJson mineTarget)
+                                        ownerLabel
+                                        (agentAvailable ())
+                                        models
+                                        unavailable)
+                            })
                     | Some (Claude action) ->
                         match targetFor sessionId owner body.Scope with
                         | Error e -> respondText res 400 e
