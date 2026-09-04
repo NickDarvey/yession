@@ -75,6 +75,13 @@ type ViewActions =
       GitHubPasteToken : unit -> unit
       /// Disconnect the credential stored for a scope choice ("session" | "mine").
       GitHubDisconnect : string -> unit
+      /// Put a value on the system clipboard, and say so on the box it came from — the hook
+      /// of that box is the key (`ClientModel.Copied`), the second argument is the text.
+      ///
+      /// Imperative, and both halves for the same reason: the clipboard is a permission the
+      /// browser may refuse, so only the browser knows whether there is anything to confirm,
+      /// and the confirmation is a MOMENT, which needs a timer the reducer cannot hold.
+      Copy : string -> string -> unit
       // The Repos panel's three actions (Plan 14) were RETIRED by Plan 15: adding,
       // removing and switching a repo are commands, and commands belong to the agent, so
       // a human asks and reads the act-line in the timeline. What is left of that panel is
@@ -171,6 +178,7 @@ module ViewActions =
           GitHubConnect = ignore
           GitHubPasteToken = ignore
           GitHubDisconnect = ignore
+          Copy = fun _ _ -> ()
           ReopenSession = ignore
           RetryNow = ignore
           OpenTerminal = ignore
@@ -764,7 +772,12 @@ module View =
     /// The GitHub connection panel (Plan 14), beside the Claude one: status per sign-in
     /// scope, the device flow (show the code → approve on github.com → the poll lands
     /// the grant), and the paste-a-token fallback.
-    let private githubSection (actions: ViewActions) (dispatch: ClientMsg -> unit) (github: GitHubViewState) : TemplateResult =
+    let private githubSection
+        (actions: ViewActions)
+        (dispatch: ClientMsg -> unit)
+        (copied: string option)
+        (github: GitHubViewState)
+        : TemplateResult =
         let connectedRow (label: string) (scopeChoice: string) (credential: ConnectionView option) =
             match credential with
             | Some credential ->
@@ -777,9 +790,24 @@ module View =
             | GitHubBusy ->
                 html $"""<span class="{Style.statusRun}" data-github-busy><span class="{Style.statusDotPulse}"></span>working…</span>"""
             | GitHubAwaitingApproval (userCode, verificationUri, _, _) ->
+                // The code has to reach github.com's form, and on the phone that means the
+                // clipboard: this session is one tab, the approval is another, and eight
+                // characters retyped between them is where a device flow is abandoned.
+                //
+                // The confirmation replaces the code IN THE BOX, which is the one place the
+                // reader is already looking, and it is a live region rather than a labelled
+                // one: an `aria-label` becomes the accessible name, so it would be announced
+                // in place of the very change it is here to report. The code is the box's
+                // contents and the caps label above says what it is.
+                let justCopied = copied = Some Dom.Hooks.githubUserCode
                 html $"""
                     <span class="{Style.label}">code for github.com</span>
-                    <span class="{Style.field}" data-github-user-code aria-label="GitHub device code">{userCode}</span>
+                    <div class="{Style.fieldActionWrap}">
+                      <span class="{Style.fieldWithAction}" data-github-user-code aria-live="polite">{if justCopied then Dom.Text.copied else userCode}</span>
+                      <button type="button" class="{Style.fieldAction}" data-github-copy-code
+                              aria-label="{if justCopied then "Device code copied" else "Copy the device code"}"
+                              @click={Ev(fun _ -> actions.Copy Dom.Hooks.githubUserCode userCode)}>{if justCopied then Icon.check else Icon.copy}</button>
+                    </div>
                     <div class="flex gap-2">
                       <a class="{Style.btnPrimary}" href="{verificationUri}" target="_blank" rel="noreferrer" data-github-authorize>Approve on github.com</a>
                       <button type="button" class="{Style.btn}" data-github-cancel @click={Ev(fun _ -> dispatch (GitHubFlowMsg GitHubIdle))}>Cancel</button>
@@ -926,7 +954,7 @@ module View =
               </div>
               {claudeSection actions dispatch model.Claude}
               {modelSection dispatch model}
-              {githubSection actions dispatch model.GitHub}
+              {githubSection actions dispatch model.Copied model.GitHub}
               {queriesSection model.Queries}
               {historyStoreNote model}
               <div class="flex-1"></div>

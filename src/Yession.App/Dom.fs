@@ -135,6 +135,11 @@ module Dom =
         /// so a test reads the fault off the same scope it sees the credential on.
         let claudeSignInRequired = "data-claude-signin-required"
         let githubSignInRequired = "data-github-signin-required"
+        /// The device code a person has to type into github.com, and the control that puts
+        /// it on the clipboard. The code's hook is also the KEY its copy is remembered
+        /// under (`ClientModel.Copied`): one name for the box, whichever half is asking.
+        let githubUserCode = "data-github-user-code"
+        let githubCopyCode = "data-github-copy-code"
         /// The one prompt over the timeline (`Text.signInAgain`), valued by whichever
         /// provider needs it, and the button in it that opens the settings face. Absent
         /// entirely when nothing needs signing in — a surface that is only ever there when
@@ -344,6 +349,11 @@ module Dom =
         let removeBookmark = "Remove bookmark"
         let dismissMenu = "Close menu"
         let bookmarks = "Bookmarks"
+
+        /// What a copy control says once it has copied, IN THE BOX that held the value —
+        /// the confirmation lands where the eye already is, rather than beside it. A moment
+        /// and not a state: whoever set it takes it back (`ClientMsg.CopiedMsg`).
+        let copied = "copied"
 
         /// The word on every notice's disclosure. ONE word across all of them: the move is
         /// the same wherever it appears — what this costs you is on the surface, why it is

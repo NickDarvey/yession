@@ -326,6 +326,27 @@ let private setTimeoutJs (f: unit -> unit) (ms: int) : float = jsNative
 [<Emit("clearTimeout($0)")>]
 let private clearTimeoutJs (handle: float) : unit = jsNative
 
+/// Put text on the system clipboard, and say whether the browser let us. Asynchronous
+/// because the write may be a permission prompt, and refusable for reasons the page cannot
+/// see coming — an insecure context has no `navigator.clipboard` at all, which is the
+/// common one: a session reached over plain HTTP at a LAN address.
+///
+/// The refusal is written to the console rather than swallowed, because the only symptom
+/// it has otherwise is a button that appears to do nothing — the same shape as a broken
+/// binding, and nothing on the page tells the two apart.
+[<Emit("""(function (text, settled) {
+  const clip = navigator.clipboard
+  if (!clip) { console.debug('yession/copy: no clipboard in this context'); settled(false); return }
+  clip.writeText(text).then(
+    () => settled(true),
+    (err) => { console.debug('yession/copy: refused', String(err)); settled(false) })
+})($0, $1)""")>]
+let private writeClipboard (text: string) (settled: bool -> unit) : unit = jsNative
+
+/// How long a copy says so for. Long enough to be read as an answer to the press, short
+/// enough that the code it stands in front of comes back before anybody needs it again.
+let private copiedShownMs = 1500
+
 /// How long catch-up must run before it is worth SAYING (see `EventConsumerState.CatchUpIsSlow`).
 /// Long enough that a send — which puts this client one event behind itself for a round trip —
 /// never lights it; short enough that a real wait is reported rather than sat through in
@@ -1434,6 +1455,11 @@ let private start () =
                         refreshGitHub ()
                 })
 
+        // The copied mark is a moment, so it is one deadline: re-armed by each copy, and the
+        // one it replaces is cleared. Two live timers over one slot would let the first
+        // copy's deadline take the second copy's confirmation off the screen.
+        let mutable copiedTimer = 0.0
+
         // The side effects a template can't derive from the model. Send routes to the one
         // implementation in `Client.connect` (capture markdown, enqueue, seed the queue fragment).
         let actions : ViewActions =
@@ -1528,6 +1554,22 @@ let private start () =
                                     |> Async.AwaitPromise
                                 if not reply.ok then return Error reply.body else return Ok None
                             })
+              Copy =
+                fun key text ->
+                    writeClipboard text (fun written ->
+                        // Only a write that HAPPENED is confirmed. A refused clipboard leaves
+                        // the box showing the value, which is what a person falls back to
+                        // reading — a "copied" over an empty clipboard would send them to the
+                        // other tab with nothing to paste.
+                        if written then
+                            if copiedTimer <> 0.0 then clearTimeoutJs copiedTimer
+                            dispatchRef (CopiedMsg (Some key))
+                            copiedTimer <-
+                                setTimeoutJs
+                                    (fun () ->
+                                        copiedTimer <- 0.0
+                                        dispatchRef (CopiedMsg None))
+                                    copiedShownMs)
               GitHubDisconnect =
                 fun scope ->
                     githubAction (fun () ->
