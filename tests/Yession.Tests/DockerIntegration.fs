@@ -24,8 +24,27 @@ open Yession.Tests.Support
 let private nodeFs : obj = importAll "node:fs"
 let private nodeOs : obj = importAll "node:os"
 
-[<Emit("$0.mkdtempSync($1.tmpdir() + '/yession-')")>]
-let private mkdtemp (fs: obj) (os: obj) : string = jsNative
+// Under $HOME, not the system temp dir, on purpose — the same reason DevContainer.fs
+// roots its fixtures there: a bind mount's source is resolved by the DAEMON, and the
+// common macOS arrangement (Colima) shares only $HOME into its VM. A fixture under
+// /var/folders binds as a source the daemon cannot see, and the test errors with "bind
+// source path does not exist" on every Mac dev box while passing in CI.
+[<Emit("$0.mkdirSync($1, { recursive: true })")>]
+let private mkdirp (fs: obj) (path: string) : unit = jsNative
+
+[<Emit("$0.mkdtempSync($1)")>]
+let private mkdtempAt (fs: obj) (prefix: string) : string = jsNative
+
+[<Emit("$0.homedir()")>]
+let private homedir (os: obj) : string = jsNative
+
+[<Emit("$0.rmSync($1, { recursive: true, force: true })")>]
+let private rmrf (fs: obj) (path: string) : unit = jsNative
+
+let private mkdtemp (fs: obj) (os: obj) : string =
+    let root = homedir os + "/.cache/yession-tests"
+    mkdirp fs root
+    mkdtempAt fs (root + "/docker-")
 
 // World-writable, so the mount-mode test asserts rw-vs-ro MOUNT semantics and nothing
 // about capabilities. The container keeps CAP_DAC_OVERRIDE these days (a nix build needs
@@ -181,6 +200,9 @@ let tests =
                 let! ro, _, _ = runInSandbox sandboxRO "sh" [ "-c"; "echo nope > /host/f2" ] Map.empty None
                 Expect.isFalse (ro = SandboxExited 0) "read-only mount rejects writes"
                 do! sandboxRO.Dispose ()
+                // Under $HOME now, which the OS does not reap the way it does the system
+                // temp dir — so this one cleans up after itself.
+                rmrf nodeFs dir
             })
 
             testCaseAsync "build spec: an image is built from a context and run" (async {
