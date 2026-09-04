@@ -606,15 +606,29 @@ module Style =
     /// own, because a list of records is scanned by name exactly as a table was scanned by
     /// its first column, and "pull request: octo/hello#1" says the word twice.
     let queryRecordName = "font-light text-small leading-5 text-ink break-words"
-    /// The pairs, on a two-track grid: `auto` sizes the label track to the widest label in
-    /// THIS record so the values line up down it, and `minmax(0,1fr)` is what makes a long
-    /// value wrap instead of widening its track and pushing the whole pane sideways (a bare
-    /// `1fr` track floors at min-content and does exactly that).
-    let queryFields = "grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 items-baseline"
+    /// The pairs, on a two-track grid. Each track is what stops the OTHER one taking the
+    /// lane, and both are needed because the lane is 232px of content and a grid gives its
+    /// intrinsic tracks their room before it expands a flexible one.
+    ///
+    /// `minmax(0,1fr)` is what makes a long value wrap instead of widening its track and
+    /// pushing the whole pane sideways (a bare `1fr` track floors at min-content and does
+    /// exactly that). `fit-content(7rem)` is the same promise read from the label's end: a
+    /// label track still sizes to the widest label in THIS record — so the values line up
+    /// down it, and a record labelled `at`/`mode` spends 40px rather than a fixed rail —
+    /// but it can never spend more than 7rem of the lane. It was a bare `auto`, and grid
+    /// maximizes intrinsic tracks BEFORE it expands `fr`: the `resources` query's
+    /// `granted to every sandbox` is 203px of 11px caps at `tracking-caps`, so the value
+    /// track was sized last and got 17px — a path read one character per line, 764px tall.
+    let queryFields = "grid grid-cols-[fit-content(7rem)_minmax(0,1fr)] gap-x-3 gap-y-0.5 items-baseline"
     /// Field labels carry `ink-dim`, not `ink-faint`: they are 11px caps, which is below
     /// the 24px/19px-bold threshold where 3:1 would do, so they need the 4.5:1 ratio
     /// against `surface` that `ink-dim` gives (CLAUDE.md, UI baseline).
-    let queryFieldLabel = caps + " text-ink-dim"
+    ///
+    /// `overflow-wrap:anywhere` — not the `break-words` a value wears — is what makes the
+    /// cap above unconditional: it is the form that lowers min-content, and `fit-content`
+    /// still floors at min-content, so one unbreakable label word would otherwise walk
+    /// straight back through the cap and starve the value again.
+    let queryFieldLabel = caps + " text-ink-dim [overflow-wrap:anywhere]"
 
     /// The four inks a `QueryTone` asks for, named by what they mean so a query never
     /// spells a Tailwind class. Text only — never filled, never boxed, the rule the

@@ -631,6 +631,47 @@ let tests =
                 do! awaitU (pageA.ClickAsync "[data-settings-toggle='close']")
             }
 
+        // The other end of the same lane, and the case above cannot see it: a value that
+        // wraps into a seventeen-pixel column overflows NOTHING, so "it stayed inside the
+        // panel" stays green while the answer is unreadable. What starved it was the LABEL
+        // — a grid maximizes its intrinsic tracks before it expands a flexible one, so a
+        // bare `auto` label track took its whole max-content and left the value what was
+        // over. On a phone the `resources` query's `granted to every sandbox` did exactly
+        // that: `/private/etc/ssl/cert.pem, read-only; …` read one character per line.
+        //
+        // Both halves are ARRANGED, for the reason the case above arranges its value: a
+        // live session's own labels are short enough that nothing here would ever bite.
+        //
+        // The assertion is a share of the lane rather than a comparison with the label,
+        // which would pin the current cap (7rem of a 232px lane leaves the label wider
+        // than the value, legitimately), and rather than a pixel count, which would pin
+        // the lane. A third is the promise: whatever a label costs, a value keeps enough
+        // of the row to be read as words.
+        testCaseAsync "a label longer than the lane never starves its value" <|
+            async {
+                do! awaitU (pageA.ClickAsync "[data-settings-toggle='open']")
+                let! _ = await (pageA.WaitForSelectorAsync "[data-query-panel='work_sandboxes'] [data-query-row]")
+                let! starved =
+                    await (pageA.EvaluateAsync<string[]> ("""() => {
+                        const panel = document.querySelector('[data-query-panel="work_sandboxes"]')
+                        panel.querySelectorAll('dl dt').forEach(el => {
+                            el.textContent = 'granted to every sandbox on this host'
+                        })
+                        panel.querySelectorAll('dl [data-query-cell]').forEach(el => {
+                            el.textContent = '/private/etc/ssl/cert.pem, read-only; NIX_SSL_CERT_FILE=/private/etc/ssl/cert.pem'
+                        })
+                        const floor = panel.clientWidth / 3
+                        return [...panel.querySelectorAll('dl [data-query-cell]')]
+                            .filter(el => el.getBoundingClientRect().width < floor)
+                            .map(el => `${el.dataset.queryCell}: ${Math.round(el.getBoundingClientRect().width)}px of ${panel.clientWidth}px`)
+                    }"""))
+                Expect.isEmpty
+                    starved
+                    (sprintf "a label must not take the lane its value needs, these values were left with less than a third: %s"
+                        (String.Join (" | ", starved)))
+                do! awaitU (pageA.ClickAsync "[data-settings-toggle='close']")
+            }
+
         testCaseAsync "the doc store is keyed by session" <|
             async {
                 // The store is keyed by SESSION (embedded in the served page), not by address.
