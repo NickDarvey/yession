@@ -15,7 +15,8 @@ open Yession.Host
 
 let private auth = Cli.value "auth" "rule" "how a request's subject is established"
 let private secrets = Cli.value "secrets" "mode" "whether secrets persist"
-let private spec = Cli.spec "yession-manager" [ auth; secrets ]
+let private webhook = Cli.values "webhook" "name" "a webhook endpoint to serve"
+let private spec = Cli.spec "yession-manager" [ auth; secrets; webhook ]
 
 let private parse (args: string list) = Cli.parse spec (Array.ofList args)
 
@@ -56,7 +57,30 @@ let tests =
             Expect.isTrue (Cli.isSet Cli.help (parsed [ "--help" ])) "--help"
             Expect.isTrue (Cli.isSet Cli.help (parsed [ "-h" ])) "-h"
 
-        // The four refusals, one per way a command line can be wrong. Each was accepted
+        // A repeatable option is configuration that is a SET, so what it pins is that every
+        // value survives IN ORDER — a reader that took the last would look identical for the
+        // one-value case every test writes first.
+        testCase "a repeatable option collects every value, in order" <| fun () ->
+            let p = parsed [ "--webhook"; "github"; "--webhook"; "shopify" ]
+            Expect.equal (Cli.valuesOf webhook p) [ "github"; "shopify" ] "both, in order"
+            Expect.isTrue (Cli.isSet webhook p) "and it counts as given"
+
+        testCase "a repeatable option given once is one value, and given none is empty" <| fun () ->
+            Expect.equal (Cli.valuesOf webhook (parsed [ "--webhook"; "github" ])) [ "github" ] "one"
+            Expect.equal (Cli.valuesOf webhook (parsed [])) [] "none"
+            Expect.isFalse (Cli.isSet webhook (parsed [])) "and does not count as given"
+
+        testCase "an option that takes one value reads back as a list of at most one" <| fun () ->
+            // Both readers answer for any option, off ONE parse, so a caller cannot pick the
+            // reader that disagrees with the declaration.
+            Expect.equal (Cli.valuesOf auth (parsed [ "--auth"; "localhost" ])) [ "localhost" ] "the one given"
+            Expect.equal (Cli.valuesOf auth (parsed [])) [] "or none"
+
+        testCase "a repeatable option's last value is what valueOf answers" <| fun () ->
+            let p = parsed [ "--webhook"; "github"; "--webhook"; "shopify" ]
+            Expect.equal (Cli.valueOf webhook p) (Some "shopify") "the last of them"
+
+        // The five refusals, one per way a command line can be wrong. Each was accepted
         // silently before, which is the defect: an ignored option is indistinguishable from
         // one the operator never wrote.
         testCase "an unknown option is refused, and named" <| fun () ->
@@ -73,6 +97,14 @@ let tests =
         testCase "a value given to a switch is refused" <| fun () ->
             (refused [ "--version=1.2.3" ]) |> ignore
 
+        testCase "an option that takes one value is refused a second" <| fun () ->
+            // Node keeps the LAST of a repeat and says nothing, so `--auth localhost --auth
+            // none` would have run as deny-everything with both spellings on the line. The
+            // declaration is what makes the repeat visible; this is it being believed.
+            let message = refused [ "--auth"; "localhost"; "--auth"; "none" ]
+            Expect.isTrue (message.Contains "--auth") "says which option"
+            Expect.isTrue (message.Contains "2 times") "and how many times it was given"
+
         testCase "every refusal carries the usage, so the answer is in the failure" <| fun () ->
             // The point of the usage being HERE rather than in a separate --help run: an
             // operator who got it wrong is already looking at the terminal.
@@ -83,7 +115,7 @@ let tests =
 
         testCase "the usage lists every declared option, and the two every bin answers" <| fun () ->
             let text = Cli.usage spec
-            for expected in [ "--auth <rule>"; "--secrets <mode>"; "-v, --version"; "-h, --help" ] do
+            for expected in [ "--auth <rule>"; "--secrets <mode>"; "--webhook <name>..."; "-v, --version"; "-h, --help" ] do
                 Expect.isTrue (text.Contains expected) (sprintf "usage mentions %s" expected)
 
         testCase "a bin with no options of its own still answers version and help" <| fun () ->
