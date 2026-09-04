@@ -392,6 +392,15 @@ module Style =
     let fieldSelectWrapOf (width: string) = cls [ "relative"; width ]
     let fieldSelectMark = "pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-ink-faint"
 
+    /// A field with a VERB at its trailing edge, built exactly as the terminal composer's is
+    /// (`terminalCommandWrap` / `terminalCommandTrail`): the wrapper carries the width, the
+    /// field reserves the room, and the control sits INSIDE the box it acts on rather than
+    /// beside it. The select's caret above is the other half of the pattern and deliberately
+    /// not this — a mark takes no pointer events, a button is the thing you press.
+    let fieldActionWrap = "relative w-full"
+    let fieldWithAction = cls [ fieldFace; fieldType; "w-full pr-10"; touchType ]
+    let fieldAction = cls [ btnInField; "absolute right-1 top-1/2 -translate-y-1/2 text-ink-faint hover:text-ink" ]
+
     /// The chrome-LESS field: an input whose CONTAINER already carries the stroke (the
     /// composer's box, a listed row's leading edge), so the control itself must draw
     /// nothing. `[&_.ProseMirror]:outline-none` is not tidying: a mounted editor puts its

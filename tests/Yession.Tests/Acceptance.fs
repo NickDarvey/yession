@@ -173,6 +173,7 @@ let private representativeModel : ClientModel =
       Pane = None
       TerminalsOpen = true
       ItemMenu = None
+      Copied = None
       // The pane shows a TAB by default; the list is what the cases below turn on.
       Claude =
         { Status = { SessionCredential = None; MineCredential = None; Owner = None; AgentAvailable = Some false }
@@ -543,6 +544,54 @@ let private uiChecklistTests =
             Expect.isTrue (html.Contains "data-github-connected=\"mine\"") "it is still shown as connected"
             Expect.isFalse (html.Contains Dom.Hooks.githubSignInRequired) "and nothing asks for a sign-in"
             Expect.isFalse (html.Contains Dom.Hooks.signInRequired) "so no prompt over the timeline either"
+
+        // --- the device code, and getting it to github.com --------------------------------
+        // The code is useless where it is rendered: it has to reach a form in another tab,
+        // and on a phone that is a paste or it is eight characters carried in somebody's
+        // head. So the promise is that the code can be TAKEN, and that taking it is answered
+        // — never which glyph the control wears, or how long the answer stays up.
+
+        /// The client mid device flow, with a code on screen waiting to be approved.
+        let awaitingApproval =
+            { representativeModel with
+                GitHub =
+                    { representativeModel.GitHub with
+                        Flow = GitHubAwaitingApproval ("049A-EBB0", "https://github.com/login/device", "mine", 5) } }
+
+        /// What the element carrying `hook` says — its own text, so an assertion about the
+        /// code's box cannot be satisfied by the same word rendered anywhere else on the page.
+        let textOf (hook: string) (html: string) : string =
+            let at = html.IndexOf hook
+            Expect.isTrue (at >= 0) (sprintf "`%s` is in the document" hook)
+            let opened = html.IndexOf ('>', at)
+            html.Substring (opened + 1, html.IndexOf ('<', opened) - opened - 1)
+
+        testCase "the device code is offered with a way to take it" <| fun () ->
+            let html = Support.render awaitingApproval
+            Expect.equal (textOf Dom.Hooks.githubUserCode html) "049A-EBB0" "the code is on screen, readable"
+            let at = html.IndexOf Dom.Hooks.githubCopyCode
+            Expect.isTrue (at >= 0) "and a control offers to copy it"
+            // A real button, with a name: an icon-only control that is a div with a handler
+            // is operable by nobody using a keyboard, and announced to nobody at all.
+            let start = html.LastIndexOf ("<", at)
+            let tag = html.Substring (start, html.IndexOf ('>', at) - start)
+            Expect.isTrue (tag.StartsWith "<button") (sprintf "the control is a button: %s" tag)
+            Expect.isTrue (tag.Contains "aria-label=") (sprintf "and it has an accessible name: %s" tag)
+
+        testCase "a copy is answered in the box the value came from" <| fun () ->
+            let html = Support.render { awaitingApproval with Copied = Some Dom.Hooks.githubUserCode }
+            Expect.equal
+                (textOf Dom.Hooks.githubUserCode html)
+                Dom.Text.copied
+                "the confirmation lands where the reader is already looking"
+
+        testCase "a copy of something else says nothing about the device code" <| fun () ->
+            // ONE slot holds what was copied, so the mark is keyed by the box it belongs to.
+            // Without that key every copyable thing on the page would confirm at once, and
+            // three of them would be lying.
+            let html = Support.render { awaitingApproval with Copied = Some "data-some-other-box" }
+            Expect.equal (textOf Dom.Hooks.githubUserCode html) "049A-EBB0" "its box still holds the code"
+            Expect.isFalse (html.Contains (">" + Dom.Text.copied + "<")) "and nothing here claims to have been copied"
 
         // The roster used to read "ready" in green over a Claude credential the next turn
         // would fail on, because the agent gate asks whether a credential is STORED and not
@@ -1660,6 +1709,15 @@ let private chromeTests =
 
         let shell = Support.render representativeModel
         let settingsShell = Support.render { representativeModel with Claude = { representativeModel.Claude with Flow = ClaudeAwaitingCode ("https://claude.ai/auth", "mine") } }
+        // Mid device flow: the one surface carrying a field with a verb inside it, so the
+        // copy control is invisible to the scan unless this render is in it — and a surface
+        // the floor's scan cannot see is a surface the floor does not cover.
+        let deviceShell =
+            Support.render
+                { representativeModel with
+                    GitHub =
+                        { representativeModel.GitHub with
+                            Flow = GitHubAwaitingApproval ("049A-EBB0", "https://github.com/login/device", "mine", 5) } }
         // The terminal list (Plan 20, stage 0) replaces the pane's body, so no other render
         // contains its controls. Scanned HERE rather than pinned again beside the list's own
         // tests: the accessibility floor is asserted once and centrally, and a surface that
@@ -1698,7 +1756,7 @@ let private chromeTests =
         // out is the third thing: a control that invents its own border, or one that draws a
         // box with no focus state.
         testCase "every input draws the one field face, or draws nothing" <| fun () ->
-            for classes in classesOf [ "input"; "select"; "textarea" ] (shell + settingsShell + listShell) do
+            for classes in classesOf [ "input"; "select"; "textarea" ] (shell + settingsShell + deviceShell + listShell) do
                 let isField = classes.Contains "focus:border-blue"
                 let isBare = classes.Contains "border-0"
                 Expect.isTrue (isField || isBare) (sprintf "an input is neither the field face nor bare: %s" classes)
@@ -1707,7 +1765,7 @@ let private chromeTests =
         // The failure this pins is silent by nature: a control with `outline-2` and no
         // `outline` draws nothing, and you only find out with a keyboard.
         testCase "every button and link declares a visible focus ring" <| fun () ->
-            for classes in classesOf [ "button"; "a "; "summary" ] (shell + settingsShell + listShell + noticeShell) do
+            for classes in classesOf [ "button"; "a "; "summary" ] (shell + settingsShell + deviceShell + listShell + noticeShell) do
                 Expect.isTrue
                     (classes.Contains "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue")
                     (sprintf "a control has no visible focus ring: %s" classes)
@@ -1724,7 +1782,7 @@ let private chromeTests =
         // container's) and is the one legitimate way to write those characters.
         testCase "a declared focus ring is never switched off by outline-none" <| fun () ->
             let tags = [ "button"; "a "; "input"; "select"; "textarea" ]
-            for classes in classesOf tags (shell + settingsShell + listShell) do
+            for classes in classesOf tags (shell + settingsShell + deviceShell + listShell) do
                 if classes.Contains "focus-visible:outline" then
                     Expect.isFalse
                         (classes.Split ' ' |> Array.contains "outline-none")

@@ -543,6 +543,15 @@ type ClientModel =
       /// open, because opening one is writing this. Two open menus would be two popovers
       /// over one column with one Escape between them.
       ItemMenu      : MessageId option
+      /// What this client has just put on the clipboard, named by the hook of the box it
+      /// came out of (`Dom.Hooks.githubUserCode` and whatever joins it). View state, local
+      /// and transient for the same reason the menu above is: copying is one person's act
+      /// on one machine, and nobody else is looking at their clipboard.
+      ///
+      /// ONE slot, so the confirmation cannot be showing on two boxes at once — and `None`
+      /// again a moment later, put back by whoever set it (the browser's `Copy`), because
+      /// what it says is "just now" and nothing else in the model expires on its own.
+      Copied        : string option
       /// The Claude connection panel's state (Plan 08), driven by the /claude routes.
       Claude        : ClaudeViewState
       /// The GitHub connection panel's state (Plan 14), driven by the /github routes.
@@ -718,6 +727,13 @@ type ClientMsg =
     /// Shut whatever menu is open. Everything that dismisses one sends this: Escape, a
     /// press outside it, and choosing something from it.
     | CloseItemMenuMsg
+    /// Something was copied to the clipboard (`Some` the hook of the box it came from), or
+    /// the moment for saying so has passed (`None`).
+    ///
+    /// The clipboard write itself is the browser's — a permission the page may be refused —
+    /// so this is dispatched only where the write SUCCEEDED. A confirmation the reducer
+    /// could set on its own would be a claim about a clipboard nothing here has read.
+    | CopiedMsg of string option
     /// Show the terminal list, or go back to the read it covered (Plan 20, stage 0).
     | ToggleTerminalListMsg
     /// Ensure the composer slot for (terminal, author) exists, carrying the queue key it
@@ -780,6 +796,7 @@ module ClientModel =
           Pane = None
           TerminalsOpen = false
           ItemMenu = None
+          Copied = None
           Claude =
             { Status = { SessionCredential = None; MineCredential = None; Owner = None; AgentAvailable = None }
               Flow = ClaudeIdle }
@@ -1756,6 +1773,7 @@ module ClientModel =
             let next = if model.ItemMenu = Some messageId then None else Some messageId
             { model with ItemMenu = next }
         | CloseItemMenuMsg -> { model with ItemMenu = None }
+        | CopiedMsg copied -> { model with Copied = copied }
         | ToggleTerminalListMsg ->
             // Going to the list KEEPS the read it covers, so coming back resumes it — a
             // rewind included, which is the one thing the boolean did right. The column comes

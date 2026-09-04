@@ -83,6 +83,10 @@ module Icon =
     /// sitting beside the first line of a message reads as text that trailed off, and the
     /// eye tries to finish the sentence. Turned upright it is unmistakably a control.
     let private morePath = "M8 3.5 L8 3.5 M8 8 L8 8 M8 12.5 L8 12.5"
+    /// Two sheets, one behind the other: the front square whole, the back one drawn as the
+    /// L it shows past the front. Straight segments only, like everything here — the
+    /// familiar glyph has rounded corners and this vocabulary has none.
+    let private copyPath = "M6 6 L13 6 L13 13 L6 13 Z M3 10 L3 3 L10 3"
 
     // --- The vocabulary ----------------------------------------------------------------------
     // 14px inside a 24px icon button; 12px where an icon rides a caps-label line.
@@ -93,6 +97,11 @@ module Icon =
     let left = stroked "w-3.5 h-3.5" leftPath
     let right = stroked "w-3.5 h-3.5" rightPath
     let send = stroked "w-3.5 h-3.5" sendPath
+    /// Put what this sits on onto the clipboard, and — the same control, once it has — the
+    /// check that says it went. Button-sized: `checkSm` below is the inline mark that rides
+    /// a status word, and a control's glyph is never the one a sentence wears.
+    let copy = stroked "w-3.5 h-3.5" copyPath
+    let check = stroked "w-3.5 h-3.5" checkPath
     /// What else can be done to the thing this sits on. Heavier than the working stroke,
     /// because the dots are square CAPS rather than segments: at 1.5 they are a smaller mark
     /// than any other glyph here, and read as dirt on the screen rather than as a control.
