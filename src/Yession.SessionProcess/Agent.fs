@@ -55,7 +55,13 @@ module AgentTurn =
     /// Run one agent turn, appending the lifecycle events:
     ///
     ///   AgentTurnStarted -> AgentContextBuilt -> AgentMessageStarted
-    ///     -> AgentMessageDelta* -> AgentMessageCompleted | AgentTurnFailed
+    ///     -> (AgentMessageDelta* -> AgentMessageStarted[antecedent])* -> AgentMessageDelta*
+    ///     -> AgentMessageCompleted | AgentTurnFailed
+    ///
+    /// A turn that calls tools speaks in several messages, one per stretch of text the
+    /// runner streams between boundaries; each names the one before it, which is how the
+    /// projection closes it. `AgentMessageCompleted` is appended once, for the last, and is
+    /// what the process and the client read as the turn ending.
     ///
     /// Failures — result-level and thrown — become `AgentTurnFailed`, never exceptions
     /// surfaced to callers. Id minting is injected so tests are deterministic.
@@ -140,19 +146,44 @@ module AgentTurn =
                       SystemPrompt = systemPrompt }
                 do! append (AgentContextBuilt { AgentTurnId = turnId; MessageCount = List.length conversation })
 
-                let messageId = mintMessageId ()
-                do! append (AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId; Antecedent = None })
+                // Where one message ends and the next begins, decided from the stream alone.
+                // The first message opens before the model has said anything, so the chat
+                // shows a turn under way; every later one opens on the first TEXT after a
+                // boundary, and only if the current message has spoken — a message that was
+                // all tool calls is not a message, and a boundary the model never speaks
+                // after opens nothing. What the current message streamed is kept so a
+                // follower can be closed at exactly that: the runner's body is the SDK's
+                // account of the turn as one message, and once the turn has split, only the
+                // stream says which words were the last message's.
+                let current = ref (mintMessageId ())
+                let spoken = ref ""
+                let followsAntecedent = ref false
+                let boundary = ref false
+                do! append (AgentMessageStarted { AgentTurnId = turnId; MessageId = current.Value; Antecedent = None })
 
                 let onChunk (chunk: AgentResponseChunk) =
                     if not (signal.IsAborted ()) then
-                        Async.StartImmediate (
-                            append (AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = chunk.Text }))
+                        match chunk with
+                        | AgentResponseChunk.MessageBoundary -> boundary.Value <- true
+                        | AgentResponseChunk.Text text ->
+                            if boundary.Value && spoken.Value <> "" then
+                                let next = mintMessageId ()
+                                Async.StartImmediate (
+                                    append (AgentMessageStarted { AgentTurnId = turnId; MessageId = next; Antecedent = Some current.Value }))
+                                current.Value <- next
+                                spoken.Value <- ""
+                                followsAntecedent.Value <- true
+                            boundary.Value <- false
+                            spoken.Value <- spoken.Value + text
+                            Async.StartImmediate (
+                                append (AgentMessageDelta { AgentTurnId = turnId; MessageId = current.Value; Delta = text }))
 
                 let! result = runAgent context (capabilitiesFor turnId turnActor) signal onChunk
                 if not (signal.IsAborted ()) then
                     match result with
                     | AgentCompleted (body, usage) ->
-                        do! append (AgentMessageCompleted { AgentTurnId = turnId; MessageId = messageId; Body = body })
+                        let said = if followsAntecedent.Value then spoken.Value else body
+                        do! append (AgentMessageCompleted { AgentTurnId = turnId; MessageId = current.Value; Body = said })
                         // Telemetry after the durable event: the body is the fact, usage is
                         // observability. `emitUsage` never throws (guarded at the sink).
                         match usage with

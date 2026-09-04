@@ -362,7 +362,7 @@ let private diagnosticAgent : RunAgent =
                 match outcome.Status with
                 | TerminalCommandRan (CommandSucceeded 0) ->
                     let output = outcome.OutputTail.Trim ()
-                    onChunk { Text = output }
+                    onChunk (AgentResponseChunk.Text output)
                     return AgentCompleted (sprintf "diagnostic: %s" output, None)
                 | other -> return AgentFailed (sprintf "diagnostic command failed: %A" other, None)
         }
@@ -700,7 +700,7 @@ let private credentialProbe (credential: (string * string) option) : RunAgent =
                 match credential with
                 | Some (name, _) -> sprintf "credential: %s" name
                 | None -> "credential: env"
-            onChunk { Text = body }
+            onChunk (AgentResponseChunk.Text body)
             return AgentCompleted (body, None)
         }
 
