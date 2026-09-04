@@ -216,14 +216,17 @@ module Client =
 
     module FeedFault =
 
-        /// Is retrying capable of helping? (Polly's "handle" clause, as a total function.)
-        let isTransient =
+        /// Is retrying capable of helping, and how soon? Nothing here can say "not before
+        /// t": this feed is the session's own process, which names no window — a 429 from it
+        /// is congestion the policy's own backoff answers.
+        let verdict : FeedFault -> Resilience.Verdict =
             function
-            | FeedUnreachable _ -> true
+            | FeedUnreachable _ -> Resilience.Retry
             // 5xx is a Session Process in trouble; 408/429 are it asking to be left alone
             // briefly. Every other status is a decision, not a hiccup.
-            | FeedRefused status -> status >= 500 || status = 408 || status = 429
-            | FeedCorrupt _ -> false
+            | FeedRefused status ->
+                if status >= 500 || status = 408 || status = 429 then Resilience.Retry else Resilience.Fatal
+            | FeedCorrupt _ -> Resilience.Fatal
 
         /// A short reason, for the degraded feed's line in the UI.
         let describe =
@@ -647,7 +650,7 @@ module Client =
                     (System.TimeSpan.FromSeconds 10.0)
                     5
                 |> Resilience.Schedule.jittered 0.5 random
-              Retryable = FeedFault.isTransient
+              Classify = FeedFault.verdict
               Sleep = sleep
               Observe = observe }
 
@@ -697,7 +700,7 @@ module Client =
                     (System.TimeSpan.FromSeconds 15.0)
                     4
                 |> Resilience.Schedule.jittered 0.5 random
-              Retryable = fun _ -> true
+              Classify = fun _ -> Resilience.Retry
               Sleep = sleep
               Observe = ignore }
 
