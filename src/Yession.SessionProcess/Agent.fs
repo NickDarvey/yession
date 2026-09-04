@@ -141,7 +141,7 @@ module AgentTurn =
                 do! append (AgentContextBuilt { AgentTurnId = turnId; MessageCount = List.length conversation })
 
                 let messageId = mintMessageId ()
-                do! append (AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId })
+                do! append (AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId; Antecedent = None })
 
                 let onChunk (chunk: AgentResponseChunk) =
                     if not (signal.IsAborted ()) then

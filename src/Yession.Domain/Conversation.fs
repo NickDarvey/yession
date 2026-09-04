@@ -508,16 +508,28 @@ module ConversationProjection =
                           Offset = envelope.Offset
                           Woke = None } ] }
         | AgentMessageStarted a ->
+            // A message that follows another is that other one's close: the model has moved
+            // on, so what the antecedent streamed is what it said. Only a streaming item
+            // closes this way — one already failed or interrupted keeps its ending.
+            let closed =
+                match a.Antecedent with
+                | Some previous ->
+                    proj.Items
+                    |> updateItem previous (fun item ->
+                        if item.Status = Streaming then { item with Status = Complete } else item)
+                | None -> proj.Items
             { proj with
                 Items =
-                    proj.Items
+                    closed
                     @ [ { MessageId = a.MessageId
                           Author = ActorRef.Agent
                           Body = ""
                           Status = Streaming
                           Kind = ConversationItemKind.Message
                           Offset = envelope.Offset
-                          Woke = wokeBy a.AgentTurnId proj } ]
+                          // Why the turn ran is attribution for the TURN, said once where it
+                          // begins; a follower's antecedent already wears it.
+                          Woke = (match a.Antecedent with None -> wokeBy a.AgentTurnId proj | Some _ -> None) } ]
                 ActiveAgentMessages = Map.add a.AgentTurnId a.MessageId proj.ActiveAgentMessages }
         | AgentMessageDelta a ->
             { proj with
