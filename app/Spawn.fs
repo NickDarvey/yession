@@ -43,7 +43,7 @@ let parseReadyVersion (line: string) : string option = jsNative
 ///
 /// This used to be a warning that launched anyway, which was defensible while the session
 /// binary was whatever shipped beside the Manager. It is not defensible once a deployment
-/// points `YESSION_SPAWN_BIN` at a floating path (Plan 11), because then a major bump
+/// points `--spawn-bin` at a floating path (Plan 11), because then a major bump
 /// upstream silently pairs two processes that no longer agree, and the symptom surfaces
 /// later as something else entirely.
 ///

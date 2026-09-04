@@ -9,16 +9,29 @@ worked examples of satisfying them.
 
 ---
 
-## What the variable names tell you
+## Options and variables
 
-The name says who may set a variable, so the question needs no table:
+What the Manager **decides** it takes as an option; what it **passes down** stays in the
+environment, because inheritance is how a child gets it. So a mistyped setting is refused
+where it is a decision, and `--help` is the list.
+
+```sh
+yession-manager --help
+```
 
 | shape | who sets it | example |
 |---|---|---|
-| `YESSION_*` | you, the operator | `YESSION_MANAGER_URL`, `YESSION_IDLE_TIMEOUT` |
-| `YESSION_BIN_*` | you; names an executable this host will run | `YESSION_BIN_GIT`, `YESSION_BIN_BWRAP` |
+| an option | you, the operator, for this Manager | `--port`, `--idle-timeout`, `--data-dir` |
+| `YESSION_MANAGER_URL` / `YESSION_SESSION_URL` | you; every session reads them too | see §Addressing |
+| `YESSION_BIN_*` | you, or the package; names an executable a session runs | `YESSION_BIN_GIT`, `YESSION_BIN_BWRAP` |
 | `YESSION_SESSION_*` | you; per-session policy, today set once per host | `YESSION_SESSION_WORK_BACKEND`, `YESSION_SESSION_RESOURCES` |
 | `YESSION_LAUNCH` | nobody — the Manager mints it per launch | — |
+
+A variable that moved onto the command line is **refused**, not ignored: a boot whose
+environment still sets one stops and names the option to write instead. A setting nothing
+reads is the behaviour you asked for silently not happening, which is how four renames cost
+this project weeks of missing reaping, unfollowed upgrades and refused sandboxes before
+anybody noticed.
 
 `YESSION_LAUNCH` is the launch's control secret — custody of the session's secrets and its
 right to register as an OIDC client — so setting it by hand is impersonating a session, and it
@@ -115,18 +128,18 @@ resolves.
 ### Session lifetime
 
 ```sh
-YESSION_IDLE_TIMEOUT=30m                 # or 90s, 2h; unset means never
+yession-manager --idle-timeout 30m       # or 90s, 2h; absent means never
 ```
 
 The Manager stops sessions nobody is using. A session reports busy or idle over its control
 channel (a connected peer, a running turn, a command, a non-empty queue) and the Manager reaps
-on **silence**, so no single report has to arrive. Unset means never.
+on **silence**, so no single report has to arrive. Absent means never.
 
 Two costs: a reaped launch loses its OAuth client registration and user bindings, so the next
 visitor signs in again (invisible under `localhost`, a re-bounce under `trusted-headers`); and a
 session wedged after readiness is stopped as `NeverReported` rather than diagnosed.
 
-Reaping also buys rolling upgrades: point `YESSION_SPAWN_BIN` at a path that floats with your
+Reaping also buys rolling upgrades: point `--spawn-bin` at a path that floats with your
 builds and sessions upgrade as they idle out, while the Manager — whose restart evicts
 everybody — waits until nothing runs. A MAJOR version difference refuses the launch, since the
 control protocol may disagree, which drains the running set and hands you that moment.
@@ -449,16 +462,20 @@ in
   launchd.agents.yession-manager = {
     enable = true;
     config = {
-      ProgramArguments = [ "${yession}/bin/yession-manager" "--auth" "trusted-headers" ];
+      ProgramArguments = [
+        "${yession}/bin/yession-manager"
+        "--auth" "trusted-headers"
+        "--port" (toString managerPort)
+        # The default data dir is RELATIVE (`.yession`) and launchd does not start in $HOME.
+        "--data-dir" "${config.home.homeDirectory}/.yession"
+        "--idle-timeout" "30m"
+      ];
       RunAtLoad = true;
       KeepAlive = true;
       EnvironmentVariables = {
         HOME = config.home.homeDirectory;
-        # The default is RELATIVE (`.yession`) and launchd does not start in $HOME.
-        YESSION_DATA_DIR = "${config.home.homeDirectory}/.yession";
-        YESSION_PORT = toString managerPort;
-        YESSION_IDLE_TIMEOUT = "30m";
         YESSION_SESSION_RESOURCES = "${resources}";
+        # The two addresses stay variables: every session reads them too.
         YESSION_MANAGER_URL = origin;
         YESSION_SESSION_URL = "${origin}/s/{id}";
         PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
@@ -527,7 +544,8 @@ Four choices in it are deliberate:
 - **The session map does not** — it is written by a process from state that changes per launch,
   so it lives under `.local/state` and nothing else writes there.
 - **A plist change restarts the Manager, and that evicts every session** — so for frequent
-  upgrades point `YESSION_SPAWN_BIN` at a symlink you promote, keep `ProgramArguments`
-  constant, and let sessions roll onto new builds as they idle (§Session lifetime). The proxy
+  upgrades point `--spawn-bin` at a symlink you promote — a constant string, so the
+  agent's `ProgramArguments` do not change when the input does — and let sessions roll onto
+  new builds as they idle (§Session lifetime). The proxy
   and the map ride out a Manager restart: the map empties while it is unreachable and refills
   on the first frame after.

@@ -517,8 +517,11 @@ let providerReady = "MCP at"
 // [<Emit>] over process.argv that no unit test can drive.
 //
 // A CALL-SITE argument rather than something `bootSmoke` adds: the verb smokes other bins too,
-// and `--secrets` means nothing to them.
-let managerSmokeArgs = [ "--secrets"; "ephemeral" ]
+// and `--secrets` means nothing to them. Same for the scratch data dir and port 0 beside it,
+// which is why this takes the dir `bootSmoke` made: they are the Manager's options now, and
+// the serial and jumpstarter providers still take their port from their own variable.
+let managerSmokeArgs (dataDir: string) =
+    [ "--secrets"; "ephemeral"; "--data-dir"; dataDir; "--port"; "0" ]
 
 // Reused by `package`, `install-smoke`, and CI's nix-package job: spawn the given command with
 // an ephemeral data dir + port 0, and assert it prints `ready` before a deadline. A bin that
@@ -528,9 +531,10 @@ let managerSmokeArgs = [ "--secrets"; "ephemeral" ]
 // the Manager serves the management UI, an example provider serves an MCP endpoint and names
 // itself. Hard-coding the Manager's line once made a bin unsmokeable, and an unsmokeable bin
 // is how one of them shipped unwrapped.
-let bootSmoke (ready: string) (command: string) (arguments: string list) =
+let bootSmoke (ready: string) (command: string) (arguments: string -> string list) =
     let dataDir = Path.Combine (Path.GetTempPath (), "yession-boot-" + Guid.NewGuid().ToString "N")
     Directory.CreateDirectory dataDir |> ignore
+    let arguments = arguments dataDir
 
     // A command with a path separator (e.g. ./result/bin/yession) resolves to an absolute path;
     // a bare name (node) is left for PATH lookup.
@@ -539,8 +543,6 @@ let bootSmoke (ready: string) (command: string) (arguments: string list) =
     arguments |> List.iter psi.ArgumentList.Add
     psi.WorkingDirectory <- repoRoot
     psi.RedirectStandardOutput <- true
-    psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- dataDir
-    psi.EnvironmentVariables.["YESSION_PORT"] <- "0"
     psi.EnvironmentVariables.["YESSION_SERIAL_PORT"] <- "0"
     psi.EnvironmentVariables.["JUMPSTARTER_PROVIDER_PORT"] <- "0"
     let p = Process.Start psi
@@ -565,7 +567,7 @@ let package (version: string) =
     stage version
     // Boot the packaged bin shim (it self-sets YESSION_SPAWN_MAIN); externals resolve from the
     // repo node_modules two levels up from dist/npm.
-    bootSmoke managerReady "node" ([ Path.Combine (pkg, "bin/yession-manager.js") ] @ managerSmokeArgs)
+    bootSmoke managerReady "node" (fun dataDir -> [ Path.Combine (pkg, "bin/yession-manager.js") ] @ managerSmokeArgs dataDir)
     let packed = runIn pkg "npm" [ "pack"; "--pack-destination"; dist ] |> fun out -> out.Split('\n') |> Array.last
     printfn "packaged dist/%s" (Path.GetFileName (packed.Trim ()))
 
@@ -590,7 +592,7 @@ let installSmoke (tgz: string) =
     if not (Directory.Exists ndcRelease && (Directory.GetFiles (ndcRelease, "*.node")).Length > 0) then
         failwith "install-smoke: node-datachannel addon was not built"
 
-    bootSmoke managerReady "node" ([ Path.Combine (prefix, "node_modules/.bin/yession-manager") ] @ managerSmokeArgs)
+    bootSmoke managerReady "node" (fun dataDir -> [ Path.Combine (prefix, "node_modules/.bin/yession-manager") ] @ managerSmokeArgs dataDir)
     printfn "install-smoke: native deps resolved and the installed package booted"
 
 // --- example: build a standalone example integration -----------------------------------------
@@ -616,7 +618,7 @@ let private pythonExample (dir: string) (name: string) =
     exec "uv" [ "sync"; "--project"; dir; "--all-groups" ]
     printfn "testing example %s" name
     exec "uv" [ "run"; "--project"; dir; "pytest"; "-q" ]
-    bootSmoke providerReady "uv" [ "run"; "--project"; dir; name + "-provider" ]
+    bootSmoke providerReady "uv" (fun _ -> [ "run"; "--project"; dir; name + "-provider" ])
     printfn "built and tested examples/%s" name
 
 let example (name: string) =
@@ -663,7 +665,7 @@ let example (name: string) =
           "--external:serialport"; sprintf "--outfile=%s" outFile ]
     |> ignore
     // A build is not a boot, here for the same reason it is not one for the product's bins.
-    bootSmoke providerReady "node" [ outFile ]
+    bootSmoke providerReady "node" (fun _ -> [ outFile ])
     printfn "built examples/%s/dist/main.js" name
 
 // --- check: capability-gated test orchestration ----------------------------------------------
@@ -1596,7 +1598,7 @@ match arg 1 with
     | None -> failwith "install-smoke <tgz>"
 | Some "boot-smoke" ->
     match rest 2 with
-    | ready :: cmd :: cmdArgs -> bootSmoke ready cmd cmdArgs
+    | ready :: cmd :: cmdArgs -> bootSmoke ready cmd (fun _ -> cmdArgs)
     | _ -> failwith "boot-smoke <ready-line> <command…>"
 | Some "example" ->
     match arg 2 with
