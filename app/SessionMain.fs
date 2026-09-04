@@ -645,21 +645,30 @@ let private askProvider
             return Error failure.Message
     }
 
-let private listModels : ListModels =
-    ModelCatalogue.cached (fun actor ->
-        async {
-            match! resolveCredential actor with
-            | Error reason -> return Error reason
-            | Ok (Some credential) -> return! askProvider (claudeTargetFor actor) credential
-            | Ok None ->
-                match ambientCredential () with
-                // The ambient token is nobody's connection, so a refusal of it has no stored
-                // credential to mark — only the picker's note to explain it.
-                | Some credential -> return! askProvider None credential
-                // Unreachable: `Ok None` means the ambient credential is what a turn would
-                // run on, and that is exactly what `ambientCredential` has just answered.
-                | None -> return Error "no credential to ask the provider with"
-        })
+/// The catalogue, kept between asks — under the credential it was fetched on
+/// (`claudeTargetFor`, the same answer a turn is dispatched by), and only while it is
+/// still fresh. `Forget` is called where the credential state moves, below.
+let private modelCatalogue : ModelCatalogueCache =
+    ModelCatalogue.keyed
+        (fun () -> System.DateTimeOffset.UtcNow)
+        ModelCatalogue.freshness
+        claudeTargetFor
+        (fun actor ->
+            async {
+                match! resolveCredential actor with
+                | Error reason -> return Error reason
+                | Ok (Some credential) -> return! askProvider (claudeTargetFor actor) credential
+                | Ok None ->
+                    match ambientCredential () with
+                    // The ambient token is nobody's connection, so a refusal of it has no stored
+                    // credential to mark — only the picker's note to explain it.
+                    | Some credential -> return! askProvider None credential
+                    // Unreachable: `Ok None` means the ambient credential is what a turn would
+                    // run on, and that is exactly what `ambientCredential` has just answered.
+                    | None -> return Error "no credential to ask the provider with"
+            })
+
+let private listModels : ListModels = modelCatalogue.List
 
 /// Per-turn credential dispatch (Plan 08): the turn runs on `resolveCredential`'s answer
 /// for its actor. With no credential at all the turn fails gracefully, saying so.
@@ -861,8 +870,20 @@ Async.StartImmediate (
                 // it still works arrive on the same frame, and keeping only half of it was
                 // why a panel could show a green dot over a credential the Manager already
                 // knew was finished.
-                connectionStatus <-
-                    list.Connections |> List.map (fun s -> s.Id, s) |> Map.ofList)
+                let updated = list.Connections |> List.map (fun s -> s.Id, s) |> Map.ofList
+                // A frame that MOVES the status moves what a turn would run on: a sign-in
+                // gives an actor a credential it had none for, a disconnect takes one away,
+                // and a fresh sign-in under the same target is a different account behind
+                // the same key. Each of those makes the kept catalogue an answer to a
+                // question nobody is asking any more, so it is dropped where the state it
+                // was keyed by changes — and nowhere else, because a caller that had to
+                // remember is the reason the picker could sit on a stale refusal.
+                // A frame that changes nothing (the snapshot a resubscribe opens with)
+                // keeps it, or a dropped connection elsewhere would cost every session its
+                // catalogue.
+                if updated <> connectionStatus then
+                    connectionStatus <- updated
+                    modelCatalogue.Forget ())
             |> ignore
         | None -> ()
         // The browser-facing Claude connection surface: only meaningful with both a

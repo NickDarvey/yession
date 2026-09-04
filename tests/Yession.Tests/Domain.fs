@@ -1032,8 +1032,24 @@ let private authorityTests =
                 "so it resolves to the agent, which has no scope of its own — not to a person"
     ]
 
-/// The model vocabulary: the id's invariant, and the one rule the session's catalogue has
-/// — look once, keep the answer, and never keep a failure.
+/// A catalogue cache over a stub provider: a frozen clock, a ten-minute window, and one
+/// model. Hoisted because three of the cases below differ only in what they MOVE — the
+/// credential, the clock, or the kept answer itself — and a setup written out three times
+/// hides which line is the case.
+let private keeping (onAsk: unit -> unit) (keyOf: ActorRef -> string option) : ModelCatalogueCache =
+    ModelCatalogue.keyed
+        (fun () -> DateTimeOffset (2026, 1, 1, 0, 0, 0, TimeSpan.Zero))
+        (TimeSpan.FromMinutes 10.0)
+        keyOf
+        (fun _ ->
+            async {
+                onAsk ()
+                return Ok [ AgentModel.create (ModelId.create "a-model" |> expect) "A" ]
+            })
+
+/// The model vocabulary: the id's invariant, and the rules the session's catalogue keeps
+/// — an answer belongs to the credential it was fetched on, it does not outlive the
+/// provider's own list for long, and a failure is never kept at all.
 let private modelTests =
     testList "Models" [
         testCase "a model id is trimmed, and refuses what no provider could have named" <| fun () ->
@@ -1061,17 +1077,14 @@ let private modelTests =
                 [ "alpha"; "Beta" ]
                 "by name, case-insensitively"
 
-        testCaseAsync "a successful lookup happens once and is kept for the session" <|
+        // The kept catalogue. Each case moves ONE of the three things that can make a kept
+        // answer stop being one, and asserts that the lookup notices exactly that.
+        testCaseAsync "an answer is kept while the credential and the clock both stand still" <|
             async {
                 let mutable asked = 0
-                let cached =
-                    ModelCatalogue.cached (fun _ ->
-                        async {
-                            asked <- asked + 1
-                            return Ok [ AgentModel.create (ModelId.create "a-model" |> expect) "A" ]
-                        })
-                let! first = cached ActorRef.Agent
-                let! second = cached ActorRef.Agent
+                let cache = keeping (fun () -> asked <- asked + 1) (fun _ -> Some "alice")
+                let! first = cache.List ActorRef.Agent
+                let! second = cache.List ActorRef.Agent
                 Expect.equal asked 1 "the provider is asked once"
                 Expect.equal second first "and every later reader gets the same answer"
             }
@@ -1082,17 +1095,72 @@ let private modelTests =
                 // remedy happens in the panel above the picker. Caching that would leave the
                 // picker permanently empty for a session that fixes it a minute later.
                 let mutable asked = 0
-                let cached =
-                    ModelCatalogue.cached (fun _ ->
-                        async {
-                            asked <- asked + 1
-                            if asked = 1 then return Error "not connected"
-                            else return Ok [ AgentModel.create (ModelId.create "a-model" |> expect) "A" ]
-                        })
-                let! failed = cached ActorRef.Agent
+                let cache =
+                    ModelCatalogue.keyed
+                        (fun () -> DateTimeOffset (2026, 1, 1, 0, 0, 0, TimeSpan.Zero))
+                        (TimeSpan.FromMinutes 10.0)
+                        (fun _ -> Some "alice")
+                        (fun _ ->
+                            async {
+                                asked <- asked + 1
+                                if asked = 1 then return Error "not connected"
+                                else return Ok [ AgentModel.create (ModelId.create "a-model" |> expect) "A" ]
+                            })
+                let! failed = cache.List ActorRef.Agent
                 Expect.isError failed "the first ask reports why it could not"
-                let! second = cached ActorRef.Agent
+                let! second = cache.List ActorRef.Agent
                 Expect.isOk second "and the next ask tries again"
+            }
+
+        testCaseAsync "an answer kept for one credential is never served to another" <|
+            async {
+                // A catalogue is a fact about a credential. Kept as a fact about the session,
+                // the first person to open the picker filled it for everybody — and the next
+                // person read a list their own credential had never been asked for.
+                let mutable asked = 0
+                let mutable who = "alice"
+                let cache = keeping (fun () -> asked <- asked + 1) (fun _ -> Some who)
+                let! _ = cache.List ActorRef.Agent
+                who <- "bob"
+                let! _ = cache.List ActorRef.Agent
+                Expect.equal asked 2 "a different credential is a different question"
+            }
+
+        testCaseAsync "a kept answer expires, so a model released mid-session is offered" <|
+            async {
+                // Nothing tells a session that a provider shipped a model, and a session here
+                // can be up for days. Kept for ever, the only cure was a restart.
+                let mutable asked = 0
+                let mutable at = DateTimeOffset (2026, 1, 1, 0, 0, 0, TimeSpan.Zero)
+                let cache =
+                    ModelCatalogue.keyed
+                        (fun () -> at)
+                        (TimeSpan.FromMinutes 10.0)
+                        (fun _ -> Some "alice")
+                        (fun _ ->
+                            async {
+                                asked <- asked + 1
+                                return Ok [ AgentModel.create (ModelId.create "a-model" |> expect) "A" ]
+                            })
+                let! _ = cache.List ActorRef.Agent
+                at <- at.AddMinutes 9.0
+                let! _ = cache.List ActorRef.Agent
+                Expect.equal asked 1 "inside the window the kept answer stands"
+                at <- at.AddMinutes 2.0
+                let! _ = cache.List ActorRef.Agent
+                Expect.equal asked 2 "past it the provider is asked again"
+            }
+
+        testCaseAsync "forgetting drops the answer, so a re-sign-in is not served the old one" <|
+            async {
+                // The one move the key cannot see: the same target signed in again, behind a
+                // different account. Whoever holds that state says so.
+                let mutable asked = 0
+                let cache = keeping (fun () -> asked <- asked + 1) (fun _ -> Some "alice")
+                let! _ = cache.List ActorRef.Agent
+                cache.Forget ()
+                let! _ = cache.List ActorRef.Agent
+                Expect.equal asked 2 "what was forgotten is asked for again"
             }
     ]
 
