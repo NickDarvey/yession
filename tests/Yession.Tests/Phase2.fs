@@ -1527,7 +1527,7 @@ let private lazyLifecycleTests =
                 let conversational : RunAgent =
                     fun _ _ _signal onChunk ->
                         async {
-                            onChunk { Text = "just an answer" }
+                            onChunk (AgentResponseChunk.Text "just an answer")
                             return AgentCompleted ("just an answer", None)
                         }
                 let m = Manager.create (Some conversational) (Some (fun _ -> scriptedSandbox recorder echoSandboxScript)) lazyEnvironmentPort
@@ -1565,7 +1565,7 @@ let private lazyLifecycleTests =
                             let! second = capabilities.Terminals.Execute (CommandRequest.ofCommand "true")
                             match first, second with
                             | Ok _, Ok _ ->
-                                onChunk { Text = "environment is up" }
+                                onChunk (AgentResponseChunk.Text "environment is up")
                                 return AgentCompleted ("environment is up", None)
                             | other -> return AgentFailed (sprintf "%A" other, None)
                         }
@@ -1823,7 +1823,7 @@ let private commandTests =
                         async {
                             match! capabilities.Terminals.Execute (CommandRequest.ofCommand "echo hello from the env") with
                             | Ok outcome when outcome.Status = TerminalCommandRan (CommandSucceeded 0) ->
-                                onChunk { Text = "ran it" }
+                                onChunk (AgentResponseChunk.Text "ran it")
                                 return AgentCompleted ("ran it", None)
                             | other -> return AgentFailed (sprintf "%A" other, None)
                         }
@@ -1935,7 +1935,7 @@ let private acceptanceE2eTests =
                     fun _ capabilities _signal onChunk ->
                         async {
                             let! _ = capabilities.Terminals.Execute (CommandRequest.ofCommand "echo made progress")
-                            onChunk { Text = "done" }
+                            onChunk (AgentResponseChunk.Text "done")
                             return AgentCompleted ("done", None)
                         }
                 let m = Manager.create (Some devAgent) (Some hostSandboxFor) acceptancePort

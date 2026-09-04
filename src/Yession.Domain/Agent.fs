@@ -48,7 +48,15 @@ type AgentContextPack =
       Model          : ModelId option
       SystemPrompt   : string }
 
-type AgentResponseChunk = { Text : string }
+/// What a runner streams, in the order it arrives. `Text` is the model speaking. A
+/// `MessageBoundary` is the model having begun its next message — after a tool call, in
+/// every case there is — which is where what it says next stops being a continuation of
+/// what it said before. The boundary carries no text of its own and promises none: a
+/// message that is only tool calls begins with one too, and says nothing after it.
+[<RequireQualifiedAccess>]
+type AgentResponseChunk =
+    | Text of string
+    | MessageBoundary
 
 /// Token/cache usage the runner reports for one turn (Plan 04, Step 28). Telemetry only —
 /// never a durable session fact and never written to the event log. `None` when the runner

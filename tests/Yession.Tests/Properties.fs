@@ -140,7 +140,7 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
                     if not resumed && epoch = myEpoch then
                         resumed <- true
                         cont result
-                onChunk { Text = "thinking" }
+                onChunk (AgentResponseChunk.Text "thinking")
                 pendingRelease <- Some (fun () -> resume (AgentCompleted ("turn done", None)))
                 signal.OnAbort (fun () -> resume (AgentFailed ("aborted", None))))
 

@@ -52,6 +52,18 @@ let private mintTurnId () = turnId
 let private laterMessageId = MessageId.create "msg-agent-2" |> expect
 let private mintMessageId () = agentMessageId
 
+/// A minter for a turn that speaks more than once: the first id, then the second, then a
+/// third nothing here expects — so a run that opened one message too many fails on the id
+/// rather than passing on a repeat.
+let private mintMessageIds () : unit -> MessageId =
+    let minted = ref 0
+    fun () ->
+        minted.Value <- minted.Value + 1
+        match minted.Value with
+        | 1 -> agentMessageId
+        | 2 -> laterMessageId
+        | n -> MessageId.create (sprintf "msg-agent-%d" n) |> expect
+
 let private newLog () =
     InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
 
@@ -98,8 +110,8 @@ let private turnTests =
                         async {
                             Expect.equal context.CurrentMessage (Some triggerItem) "the context's current message is the trigger"
                             Expect.equal context.SessionId sessionId "the context carries the session"
-                            onChunk { Text = "Hel" }
-                            onChunk { Text = "lo!" }
+                            onChunk (AgentResponseChunk.Text "Hel")
+                            onChunk (AgentResponseChunk.Text "lo!")
                             return AgentCompleted ("Hello!", None)
                         }
                 do! AgentTurn.run log scripted AgentAbortSignal.none (fun _ _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId sessionId [ triggerItem ] [] None (AgentTurn.FromMessage trigger)
@@ -113,6 +125,77 @@ let private turnTests =
                       AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "lo!" }
                       AgentMessageCompleted { AgentTurnId = turnId; MessageId = agentMessageId; Body = "Hello!" } ]
                     "the lifecycle, in order"
+            }
+
+        // A turn that calls a tool speaks in more than one message. The runner says where
+        // the model began its next one; the orchestrator opens a message there, on the
+        // first text after it, naming the message before — and closes the turn on the LAST
+        // message with what that message streamed, not with the runner's body, which is the
+        // SDK's account of the turn as one message.
+        testCaseAsync "a boundary followed by text opens a new message that names the one before it" <|
+            async {
+                let log = newLog ()
+                let scripted : RunAgent =
+                    fun _ _ _ onChunk ->
+                        async {
+                            onChunk (AgentResponseChunk.Text "Let me run it again.")
+                            onChunk AgentResponseChunk.MessageBoundary
+                            onChunk (AgentResponseChunk.Text "It finished.")
+                            return AgentCompleted ("Let me run it again.It finished.", None)
+                        }
+                do! AgentTurn.run log scripted AgentAbortSignal.none (fun _ _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId (mintMessageIds ()) sessionId [ triggerItem ] [] None (AgentTurn.FromMessage trigger)
+                let! events = eventsOf log
+                Expect.equal
+                    (events |> List.skip 2)
+                    [ AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None }
+                      AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "Let me run it again." }
+                      AgentMessageStarted { AgentTurnId = turnId; MessageId = laterMessageId; Antecedent = Some agentMessageId }
+                      AgentMessageDelta { AgentTurnId = turnId; MessageId = laterMessageId; Delta = "It finished." }
+                      AgentMessageCompleted { AgentTurnId = turnId; MessageId = laterMessageId; Body = "It finished." } ]
+                    "two messages, the second naming the first, the turn ending on the second"
+            }
+
+        testCaseAsync "a boundary before the turn has spoken opens nothing" <|
+            async {
+                let log = newLog ()
+                let scripted : RunAgent =
+                    fun _ _ _ onChunk ->
+                        async {
+                            // The model's first message was all tool calls; its second is
+                            // the first thing it says.
+                            onChunk AgentResponseChunk.MessageBoundary
+                            onChunk AgentResponseChunk.MessageBoundary
+                            onChunk (AgentResponseChunk.Text "Done.")
+                            return AgentCompleted ("Done.", None)
+                        }
+                do! AgentTurn.run log scripted AgentAbortSignal.none (fun _ _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId (mintMessageIds ()) sessionId [ triggerItem ] [] None (AgentTurn.FromMessage trigger)
+                let! events = eventsOf log
+                Expect.equal
+                    (events |> List.skip 2)
+                    [ AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None }
+                      AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "Done." }
+                      AgentMessageCompleted { AgentTurnId = turnId; MessageId = agentMessageId; Body = "Done." } ]
+                    "the one message the turn opened with is the one it speaks in"
+            }
+
+        testCaseAsync "a boundary the model never speaks after opens nothing" <|
+            async {
+                let log = newLog ()
+                let scripted : RunAgent =
+                    fun _ _ _ onChunk ->
+                        async {
+                            onChunk (AgentResponseChunk.Text "Done.")
+                            onChunk AgentResponseChunk.MessageBoundary
+                            return AgentCompleted ("Done.", None)
+                        }
+                do! AgentTurn.run log scripted AgentAbortSignal.none (fun _ _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId (mintMessageIds ()) sessionId [ triggerItem ] [] None (AgentTurn.FromMessage trigger)
+                let! events = eventsOf log
+                Expect.equal
+                    (events |> List.skip 2)
+                    [ AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None }
+                      AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "Done." }
+                      AgentMessageCompleted { AgentTurnId = turnId; MessageId = agentMessageId; Body = "Done." } ]
+                    "no empty message trails the turn"
             }
 
         testCaseAsync "a failed run produces AgentTurnFailed" <|
@@ -333,8 +416,8 @@ let private e2eTests =
                 let scripted : RunAgent =
                     fun context _capabilities _signal onChunk ->
                         async {
-                            onChunk { Text = "You said: " }
-                            onChunk { Text = (context.CurrentMessage |> Option.map (fun m -> m.Body) |> Option.defaultValue "") }
+                            onChunk (AgentResponseChunk.Text "You said: ")
+                            onChunk (AgentResponseChunk.Text (context.CurrentMessage |> Option.map (fun m -> m.Body) |> Option.defaultValue ""))
                             return AgentCompleted (sprintf "You said: %s" (context.CurrentMessage |> Option.map (fun m -> m.Body) |> Option.defaultValue ""), None)
                         }
                 let! h = Host.startWith (Some scripted) e2eSessionId port
@@ -883,7 +966,7 @@ let private armedScheduler (seed: SessionEvent list) (duringTurn: EventLog<Sessi
     let runner : RunAgent =
         fun _ _ _ onChunk ->
             async {
-                onChunk { Text = "ok" }
+                onChunk (AgentResponseChunk.Text "ok")
                 duringTurn log
                 return AgentCompleted ("done", None)
             }

@@ -312,7 +312,7 @@ let private interruptTests =
                 let runner : RunAgent =
                     fun _ _ signal onChunk ->
                         Async.FromContinuations (fun (cont, _, _) ->
-                            onChunk { Text = "partial thoughts" }
+                            onChunk (AgentResponseChunk.Text "partial thoughts")
                             let mutable resumed = false
                             let resume result =
                                 if not resumed then

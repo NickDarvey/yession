@@ -36,7 +36,7 @@ type private JsToolAnswer =
     abstract ok : bool
     abstract text : string
 
-[<Emit("""(async function (prompts, agentEnv, claudePath, descriptors, invoke, allowedTools, onChunk, registerAbort, claudeSpawner) {
+[<Emit("""(async function (prompts, agentEnv, claudePath, descriptors, invoke, allowedTools, onChunk, onBoundary, registerAbort, claudeSpawner) {
   // Declared OUTSIDE the try because a turn does not always end by returning: the SDK
   // reports a non-success ending by THROWING, and what the turn streamed and spent before
   // that has to survive the throw. See the catch.
@@ -138,6 +138,14 @@ type private JsToolAnswer =
     for await (const m of q) {
       if (m.type === 'stream_event') {
         const e = m.event
+        // One `message_start` per API round: the model beginning its next message, which
+        // after a tool call is the next thing it has to say. Forwarded as a boundary so the
+        // turn can be split where the model split it, and `streamed` starts over so the
+        // fallback body below is that of the LAST message rather than of the whole turn.
+        if (e && e.type === 'message_start') {
+          onBoundary()
+          streamed = ''
+        }
         if (e && e.type === 'content_block_delta' && e.delta && typeof e.delta.text === 'string') {
           onChunk(e.delta.text)
           streamed += e.delta.text
@@ -165,7 +173,7 @@ type private JsToolAnswer =
     // reason; `Agent.sdkFailureReason` unwraps the latter.
     return { ok: false, body: '', reason: String((err && err.message) || err), inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, model }
   }
-})($0, $1, $2, $3, $4, $5, $6, $7, $8)""")>]
+})($0, $1, $2, $3, $4, $5, $6, $7, $8, $9)""")>]
 let private runQuery
     (prompts: {| system: string; prompt: string; model: string |})
     (agentEnv: obj)
@@ -176,6 +184,7 @@ let private runQuery
     (invoke: string -> string -> string -> JS.Promise<JsToolAnswer>)
     (allowedTools: string array)
     (onChunk: string -> unit)
+    (onBoundary: unit -> unit)
     (registerAbort: (unit -> unit) -> unit)
     (claudeSpawner: obj)
     : JS.Promise<RunOutcome> =
@@ -360,7 +369,8 @@ let runWith (dataDir: string) (backend: SandboxBackend) (credential: (string * s
                     (descriptorsOf registry)
                     (invokeOf registry)
                     (ToolRegistry.allowedTools registry |> Array.ofList)
-                    (fun text -> onChunk { Text = text })
+                    (fun text -> onChunk (AgentResponseChunk.Text text))
+                    (fun () -> onChunk AgentResponseChunk.MessageBoundary)
                     signal.OnAbort
                     cli.Spawner
                 |> Interop.awaitPromise
