@@ -898,6 +898,7 @@ Async.StartImmediate (
                         client
                         (fun target -> Map.tryFind target connectionStatus)
                         (fun () -> envCreds || connectedSomewhere ())
+                        listModels
                         sessionMount)
             | _ -> None
         // The GitHub connection surface (Plan 14) rides the same status cache and control
@@ -923,14 +924,7 @@ Async.StartImmediate (
                 match auth with
                 | Some a -> Some (Queries.routes a queryRegistry sessionMount)
                 | None -> None
-            // The model catalogue: gated by the same cookie identity, and — unlike the two
-            // connection panels — needing no control channel of its own, because the
-            // credential it asks with is resolved through the one they already use.
-            let modelRoutes =
-                match auth with
-                | Some a -> Some (ModelRoutes.routes a listModels sessionMount)
-                | None -> None
-            [ claudeRoutes; githubRoutes; queryRoutes; modelRoutes ]
+            [ claudeRoutes; githubRoutes; queryRoutes ]
             |> List.choose id
             |> function
                | [] -> None

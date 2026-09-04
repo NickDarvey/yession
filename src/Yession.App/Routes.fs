@@ -109,18 +109,18 @@ type SessionRoute =
     /// a ranged replay starts from. Immutable on the same argument the chunks are: a
     /// keyframe is written once, at a position that never moves.
     | TerminalKeyframe of terminal: string * seq: int
-    /// The Claude panel's current credential status.
+    /// The Claude panel's current credential status, and — on the same reply — the models
+    /// this session can run a turn on.
+    ///
+    /// One route, because it is one question: what can a turn run on here. The catalogue
+    /// had a `/models` of its own, and the two answers drifted the moment their refresh
+    /// triggers did — the picker kept a refusal naming an account that had since been
+    /// connected, because signing in re-probed the status and nothing re-asked for the
+    /// models. Which provider answers is still nothing the browser learns: the catalogue
+    /// crosses as the same provider-neutral pair it always did.
     | ClaudeStatus
     /// One of the Claude panel's write actions.
     | Claude of action: ClaudeAction
-    /// The models this session's provider offers — what the model picker chooses from.
-    /// A plain fetch rather than a stream: a catalogue does not move while a session runs
-    /// (the session looks it up once and keeps the answer), so there is nothing to push.
-    ///
-    /// Deliberately not under `/claude`: which provider answers this is the session's
-    /// business, and a picker that had to know would have made every future provider a
-    /// change to the browser.
-    | Models
     /// The GitHub panel's current credential status (Plan 14).
     | GitHubStatus
     /// One of the GitHub panel's write actions.
@@ -190,7 +190,6 @@ module SessionRoute =
         | TerminalKeyframe (terminal, seq) -> sprintf "terminals/%s/keyframes/%d" terminal seq
         | ClaudeStatus -> "claude"
         | Claude action -> "claude/" + claudeSegment action
-        | Models -> "models"
         | GitHubStatus -> "github"
         | GitHub action -> "github/" + githubSegment action
         | Queries -> "queries"
@@ -270,7 +269,6 @@ module SessionRoute =
         | "POST", [ "claude"; "complete" ] -> Some (Claude ClaudeAction.Complete)
         | "POST", [ "claude"; "token" ] -> Some (Claude ClaudeAction.Token)
         | "POST", [ "claude"; "disconnect" ] -> Some (Claude ClaudeAction.Disconnect)
-        | "GET", [ "models" ] -> Some Models
         | "GET", [ "github" ] -> Some GitHubStatus
         | "POST", [ "github"; "begin" ] -> Some (GitHub GitHubAction.Begin)
         | "POST", [ "github"; "poll" ] -> Some (GitHub GitHubAction.Poll)

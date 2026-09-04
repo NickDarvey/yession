@@ -861,16 +861,23 @@ let private urlEncode (value: string) : string = jsNative
 // a JS value is the kind of thing that misbehaves quietly, and a status that silently
 // decodes to "nothing connected" is indistinguishable on screen from the truth. Two nullable
 // strings per scope cannot go wrong, and `ConnectionView` is assembled in F#.
+//
+// The catalogue on the same reply crosses as the JSON TEXT of the list, for the same
+// reason and one more: it is decoded by the codec the server encoded it with, so the
+// browser reads one wire shape rather than two, and a row it could not decode is a
+// reason to show rather than a silently shorter menu.
 [<Emit("""fetch($0, { cache: 'no-store' })
   .then(r => r.ok ? r.json().then(s => ({ ok: true,
     sessionKind: s.session ? String(s.session.kind || '') : null,
     sessionSignIn: (s.session && s.session.signInRequired) || null,
     mineKind: s.mine ? String(s.mine.kind || '') : null,
     mineSignIn: (s.mine && s.mine.signInRequired) || null,
-    owner: s.owner, agent: !!s.agent }))
-    : Promise.resolve({ ok: false, sessionKind: null, sessionSignIn: null, mineKind: null, mineSignIn: null, owner: null, agent: false }))
-  .catch(() => ({ ok: false, sessionKind: null, sessionSignIn: null, mineKind: null, mineSignIn: null, owner: null, agent: false }))""")>]
-let private fetchClaudeStatusAt (url: string) : JS.Promise<{| ok: bool; sessionKind: string option; sessionSignIn: string option; mineKind: string option; mineSignIn: string option; owner: string option; agent: bool |}> = jsNative
+    owner: s.owner, agent: !!s.agent,
+    models: s.models ? JSON.stringify(s.models) : null,
+    modelsUnavailable: s.modelsUnavailable || null }))
+    : Promise.resolve({ ok: false, sessionKind: null, sessionSignIn: null, mineKind: null, mineSignIn: null, owner: null, agent: false, models: null, modelsUnavailable: null }))
+  .catch(() => ({ ok: false, sessionKind: null, sessionSignIn: null, mineKind: null, mineSignIn: null, owner: null, agent: false, models: null, modelsUnavailable: null }))""")>]
+let private fetchClaudeStatusAt (url: string) : JS.Promise<{| ok: bool; sessionKind: string option; sessionSignIn: string option; mineKind: string option; mineSignIn: string option; owner: string option; agent: bool; models: string option; modelsUnavailable: string option |}> = jsNative
 
 /// One scope's pair of nullable strings, as the panel's row reads it.
 let private viewOf (kind: string option) (signInRequired: string option) : ConnectionView option =
@@ -918,16 +925,6 @@ let private parseDeviceBegin (body: string) : {| userCode: string; verificationU
 
 [<Emit("(function (body) { try { const o = JSON.parse(body); return { status: o.status || '', interval: o.interval || 0 } } catch { return { status: '', interval: 0 } } })($0)")>]
 let private parseDevicePoll (body: string) : {| status: string; interval: int |} = jsNative
-
-// --- The model catalogue (the picker's supply) -------------------------------------------
-// One gated fetch, decoded with the shared codec — the reply IS `AgentModel list`, and the
-// browser never learns which provider produced it. A non-2xx carries the reason as text,
-// which is the whole error story: the picker shows it and the provider default still works.
-
-[<Emit("""fetch($0, { cache: 'no-store' })
-  .then(async r => ({ ok: r.ok, body: await r.text() }))
-  .catch(e => ({ ok: false, body: String(e) }))""")>]
-let private fetchModelsAt (url: string) : JS.Promise<{| ok: bool; body: string |}> = jsNative
 
 // --- The read surface's stream (Plan 15) --------------------------------------------------
 // `EventSource` rather than the repo's fetch-based SSE reader: it is the browser's own SSE
@@ -1324,6 +1321,20 @@ let private start () =
                                   MineCredential = viewOf status.mineKind status.mineSignIn
                                   Owner = status.owner
                                   AgentAvailable = Some status.agent })
+                        // The picker's supply, off the same reply — so it can never be a
+                        // statement about a credential the panel beside it has moved on
+                        // from. It had a probe of its own with one trigger against this
+                        // one's four, and the sign-in flow (which runs with the drawer
+                        // already open) fired the four.
+                        match status.models, status.modelsUnavailable with
+                        | Some raw, _ ->
+                            match Codec.fromString Codec.modelCatalogue raw with
+                            | Ok models -> dispatchRef (ModelCatalogueMsg (ModelsLoaded models))
+                            | Error reason -> dispatchRef (ModelCatalogueMsg (ModelsUnavailable reason))
+                        | None, Some reason -> dispatchRef (ModelCatalogueMsg (ModelsUnavailable reason))
+                        // Neither: an older session process, answering the status alone.
+                        // What the picker already knows is better than blanking it.
+                        | None, None -> ()
                 })
         let rec pollClaudeWhileAwaiting () =
             Async.StartImmediate (
@@ -1363,24 +1374,6 @@ let private start () =
                         else return Ok None
                     })
                 scope
-
-        // The model catalogue. Asked for once per open of the settings face, and answered
-        // from the session's own kept copy after the first time — so this is a local round
-        // trip, not a provider one, however often somebody opens the drawer.
-        //
-        // Re-asked on every open rather than fetched once at start, because the first ask
-        // may well have failed for want of a connected account, and the settings face is
-        // exactly where that gets fixed.
-        let refreshModels () =
-            Async.StartImmediate (
-                async {
-                    let! reply = fetchModelsAt (SessionRoute.relative SessionRoute.Models) |> Async.AwaitPromise
-                    if not reply.ok then dispatchRef (ModelCatalogueMsg (ModelsUnavailable reply.body))
-                    else
-                        match Codec.fromString Codec.modelCatalogue reply.body with
-                        | Ok models -> dispatchRef (ModelCatalogueMsg (ModelsLoaded models))
-                        | Error reason -> dispatchRef (ModelCatalogueMsg (ModelsUnavailable reason))
-                })
 
         // The GitHub panel's round-trips (Plan 14). Device flow: begin puts the user
         // code on screen, then this tab drives the session's poll at GitHub's stated
@@ -1477,13 +1470,11 @@ let private start () =
                     toggleSettings ()
                     refreshClaude ()
                     refreshGitHub ()
-                    refreshModels ()
               RevealSettings =
                 fun () ->
                     revealSettings ()
                     refreshClaude ()
                     refreshGitHub ()
-                    refreshModels ()
               ReportTitleSelection =
                 fun sel ->
                     // The title lives in the `title` Y.Text root; turn the input's char offsets
