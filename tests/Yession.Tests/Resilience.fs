@@ -101,7 +101,7 @@ let private guardTests =
                 let observed = ResizeArray<Resilience.Attempt<Client.FeedFault>> ()
                 let policy : Resilience.Policy<Client.FeedFault> =
                     { Schedule = Resilience.Schedule.exponential (ms 250.0) 2.0 (ms 10000.0) 5
-                      Retryable = Client.FeedFault.isTransient
+                      Classify = Client.FeedFault.verdict
                       Sleep = recordingSleep delays
                       Observe = observed.Add }
                 let! result =
@@ -125,7 +125,7 @@ let private guardTests =
                 let observed = ResizeArray<Resilience.Attempt<Client.FeedFault>> ()
                 let policy : Resilience.Policy<Client.FeedFault> =
                     { Schedule = Resilience.Schedule.constant (ms 10.0) 5
-                      Retryable = Client.FeedFault.isTransient
+                      Classify = Client.FeedFault.verdict
                       Sleep = recordingSleep delays
                       Observe = observed.Add }
                 // 401 is a decision, not a hiccup: retrying it only hammers the session.
@@ -141,12 +141,123 @@ let private guardTests =
                 let calls = ref 0
                 let policy : Resilience.Policy<Client.FeedFault> =
                     { Schedule = Resilience.Schedule.constant (ms 10.0) 2
-                      Retryable = Client.FeedFault.isTransient
+                      Classify = Client.FeedFault.verdict
                       Sleep = recordingSleep (ResizeArray ())
                       Observe = ignore }
                 let! result = Resilience.Policy.guard policy (flaky calls 99 (Client.FeedUnreachable "offline")) ()
                 Expect.equal result (Error (Client.FeedUnreachable "offline")) "the failure survives as a failure"
                 Expect.equal calls.Value 3 "one attempt plus the schedule's two retries — bounded"
+            }
+    ]
+
+/// A fault whose classification is whatever its case says, so a verdict reaches `guard`
+/// directly instead of through a transport that has to be talked into producing one. The
+/// feed's own faults cannot carry a window — its provider is the session, which names none.
+type private Flaky =
+    | Congested
+    | HeldFor of TimeSpan
+    | Refused
+
+/// An operation that never succeeds. Counts its calls, so a budget can be asserted.
+let private alwaysFailing (calls: int ref) (fault: 'fault) : unit -> Async<Result<string, 'fault>> =
+    fun (_: unit) ->
+        async {
+            calls.Value <- calls.Value + 1
+            return Error fault
+        }
+
+/// A policy over `Flaky` that honours a named window and refuses nothing else.
+let private held (delays: ResizeArray<TimeSpan>) (retries: int) : Resilience.Policy<Flaky> =
+    { Schedule = Resilience.Schedule.constant (ms 10.0) retries
+      Classify =
+        function
+        | Congested -> Resilience.Retry
+        | HeldFor window -> Resilience.RetryAfter window
+        | Refused -> Resilience.Fatal
+      Sleep = recordingSleep delays
+      Observe = ignore }
+
+let private verdictTests =
+    testList "A provider that names its own window" [
+        testCaseAsync "waits that window instead of the schedule's delay" <|
+            async {
+                let delays = ResizeArray<TimeSpan> ()
+                let! _ = Resilience.Policy.guard (held delays 3) (alwaysFailing (ref 0) (HeldFor (ms 900.0))) ()
+                Expect.equal
+                    [ for d in delays -> d.TotalMilliseconds ]
+                    [ 900.0; 900.0; 900.0 ]
+                    "the provider's window replaced the schedule's 10ms, every time"
+            }
+
+        testCaseAsync "does not thereby buy itself more attempts than the schedule allows" <|
+            async {
+                let calls = ref 0
+                let! _ = Resilience.Policy.guard (held (ResizeArray ()) 3) (alwaysFailing calls (HeldFor (ms 900.0))) ()
+                Expect.equal calls.Value 4 "one attempt plus the schedule's three — the budget is still the schedule's"
+            }
+    ]
+
+// --- Deadlines ----------------------------------------------------------------------------
+
+/// A computation that never settles — the hang a deadline exists for. Used as the operation
+/// (a request that never answers) and as the clock (a limit that never expires).
+let private never () : Async<'a> = Async.FromContinuations (fun _ -> ())
+
+/// A sleep that expires the instant it is asked to wait, so a deadline fires with no clock.
+let private instant : TimeSpan -> Async<unit> = fun _ -> async { return () }
+
+let private deadlineTests =
+    testList "Policy.deadline" [
+        testCaseAsync "an operation that answers inside the limit is handed back untouched" <|
+            async {
+                let bounded : unit -> Async<Result<string, Flaky>> =
+                    (fun (_: unit) -> async { return Ok "served" })
+                    |> Resilience.Policy.deadline (fun _ -> never ()) (ms 10.0) Congested
+                let! result = bounded ()
+                Expect.equal result (Ok "served") "the limit never came due, so it never spoke"
+            }
+
+        testCaseAsync "an operation that never answers settles as the timeout fault" <|
+            async {
+                let bounded : unit -> Async<Result<string, Flaky>> =
+                    (fun (_: unit) -> never ())
+                    |> Resilience.Policy.deadline instant (ms 10.0) Congested
+                let! result = bounded ()
+                Expect.equal result (Error Congested) "a hang is a fault a policy can act on, not a wait forever"
+            }
+
+        testCase "an answer that arrives after the deadline is dropped" <| fun () ->
+            // The invariant behind the guard: a continuation called twice is a caller
+            // resumed twice, and both sides of this race can finish.
+            let mutable late : (Result<string, Flaky> -> unit) option = None
+            let bounded : unit -> Async<Result<string, Flaky>> =
+                (fun (_: unit) -> Async.FromContinuations (fun (ok, _, _) -> late <- Some ok))
+                |> Resilience.Policy.deadline instant (ms 10.0) Congested
+            let settled = ResizeArray<Result<string, Flaky>> ()
+            Async.StartWithContinuations (bounded (), settled.Add, ignore, ignore)
+            Expect.equal (List.ofSeq settled) [ Error Congested ] "the deadline answered first"
+            late |> Option.iter (fun answer -> answer (Ok "served"))
+            Expect.equal (List.ofSeq settled) [ Error Congested ] "and the late answer reached nobody"
+
+        testCaseAsync "under a guard, the limit is spent per attempt rather than per operation" <|
+            async {
+                // Two attempts hang, the third answers. Composed as documented — deadline
+                // inside, guard outside — each hang costs one attempt and none of the others.
+                let calls = ref 0
+                let delays = ResizeArray<TimeSpan> ()
+                let hangingTwice (_: unit) : Async<Result<string, Flaky>> =
+                    async {
+                        calls.Value <- calls.Value + 1
+                        if calls.Value <= 2 then return! never () else return Ok "served"
+                    }
+                let guarded =
+                    hangingTwice
+                    |> Resilience.Policy.deadline instant (ms 10.0) Congested
+                    |> Resilience.Policy.guard (held delays 3)
+                let! result = guarded ()
+                Expect.equal result (Ok "served") "the attempt that answered is the one that counted"
+                Expect.equal calls.Value 3 "each hang ended its own attempt, and only its own"
+                Expect.equal delays.Count 2 "one wait per timed-out attempt"
             }
     ]
 
@@ -180,8 +291,9 @@ let private classificationTests =
                     result
                     (Error (Client.FeedUnreachable "ECONNREFUSED"))
                     "the old design returned an empty FINAL page here, which reads as 'nothing new'"
-                Expect.isTrue
-                    (Client.FeedFault.isTransient (Client.FeedUnreachable "ECONNREFUSED"))
+                Expect.equal
+                    (Client.FeedFault.verdict (Client.FeedUnreachable "ECONNREFUSED"))
+                    Resilience.Retry
                     "and it is worth retrying"
             }
 
@@ -192,8 +304,8 @@ let private classificationTests =
                 let! overloaded = Client.EventFetch.overHttp (refusing 503) SessionRoute.relative None None
                 Expect.equal unauthorized (Error (Client.FeedRefused 401)) "401 survives as 401"
                 Expect.equal overloaded (Error (Client.FeedRefused 503)) "503 survives as 503"
-                Expect.isFalse (Client.FeedFault.isTransient (Client.FeedRefused 401)) "retrying cannot fix a 401"
-                Expect.isTrue (Client.FeedFault.isTransient (Client.FeedRefused 503)) "a struggling session is worth waiting for"
+                Expect.equal (Client.FeedFault.verdict (Client.FeedRefused 401)) Resilience.Fatal "retrying cannot fix a 401"
+                Expect.equal (Client.FeedFault.verdict (Client.FeedRefused 503)) Resilience.Retry "a struggling session is worth waiting for"
                 Expect.equal (Client.FeedFault.describe (Client.FeedRefused 401)) "not authorized" "and it says so in the UI"
             }
 
@@ -204,8 +316,9 @@ let private classificationTests =
                 match! Client.EventFetch.overHttp get SessionRoute.relative None None with
                 | Error (Client.FeedCorrupt _) -> ()
                 | other -> failwithf "expected FeedCorrupt, got %A" other
-                Expect.isFalse
-                    (Client.FeedFault.isTransient (Client.FeedCorrupt "x"))
+                Expect.equal
+                    (Client.FeedFault.verdict (Client.FeedCorrupt "x"))
+                    Resilience.Fatal
                     "a bad line will not decode next time either"
             }
 
@@ -1109,6 +1222,8 @@ let tests =
     testList "Transport resilience" [
         scheduleTests
         guardTests
+        verdictTests
+        deadlineTests
         classificationTests
         feedFailureTests
         channelTests

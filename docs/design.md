@@ -159,7 +159,11 @@ as one:
   retry, backoff, and jitter as values, with the clock injected — composed *with the
   transport* at the application boundary (`app/browser/Browser.fs`), per "composition at
   the top". `App.connect` receives a feed that has already settled, so no application code
-  holds a notion of retrying;
+  holds a notion of retrying. Each fault gets a `Verdict` rather than a yes/no, because a
+  provider that names its own window (`RetryAfter`) is a third answer, and honouring one
+  outside the policy would put the pace in two places. A hang is not a fault any schedule
+  can see, so `Policy.deadline` bounds one attempt and hands the policy a fault to rule
+  on; it composes inside `guard`, which is what makes the limit per attempt;
 - the feed's health (`FeedHealth`) is model state, rendered as a status and a banner. A
   stalled feed disables nothing: collaborative state is CRDT state in the local doc, so
   reading, writing, and sending continue — per "local first", a lost history feed costs
