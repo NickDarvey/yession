@@ -7,6 +7,7 @@ module Yession.Tests.Timeline
 open System
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Domain.Agent
 open Yession.Domain.Tools
 open Yession.Domain.Terminals
 open Yession.Domain.Collab
@@ -316,7 +317,7 @@ let private unchangedTests =
             let turnId = AgentTurnId.create "turn-1" |> expect
             let messageId = message "agent"
             let events =
-                [ at 1L 0.0 (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (message "1"); Woke = None })
+                [ at 1L 0.0 (AgentTurnStarted { AgentTurnId = turnId; Cause = TurnCause.TriggeredBy (message "1") })
                   at 2L 1.0 (AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId; Antecedent = None })
                   at 3L 2.0 (AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = "hel" })
                   at 4L 3.0 (AgentMessageCompleted { AgentTurnId = turnId; MessageId = messageId; Body = "hello" }) ]
@@ -1334,7 +1335,7 @@ let private pinTests =
 // --- Task cards (Plan 20, stage 4) --------------------------------------------------------
 
 let private turnStarted (t: string) =
-    AgentTurnStarted { AgentTurnId = turn t; TriggeredByMessageId = Some (message "1"); Woke = None }
+    AgentTurnStarted { AgentTurnId = turn t; Cause = TurnCause.TriggeredBy (message "1") }
 
 let private rejected (id: TerminalId) (n: string) (author: ActorRef) (command: string) =
     SessionEvent.TerminalCommandRejected

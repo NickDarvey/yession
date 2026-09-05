@@ -112,8 +112,12 @@ module AgentTurn =
                 append (
                     AgentTurnStarted
                         { AgentTurnId = turnId
-                          TriggeredByMessageId = triggeringMessage |> Option.map (fun m -> m.MessageId)
-                          Woke = (match trigger with FromWake (reason, _) -> Some reason | FromMessage _ -> None) })
+                          // 1:1 with the trigger the scheduler handed in — the cause is the
+                          // trigger, said durably, with no second field to keep consistent.
+                          Cause =
+                            match trigger with
+                            | FromMessage message -> TurnCause.TriggeredBy message.MessageId
+                            | FromWake (reason, _) -> TurnCause.Woke reason })
             try
                 // The agent's context is the event-log-derived projection — by
                 // construction it can never include Yjs/draft state.

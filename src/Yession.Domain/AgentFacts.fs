@@ -10,17 +10,26 @@ open Yession.Domain.Prs
 /// spine rather than living on one side of it.
 type AgentTurnStarted =
     { AgentTurnId : AgentTurnId
-      /// What was said to start this turn. `None` for a turn nobody asked for (Plan 20,
-      /// stage 2) — an option rather than a minted stand-in, because an id that names no
-      /// message is a fact invented to fill a field.
-      TriggeredByMessageId : MessageId option
-      /// Why this turn exists when nobody spoke (Plan 20, stage 2). `None` is the ordinary
-      /// turn, whose trigger is the message above.
-      ///
-      /// Durable because an agent that acts unprompted must be able to SAY why on every
-      /// surface that shows what it did — an unexplained turn in a shared session reads as
-      /// the agent deciding on its own, which is the one thing it must never look like.
-      Woke : WakeReason option }
+      /// Why this turn exists — exactly one cause, the durable form of `TurnTrigger`, the
+      /// runtime value the scheduler builds a turn from. A turn with no recorded cause is
+      /// not a state this event can hold: the two options this replaced could both be `None`
+      /// at once — an unauditable turn the type permitted and the emit never meant.
+      Cause : TurnCause }
+
+/// The one thing that started a turn: a message someone sent, or an event that fired while
+/// nobody was speaking. Exactly the two arms of `TurnTrigger` (`Agent.fs`), kept durable —
+/// so the event that records a turn is 1:1 with the value that raised it, rather than a
+/// looser re-encoding of it.
+///
+/// `TriggeredBy` is the audit link from a turn back to what prompted it, and the ref a
+/// reader follows to that message. `Woke` carries the reason and nothing else — durable
+/// because an agent that acts unprompted must be able to SAY why on every surface that
+/// shows what it did, an unexplained turn in a shared session reading as the agent deciding
+/// on its own, which is the one thing it must never look like.
+and TurnCause =
+    | TriggeredBy of MessageId
+    | Woke of WakeReason
+
 /// Why a turn exists when nobody spoke (Plan 20, stage 2).
 ///
 /// Attribution, never payload: the substance of what happened arrives through the same door
