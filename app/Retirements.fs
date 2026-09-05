@@ -38,6 +38,18 @@ let manager : Retirement list =
 let found (retirements: Retirement list) (lookup: string -> string) : Retirement list =
     retirements |> List.filter (fun r -> (lookup r.Was).Trim () <> "")
 
+/// Which of these a FILE still sets. `found` asks a live process's environment; this asks
+/// text, which is the other place a retired name outlives its variable — a workflow step, a
+/// compose file, a unit — and the more dangerous one, because nothing boots when it is
+/// written. `release.yml` kept exporting two of these for a day: it runs only on master, so
+/// no pull request could see it, and the first thing that noticed was a red release.
+///
+/// An assignment is `NAME=` or `NAME:`, never a bare mention, so the reason a variable was
+/// retired can still be written down beside it without becoming a violation.
+let assignedIn (retirements: Retirement list) (text: string) : Retirement list =
+    retirements
+    |> List.filter (fun r -> text.Contains (r.Was + "=") || text.Contains (r.Was + ":"))
+
 /// What to say about them. One line per retirement, so the fix is a transcription.
 let complaint (found: Retirement list) : string =
     let lines = found |> List.map (fun r -> sprintf "  %s is now %s" r.Was r.Now) |> String.concat "\n"
