@@ -166,7 +166,10 @@ as one:
   on; it composes inside `guard`, which is what makes the limit per attempt. A
   `Breaker` is the question after the policy's — not "is this call worth making
   again" but "is this RESOURCE worth calling at all just now" — held per resource
-  and composed outside `guard`, so it counts settled failures rather than attempts;
+  and composed outside `guard`, so it counts settled failures rather than attempts.
+  What an HTTP answer means for any of it is said once, in `Resilience.Http.verdict`,
+  so a 503 means the same thing to every leg that reads one and a leg still owns
+  what is peculiar to it by composing over that rather than answering it again;
 - the feed's health (`FeedHealth`) is model state, rendered as a status and a banner. A
   stalled feed disables nothing: collaborative state is CRDT state in the local doc, so
   reading, writing, and sending continue — per "local first", a lost history feed costs

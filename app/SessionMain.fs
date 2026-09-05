@@ -914,6 +914,11 @@ Async.StartImmediate (
                             a
                             client
                             (fun target -> Map.tryFind target connectionStatus)
+                            // The resilience for this resource is composed HERE and nowhere
+                            // else, per "composition at the top": the routes are handed a leg
+                            // that has already spent its deadline and its retries, so they
+                            // only ever see a settled answer and hold no notion of retrying.
+                            (GitHubConnection.resilient Resilience.Policy.sleep Interop.random GitHubConnection.posting)
                             sessionMount)
                 | _ -> None
             // The read surface (Plan 15): one SSE stream carrying every registered query.

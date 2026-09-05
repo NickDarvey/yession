@@ -130,6 +130,19 @@ type GitHubFlowState =
     | GitHubBusy
     | GitHubError of string
 
+module GitHubFlow =
+
+    /// Does a failed poll END the flow, or is the code on screen still good?
+    ///
+    /// The distinction is the whole difference between a sign-in that survives a lift and one
+    /// that has to be started again in it. A 4xx is the SESSION saying this flow is over —
+    /// the code expired, the human denied it, there is nothing pending for that scope — and
+    /// nothing but starting again will do. Anything else is the session or the network having
+    /// a bad moment: a 5xx, a proxy, a phone changing radios (`0`, a fetch that never
+    /// answered). The device code outlives all of those, so the panel keeps waiting rather
+    /// than throwing away a code the human may already have approved.
+    let ended (status: int) : bool = status >= 400 && status < 500
+
 /// What the /github status probe reported, per sign-in scope, when connected.
 type GitHubStatus =
     { SessionCredential : ConnectionView option

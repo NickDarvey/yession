@@ -18,6 +18,7 @@ module Yession.Host.GitHubConnection
 // itself rather than by any check written here. A pasted PAT bypasses that rule
 // (documented in GAPS).
 
+open System
 open Fable.Core
 open Fable.Core.JsInterop
 open Yession.Domain
@@ -233,12 +234,94 @@ let ownerOf (identity: CookieIdentity) : CredentialOwner =
     | AttributedUser user -> UserOwner user
     | UnattributedAccess -> LocalOwner
 
-/// POST a JSON body and resolve with `(ok, responseText)`. GitHub's OAuth endpoints
-/// answer form-encoded unless asked for JSON, so the accept header is load-bearing.
+/// POST a JSON body to github.com. GitHub's OAuth endpoints answer form-encoded unless asked
+/// for JSON, so the accept header is load-bearing.
+///
+/// `reached` is reported apart from `status`, and that separation is the point. Folded
+/// together — as this port used to, with one `ok` for both — a phone changing radios and
+/// github.com refusing a client id are the same value, so neither the classifier below nor
+/// the person reading the panel can tell "we could not ask" from "we asked and were told no".
 [<Emit("""fetch($0, { method: 'POST', headers: { 'content-type': 'application/json', 'accept': 'application/json' }, body: $1 })
-  .then(async r => ({ ok: r.ok, body: await r.text() }))
-  .catch(e => ({ ok: false, body: String(e) }))""")>]
-let private postJson (url: string) (body: string) : JS.Promise<{| ok: bool; body: string |}> = jsNative
+  .then(async r => ({ reached: true, status: r.status, body: await r.text() }))
+  .catch(e => ({ reached: false, status: 0, body: String((e && e.message) || e) }))""")>]
+let private postJson (url: string) (body: string) : JS.Promise<{| reached: bool; status: int; body: string |}> = jsNative
+
+/// Why a call to github.com produced nothing this session can use. The cases exist to be
+/// told apart: one is this box's network, one is github.com's answer, one is neither side
+/// having said anything yet.
+type GitHubFault =
+    | GitHubUnreachable of detail: string
+    | GitHubRefused of status: int * body: string
+    | GitHubTimedOut
+
+module GitHubFault =
+
+    /// What a person is shown. Every one of these NAMES THE LEG, because a bare
+    /// `TypeError: Failed to fetch` on a panel is a sentence that fits a browser that could
+    /// not reach the session and a session that could not reach github.com equally well, and
+    /// the two have different cures.
+    let describe (fault: GitHubFault) : string =
+        match fault with
+        | GitHubUnreachable detail ->
+            sprintf "this session could not reach github.com: %s" (detail.Trim ())
+        | GitHubRefused (status, body) ->
+            let said = body.Trim ()
+            if said = "" then sprintf "github.com answered %d" status
+            else sprintf "github.com answered %d: %s" status said
+        | GitHubTimedOut -> "github.com did not answer in time"
+
+    /// Whether asking again can help — the shared HTTP rule, with nothing peculiar to add:
+    /// every fault here is about reaching a provider rather than about a credential, which is
+    /// the one thing this leg cannot fix by waiting.
+    let verdict (fault: GitHubFault) : Resilience.Verdict =
+        match fault with
+        | GitHubUnreachable _ -> Resilience.Http.verdict Resilience.Http.Unreached
+        | GitHubTimedOut -> Resilience.Http.verdict Resilience.Http.Unreached
+        | GitHubRefused (status, _) -> Resilience.Http.verdict (Resilience.Http.Answered (status, None))
+
+/// Posting to github.com as the routes see it: a settled body or a fault, with whatever
+/// resilience the composition root put behind it. Takes its pair as a tuple because that is
+/// the shape `Resilience.Policy.guard` decorates.
+type GitHubPost = string * string -> Async<Result<string, GitHubFault>>
+
+/// The unguarded leg: one POST, its outcome as a value. What SessionMain wraps.
+let posting : GitHubPost =
+    fun (url, body) ->
+        async {
+            let! reply = postJson url body |> Interop.awaitPromise
+            if not reply.reached then return Error (GitHubUnreachable reply.body)
+            elif reply.status >= 200 && reply.status < 300 then return Ok reply.body
+            else return Error (GitHubRefused (reply.status, reply.body))
+        }
+
+/// How long one call to github.com may take before it counts as no answer.
+///
+/// Ten seconds because this is a human waiting on a panel: long enough that a slow mobile
+/// leg still lands, short enough that `working…` cannot become the end of the story. Without
+/// it there is no end of the story — a fetch that never settles leaves a flow that never
+/// moves and a button that is no longer on screen to press again.
+let callDeadline = TimeSpan.FromSeconds 10.0
+
+/// The shipped policy for a call to github.com: three retries, exponentially backed off from
+/// 400ms with a 5s ceiling, jittered. The ceiling is low on purpose — every one of these
+/// calls has somebody watching it, so the budget is spent inside the time a person will wait
+/// rather than stretched to survive an outage they would rather be told about.
+let policy
+    (sleep: TimeSpan -> Async<unit>)
+    (random: unit -> float)
+    : Resilience.Policy<GitHubFault> =
+    { Schedule =
+        Resilience.Schedule.exponential (TimeSpan.FromMilliseconds 400.0) 2.0 (TimeSpan.FromSeconds 5.0) 3
+        |> Resilience.Schedule.jittered 0.5 random
+      Classify = GitHubFault.verdict
+      Sleep = sleep
+      Observe = ignore }
+
+/// The whole leg as it ships: each attempt bounded, the settled faults retried.
+let resilient (sleep: TimeSpan -> Async<unit>) (random: unit -> float) (post: GitHubPost) : GitHubPost =
+    post
+    |> Resilience.Policy.deadline sleep callDeadline GitHubTimedOut
+    |> Resilience.Policy.guard (policy sleep random)
 
 /// Ask GitHub whether a token is still good, as GitHub itself.
 ///
@@ -285,6 +368,7 @@ let routes
     (auth: SessionAuth.Auth)
     (connections: ControlClient.SessionConnections)
     (statusOf: SecretId -> ConnectionStatus option)
+    (post: GitHubPost)
     (mount: string)
     : IncomingMessage -> ServerResponse -> bool =
     // The pending device flow per target, held HERE and only here: the device code is
@@ -345,10 +429,14 @@ let routes
                                         | Some clientId ->
                                             let url = envOr "YESSION_GITHUB_DEVICE_URL" deviceCodeUrl
                                             let request = sprintf """{"client_id":%s}""" (jsonString clientId)
-                                            let! reply = postJson url request |> Interop.awaitPromise
-                                            if not reply.ok then respondText res 502 reply.body
-                                            else
-                                                match Decode.fromString deviceCodeDecoder reply.body with
+                                            match! post (url, request) with
+                                            | Error fault -> respondText res 502 (GitHubFault.describe fault)
+                                            // Not `body`: that name is the REQUEST body in this
+                                            // scope, and one binding with two types under one
+                                            // name is the shadow no analyzer sees and CI reports
+                                            // as a mismatch in another file entirely.
+                                            | Ok answer ->
+                                                match Decode.fromString deviceCodeDecoder answer with
                                                 | Error e -> respondText res 502 (sprintf "unrecognised device-code reply: %s" e)
                                                 | Ok grant ->
                                                     pending <- Map.add target grant pending
@@ -364,24 +452,37 @@ let routes
                                             let request =
                                                 sprintf """{"client_id":%s,"device_code":%s,"grant_type":"urn:ietf:params:oauth:grant-type:device_code"}"""
                                                     (jsonString clientId) (jsonString grant.DeviceCode)
-                                            let! reply = postJson url request |> Interop.awaitPromise
-                                            match pollOutcome grant.Interval reply.body with
-                                            | PollPending interval ->
-                                                if interval <> grant.Interval then
-                                                    pending <- Map.add target { grant with Interval = interval } pending
-                                                respondJson res 200 (sprintf """{"status":"pending","interval":%d}""" interval)
-                                            | PollGranted granted ->
-                                                pending <- Map.remove target pending
-                                                // Over the grant leg, not the paste leg: this
-                                                // is an authorization this session ran, and the
-                                                // Manager is the only place a refresh token may
-                                                // live (Plan 08).
-                                                match! connections.PutGrant (grantRequest target granted) with
-                                                | Ok () -> respondJson res 200 """{"status":"connected"}"""
-                                                | Error e -> respondText res 502 e
-                                            | PollFailed reason ->
-                                                pending <- Map.remove target pending
-                                                respondText res 400 reason
+                                            match! post (url, request) with
+                                            // A poll that could not ASK is not a flow that has
+                                            // ended. The device code is good for minutes and
+                                            // the human may already have approved it, so a leg
+                                            // that failed after its retries leaves the flow
+                                            // exactly where it was and tells the panel to keep
+                                            // waiting. Folding this into `pollOutcome` — which
+                                            // is what a body-only reply forced — read a
+                                            // `TypeError` as an unrecognised protocol answer
+                                            // and threw the pending code away on one dropped
+                                            // packet.
+                                            | Error _ ->
+                                                respondJson res 200 (sprintf """{"status":"pending","interval":%d}""" grant.Interval)
+                                            | Ok answer ->
+                                                match pollOutcome grant.Interval answer with
+                                                | PollPending interval ->
+                                                    if interval <> grant.Interval then
+                                                        pending <- Map.add target { grant with Interval = interval } pending
+                                                    respondJson res 200 (sprintf """{"status":"pending","interval":%d}""" interval)
+                                                | PollGranted granted ->
+                                                    pending <- Map.remove target pending
+                                                    // Over the grant leg, not the paste leg: this
+                                                    // is an authorization this session ran, and the
+                                                    // Manager is the only place a refresh token may
+                                                    // live (Plan 08).
+                                                    match! connections.PutGrant (grantRequest target granted) with
+                                                    | Ok () -> respondJson res 200 """{"status":"connected"}"""
+                                                    | Error e -> respondText res 502 e
+                                                | PollFailed reason ->
+                                                    pending <- Map.remove target pending
+                                                    respondText res 400 reason
                                     | GitHubAction.Token ->
                                         match body.Token |> Option.map (classifyPasted (configuredClientId ()).IsSome) with
                                         | None -> respondText res 400 "missing token"
