@@ -10,8 +10,21 @@ module Yession.Tests.Cli
 // The old hand-rolled `process.argv` scan could not tell "not given" from "given wrong", so
 // `yession-manager --auht localhost` booted a deny-everything Manager and looked like a hang.
 
+open Fable.Core
+open Fable.Core.JsInterop
 open Fable.Pyxpecto
 open Yession.Host
+
+// Reading this repository's own workflow files, for the retirement scan below. The Cli suite
+// is Node-only (it needs no browser), so `node:fs` is always there when this runs, and the
+// suite's working directory is the repository root.
+let private nodeFs : obj = importAll "node:fs"
+
+[<Emit("$0.readdirSync($1)")>]
+let private readDir (fs: obj) (dir: string) : string array = jsNative
+
+[<Emit("$0.readFileSync($1, 'utf8')")>]
+let private readText (fs: obj) (path: string) : string = jsNative
 
 let private auth = Cli.value "auth" "rule" "how a request's subject is established"
 let private secrets = Cli.value "secrets" "mode" "whether secrets persist"
@@ -176,6 +189,27 @@ let tests =
             let usage = Cli.usage manager
             for r in Retirements.manager do
                 Expect.isTrue (usage.Contains (r.Now + " <")) (sprintf "%s is a declared option" r.Now)
+
+        // The other place a retired name outlives its variable, and the one no pull request
+        // could see: `release.yml` runs on master only, so its stale `YESSION_PORT=0` boot
+        // smoke was green through every PR and failed the release, twice, after the merge.
+        testCase "the detector sees an assignment and lets a mention be" <| fun () ->
+            let retirements = [ { Retirements.Was = "YESSION_PORT"; Retirements.Now = "--port" } ]
+            let assigned = Retirements.assignedIn retirements
+            Expect.equal (assigned "run: YESSION_PORT=0 ./yession-manager" |> List.length) 1 "a shell assignment"
+            Expect.equal (assigned "env:\n  YESSION_PORT: 0" |> List.length) 1 "a yaml one"
+            Expect.equal (assigned "# YESSION_PORT was retired; use --port") [] "prose naming it is not setting it"
+
+        testCase "no workflow file sets a variable the bins no longer read" <| fun () ->
+            let dir = ".github/workflows"
+            let offences =
+                readDir nodeFs dir
+                |> Array.toList
+                |> List.filter (fun name -> name.EndsWith ".yml" || name.EndsWith ".yaml")
+                |> List.collect (fun name ->
+                    Retirements.assignedIn Retirements.manager (readText nodeFs (dir + "/" + name))
+                    |> List.map (fun r -> sprintf "%s sets %s (now %s)" name r.Was r.Now))
+            Expect.equal offences [] "a workflow that sets one of these fails the bin it starts"
 
         testCase "a bin with no options of its own still answers version and help" <| fun () ->
             // `yession-session` and `yession-serial` take everything from the environment.
