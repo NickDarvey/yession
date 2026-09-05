@@ -978,6 +978,14 @@ module Style =
     let messageBody = "pl-8 text-body text-ink"
     let messageBodyStreaming = "pl-8 text-body text-ink-dim"
 
+    /// A detached reply's quote of what it answers — one quiet line above the body, on the
+    /// same `pl-8` reading edge, dimmed so it reads as context rather than as the message.
+    /// The mark is a corner glyph; the quote truncates in one line so a long parent cannot
+    /// push the reply itself down the screen.
+    let replyRef = "pl-8 flex items-baseline gap-1.5 text-small text-ink-faint"
+    let replyRefMark = "shrink-0 text-ink-faint"
+    let replyRefQuote = "truncate min-w-0 italic"
+
     let caret =
         "inline-block w-[7px] h-[15px] bg-blue align-[-2px] ml-0.5 animate-blink motion-reduce:animate-none"
 

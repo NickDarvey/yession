@@ -1501,9 +1501,43 @@ let private tallyTests =
             Expect.equal (TaskCard.ordered lines |> List.map fst) [ "a"; "b"; "c" ] "chronological within the group"
     ]
 
+// The reply ref, rendered — the projection decides whether one is due (Agent.fs pins that);
+// here the rendered page is what settles that a due ref actually reaches the screen quoting
+// its cause, and that an undue one draws nothing. Only a render can see this: the markup of a
+// message with `Replying = None` and one whose ref quote silently failed to resolve read the
+// same everywhere the DATA is checked.
+let private replyRefRenderTests =
+    let conversation (trigger: string) (triggerBody: string) (interleaved: (string * string) list) =
+        let turnId = turn "reply"
+        let agentMsg = message "agent"
+        let mutable n = 0L
+        let stamp e = n <- n + 1L; at n (float n) e
+        [ yield stamp (sent trigger triggerBody)
+          for id, body in interleaved -> stamp (sent id body)
+          yield stamp (AgentTurnStarted { AgentTurnId = turnId; Cause = TurnCause.TriggeredBy (message trigger) })
+          yield stamp (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMsg; Antecedent = None })
+          yield stamp (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMsg; Delta = "on it" })
+          yield stamp (AgentMessageCompleted { AgentTurnId = turnId; MessageId = agentMsg; Body = "on it" }) ]
+
+    testList "The reply ref, rendered" [
+        testCase "a detached agent reply draws a ref that resolves to what it answers" <| fun () ->
+            let html = Support.render (clientOf (conversation "1" "please rebase onto master" [ "2", "and squash the fixups" ]))
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.replyRef (MessageId.value (message "1"))))
+                "the ref points at the message the turn answered"
+            // Resolved, not the past-the-page fallback — the parent's own bubble also carries
+            // its text, so absence of the fallback is what proves the QUOTE resolved.
+            Expect.isFalse (html.Contains Dom.Text.replyRefMissing) "the quote resolved to the real message, not the fallback"
+
+        testCase "an adjacent agent reply draws no ref" <| fun () ->
+            let html = Support.render (clientOf (conversation "1" "please rebase onto master" []))
+            Expect.isFalse (html.Contains Dom.Hooks.replyRef) "a reply under its cause says nothing the eye cannot see"
+    ]
+
 let tests =
     testList "Timeline and the pane (Plan 14)" [
         listTests
+        replyRefRenderTests
         pinTests
         orderTests
         toolTests

@@ -86,7 +86,7 @@ let private triggerItem : ConversationItem =
       Status = Complete
       Kind = ConversationItemKind.Message
       Offset = EventOffset.zero
-      Woke = None }
+      Woke = None; Replying = None }
 
 let private envelope (offset: int64) (event: SessionEvent) : EventEnvelope<SessionEvent> =
     { EventId = EventId.fresh ()
@@ -1056,6 +1056,64 @@ let private attributionTests =
                 "the mark belongs to the turn that carried it"
     ]
 
+// The reply ref: a turn's first message carries the message it answers, but ONLY when that
+// message is not the one it lands directly below. The projection decides — presence of
+// `Replying` is the whole "draw a ref" signal.
+let private replyRefTests =
+    let humanSent (offset: int64) (id: string) =
+        envelope offset (MessageSent { MessageId = MessageId.create id |> expect; QueueId = None; Author = PeerRef ada; Body = "do a thing" })
+    let turnFor (offset: int64) (trigger: string) =
+        envelope offset (AgentTurnStarted { AgentTurnId = turnId; Cause = TurnCause.TriggeredBy (MessageId.create trigger |> expect) })
+    let firstMessage (offset: int64) =
+        envelope offset (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None })
+    let replyingOf (proj: ConversationProjection) =
+        proj.Items
+        |> List.tryFind (fun i -> i.MessageId = agentMessageId)
+        |> Option.map (fun i -> i.Replying)
+
+    testList "The reply ref (a turn's cause, on the surface)" [
+
+        testCase "an ordinary reply, sitting under what it answers, carries no ref" <| fun () ->
+            let proj, _ =
+                ConversationProjection.applyEvents
+                    None
+                    [ humanSent 0L "m1"; turnFor 1L "m1"; firstMessage 2L ]
+                    ConversationProjection.empty
+            Expect.equal (replyingOf proj) (Some None) "the trigger is the item directly above, so nothing to point at"
+
+        testCase "a reply detached from its cause by another message carries the ref" <| fun () ->
+            let proj, _ =
+                ConversationProjection.applyEvents
+                    None
+                    // m1 asks; m2 (someone else, or a queued line) lands after it; the turn
+                    // triggered by m1 now answers below m2, pushed away from what it answers.
+                    [ humanSent 0L "m1"; humanSent 1L "m2"; turnFor 2L "m1"; firstMessage 3L ]
+                    ConversationProjection.empty
+            Expect.equal (replyingOf proj) (Some (Some (MessageId.create "m1" |> expect))) "the ref points at the detached cause"
+
+        testCase "a follower within the turn carries no ref — it answers its antecedent" <| fun () ->
+            let proj, _ =
+                ConversationProjection.applyEvents
+                    None
+                    [ humanSent 0L "m1"; humanSent 1L "m2"; turnFor 2L "m1"; firstMessage 3L
+                      envelope 4L (AgentMessageStarted { AgentTurnId = turnId; MessageId = laterMessageId; Antecedent = Some agentMessageId }) ]
+                    ConversationProjection.empty
+            Expect.equal
+                (proj.Items |> List.tryFind (fun i -> i.MessageId = laterMessageId) |> Option.map (fun i -> i.Replying))
+                (Some None)
+                "only the turn's first message answers the trigger"
+
+        testCase "a woken turn carries no ref — no message caused it" <| fun () ->
+            let proj, _ =
+                ConversationProjection.applyEvents
+                    None
+                    [ humanSent 0L "m1"
+                      envelope 1L (AgentTurnStarted { AgentTurnId = turnId; Cause = TurnCause.Woke CommandFinished })
+                      firstMessage 2L ]
+                    ConversationProjection.empty
+            Expect.equal (replyingOf proj) (Some None) "a wake is not a message to reply to"
+    ]
+
 let private armTests =
     testList "The wake, armed (Plan 20, stage 2)" [
 
@@ -1193,6 +1251,7 @@ let tests =
         vocabularyTests
         prWakeTests
         attributionTests
+        replyRefTests
         armTests
         Tag.needs "Agent E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)
         Tag.needs "Agent live SDK" [ Tag.LiveAgent; Tag.Native ] (fun () -> liveTests)

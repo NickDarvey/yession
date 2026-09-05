@@ -80,7 +80,19 @@ type ConversationItem =
       /// On the ITEM rather than looked up from the turn, because the timeline renders items
       /// and an item does not know its turn. It rides here for the same reason `Offset` does:
       /// the fold knows something the view needs and cannot re-derive.
-      Woke      : WakeReason option }
+      Woke      : WakeReason option
+      /// The message this turn was replying to, when a ref is worth drawing: `Some` on the
+      /// first message of a turn a message triggered, but ONLY when that message is not the
+      /// one this item lands directly below. An adjacent reply already sits under what it
+      /// answers, so a ref there is noise on every ordinary turn — the value is the DETACHED
+      /// case, a reply pushed away from its cause by other messages (a second person, an act
+      /// note, a woken turn's output). `None` on a woken turn (no message caused it), on a
+      /// follower (its cause is its antecedent), and on everything a person said.
+      ///
+      /// Presence is the whole decision — the view draws the ref iff this is `Some`. The
+      /// detached test lives here, not in the view, because "is the trigger the item above"
+      /// is a fact about the fold's order that a cheap test can reach.
+      Replying  : MessageId option }
 
 module ConversationItem =
 
@@ -149,12 +161,17 @@ type ConversationProjection =
       /// time, and `AgentWake.pending` folds on that same fact — it resets at every
       /// `AgentTurnStarted`. So does this, which is also what keeps it from growing: an
       /// ordinary turn clears it, and there is no turn-completed event that could.
-      WokenTurn : (AgentTurnId * WakeReason) option }
+      WokenTurn : (AgentTurnId * WakeReason) option
+      /// The current turn's triggering message, while it is the current one — the mirror of
+      /// `WokenTurn` for the other arm of `TurnCause`. The first message of the turn reads it
+      /// to decide whether to carry a reply ref, and it resets at every `AgentTurnStarted`
+      /// for the same reason `WokenTurn` does.
+      TriggeredTurn : (AgentTurnId * MessageId) option }
 
 module ConversationProjection =
 
     let empty : ConversationProjection =
-        { Items = []; ActiveAgentMessages = Map.empty; WokenTurn = None }
+        { Items = []; ActiveAgentMessages = Map.empty; WokenTurn = None; TriggeredTurn = None }
 
     let private updateItem (messageId: MessageId) (f: ConversationItem -> ConversationItem) (items: ConversationItem list) =
         items |> List.map (fun item -> if item.MessageId = messageId then f item else item)
@@ -178,6 +195,19 @@ module ConversationProjection =
         | Some (woken, reason) when woken = turnId -> Some reason
         | _ -> None
 
+    /// The message the given turn was replying to, IF a ref is worth drawing — matched on
+    /// the turn id like `wokeBy`, then suppressed when the trigger is the item this one lands
+    /// directly below. The detachment is read off `proj.Items` as it stands BEFORE the new
+    /// item is appended, so its last entry is exactly what will render above: adjacent means
+    /// the reply already sits under its cause, and the ref would say what the eye can see.
+    let private replyingTo (turnId: AgentTurnId) (proj: ConversationProjection) : MessageId option =
+        match proj.TriggeredTurn with
+        | Some (triggered, trigger) when triggered = turnId ->
+            match List.tryLast proj.Items with
+            | Some last when last.MessageId = trigger -> None
+            | _ -> Some trigger
+        | _ -> None
+
     /// Fold one event into the projection. The match is total over `SessionEvent`, so
     /// adding a case forces this projection to account for it.
     let private applyEvent (proj: ConversationProjection) (envelope: EventEnvelope<SessionEvent>) : ConversationProjection =
@@ -195,7 +225,7 @@ module ConversationProjection =
                           Status = Complete
                           Kind = ConversationItemKind.Message
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         // Lifecycle; the item appears at `AgentMessageStarted`. What is remembered here is
         // only the turn's REASON for existing, which that item cannot re-derive: by the time
         // it arrives, the event that carried the reason is pages behind it.
@@ -204,7 +234,11 @@ module ConversationProjection =
                 WokenTurn =
                     match a.Cause with
                     | TurnCause.Woke reason -> Some (a.AgentTurnId, reason)
-                    | TurnCause.TriggeredBy _ -> None }
+                    | TurnCause.TriggeredBy _ -> None
+                TriggeredTurn =
+                    match a.Cause with
+                    | TurnCause.TriggeredBy trigger -> Some (a.AgentTurnId, trigger)
+                    | TurnCause.Woke _ -> None }
         | AgentContextBuilt _ -> proj  // lifecycle
         // Environment lifecycle (Step 12) is session state, not conversation content.
         | EnvironmentNeedIdentified _
@@ -260,7 +294,7 @@ module ConversationProjection =
                             ConversationItemKind.ActNote
                                 { Detail = Some (sprintf "on branch %s" r.Branch); Notable = false }
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         | SessionEvent.RepoRemoved r ->
             { proj with
                 Items =
@@ -271,7 +305,7 @@ module ConversationProjection =
                           Status = Complete
                           Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         | SessionEvent.RepoBranchSwitched r ->
             { proj with
                 Items =
@@ -284,7 +318,7 @@ module ConversationProjection =
                           Status = Complete
                           Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         // Named WorkSandboxes (Plan 15, stage 2) fold in for the repo notes' reason and
         // one more: forwarding a credential into a sandbox is the most consequential thing
         // a command here does, and the timeline is where the person whose credential it is
@@ -324,7 +358,7 @@ module ConversationProjection =
                                     | parts -> Some (String.concat ". " parts)
                                   Notable = false }
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         // The other outcome of a declaration, beside the start above. Said in the refusal's
         // own words rather than summarised: the `repo_config` query is showing that same
         // sentence, and two renderings of one refusal are two things free to disagree.
@@ -356,7 +390,7 @@ module ConversationProjection =
                                     | granted -> Some (String.concat "; " granted)
                                   Notable = false }
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         | SessionEvent.RepoCapabilitiesApproved a ->
             { proj with
                 Items =
@@ -367,7 +401,7 @@ module ConversationProjection =
                           Status = Complete
                           Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         | SessionEvent.RepoConfigRefused r ->
             { proj with
                 Items =
@@ -387,7 +421,7 @@ module ConversationProjection =
                             ConversationItemKind.ActNote
                                 { Detail = r.Sandbox |> Option.map (fun _ -> r.Reason); Notable = false }
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         | SessionEvent.WorkSandboxStopped s ->
             { proj with
                 Items =
@@ -398,7 +432,7 @@ module ConversationProjection =
                           Status = Complete
                           Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         // Where new terminals start (Plan 25) folds in for the repo notes' reason: it is a
         // session-shaping act everyone is affected by — the next terminal a PERSON opens
         // lands there too — and the timeline is the only place they would learn it.
@@ -419,7 +453,7 @@ module ConversationProjection =
                           Status = Complete
                           Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         // A refusal reads in the timeline beside the acts that happened, attributed to the
         // person who said no rather than to the agent that asked (Plan 15, stage 3). Same
         // reason `BlockRejected` renders in the terminal: an act that simply vanishes is
@@ -434,7 +468,7 @@ module ConversationProjection =
                           Status = Complete
                           Kind = ConversationItemKind.ActNote { Detail = c.Reason; Notable = false }
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         // The MCP set changing (Plan 17). `ActorRef.System`, because nobody in the session
         // did it, and the DELTA only — the Process compares what it was last told, from
         // its own events, against the newly resolved set, so a boot, a reconnect and a
@@ -449,7 +483,7 @@ module ConversationProjection =
                           Status = Complete
                           Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         | SessionEvent.McpServerUnavailable m ->
             { proj with
                 Items =
@@ -460,7 +494,7 @@ module ConversationProjection =
                           Status = Complete
                           Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         // Watched pull requests fold in for the repo notes' reason: a watch is a
         // session-shaping act, and a transition is exactly what a joining human or the
         // agent's next turn needs to be told — the news arrived through no other door.
@@ -486,7 +520,7 @@ module ConversationProjection =
                                   // place worth coming back to.
                                   Notable = true }
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         | SessionEvent.PrUnwatched p ->
             { proj with
                 Items =
@@ -497,7 +531,7 @@ module ConversationProjection =
                           Status = Complete
                           Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         // Attributed to the WATCHER rather than the envelope's System: the person whose
         // watch noticed is who the news is for, and whose name it should wear.
         | SessionEvent.PrTransitioned p ->
@@ -510,7 +544,7 @@ module ConversationProjection =
                           Status = Complete
                           Kind = ConversationItemKind.ActNote { Detail = None; Notable = true }
                           Offset = envelope.Offset
-                          Woke = None } ] }
+                          Woke = None; Replying = None } ] }
         | AgentMessageStarted a ->
             // A message that follows another is that other one's close: the model has moved
             // on, so what the antecedent streamed is what it said. Only a streaming item
@@ -533,7 +567,10 @@ module ConversationProjection =
                           Offset = envelope.Offset
                           // Why the turn ran is attribution for the TURN, said once where it
                           // begins; a follower's antecedent already wears it.
-                          Woke = (match a.Antecedent with None -> wokeBy a.AgentTurnId proj | Some _ -> None) } ]
+                          Woke = (match a.Antecedent with None -> wokeBy a.AgentTurnId proj | Some _ -> None)
+                          // The reply ref sits on the turn's first message for the same
+                          // reason — a follower answers its antecedent, not the trigger.
+                          Replying = (match a.Antecedent with None -> replyingTo a.AgentTurnId proj | Some _ -> None) } ]
                 ActiveAgentMessages = Map.add a.AgentTurnId a.MessageId proj.ActiveAgentMessages }
         | AgentMessageDelta a ->
             { proj with
@@ -583,7 +620,10 @@ module ConversationProjection =
                   Status = Failed
                   Kind = ConversationItemKind.Message
                   Offset = envelope.Offset
-                  Woke = wokeBy a.AgentTurnId proj }
+                  Woke = wokeBy a.AgentTurnId proj
+                  // A turn that failed before saying anything is still a reply to what asked
+                  // for it — the ref rides its account for the same reason `Woke` does.
+                  Replying = replyingTo a.AgentTurnId proj }
             let closed = Map.remove a.AgentTurnId proj.ActiveAgentMessages
             let spoke =
                 Map.tryFind a.AgentTurnId proj.ActiveAgentMessages
