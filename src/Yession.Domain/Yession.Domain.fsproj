@@ -6,8 +6,9 @@
 
   <ItemGroup>
     <Compile Include="Push.fs" />
-    <!-- Depends on nothing but System: retry/backoff as values, used by the client's
-         event-feed transport (and available to any other flaky port). -->
+    <!-- Depends on nothing but System: retry/backoff/deadlines as values and a circuit over
+         a resource, used by the client's event-feed transport (and available to any other
+         flaky port). -->
     <Compile Include="Resilience.fs" />
     <Compile Include="Identity.fs" />
     <Compile Include="Running.fs" />
