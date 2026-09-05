@@ -157,6 +157,8 @@ type private Flaky =
     | Congested
     | HeldFor of TimeSpan
     | Refused
+    /// What a breaker's refusal reports: the moment it will ask again.
+    | Shut of DateTimeOffset
 
 /// An operation that never succeeds. Counts its calls, so a budget can be asserted.
 let private alwaysFailing (calls: int ref) (fault: 'fault) : unit -> Async<Result<string, 'fault>> =
@@ -173,7 +175,7 @@ let private held (delays: ResizeArray<TimeSpan>) (retries: int) : Resilience.Pol
         function
         | Congested -> Resilience.Retry
         | HeldFor window -> Resilience.RetryAfter window
-        | Refused -> Resilience.Fatal
+        | Refused | Shut _ -> Resilience.Fatal
       Sleep = recordingSleep delays
       Observe = ignore }
 
@@ -258,6 +260,144 @@ let private deadlineTests =
                 Expect.equal result (Ok "served") "the attempt that answered is the one that counted"
                 Expect.equal calls.Value 3 "each hang ended its own attempt, and only its own"
                 Expect.equal delays.Count 2 "one wait per timed-out attempt"
+            }
+    ]
+
+// --- Breakers -----------------------------------------------------------------------------
+
+/// A clock the test moves by hand, so an open-then-recover sequence is asserted without
+/// waiting out a reset window.
+let private stoppedClock () =
+    let now = ref (DateTimeOffset (2026, 1, 1, 0, 0, 0, TimeSpan.Zero))
+    now, (fun () -> now.Value)
+
+/// A breaker over `Flaky`, opening after `failures` in a row and reopening a minute later.
+let private circuit (failures: int) (now: unit -> DateTimeOffset) (trips: Flaky -> bool) =
+    Resilience.Breaker.create
+        { Failures = failures
+          Reset = TimeSpan.FromMinutes 1.0
+          Trips = trips
+          Now = now
+          Observe = ignore }
+
+/// An operation that counts its calls and answers however `answer` says.
+let private counting (calls: int ref) (answer: int -> Result<string, Flaky>) =
+    fun (_: unit) ->
+        async {
+            calls.Value <- calls.Value + 1
+            return answer calls.Value
+        }
+
+let private breakerTests =
+    testList "A circuit over a resource" [
+        testCaseAsync "opens on a streak of failures, and a refused call is never made" <|
+            async {
+                let _, now = stoppedClock ()
+                let calls = ref 0
+                let guarded =
+                    counting calls (fun _ -> Error Congested)
+                    |> Resilience.Breaker.guard (circuit 2 now Resilience.Breaker.everyFailure) Shut
+                let! _ = guarded ()
+                let! _ = guarded ()
+                let! _ = guarded ()
+                Expect.equal calls.Value 2 "the third call was turned away at the door, not spent on a resource that is down"
+            }
+
+        testCaseAsync "tells a refused caller when it will be asked again" <|
+            async {
+                let clock, now = stoppedClock ()
+                let guarded =
+                    counting (ref 0) (fun _ -> Error Congested)
+                    |> Resilience.Breaker.guard (circuit 1 now Resilience.Breaker.everyFailure) Shut
+                let! _ = guarded ()
+                let! refused = guarded ()
+                Expect.equal
+                    refused
+                    (Error (Shut (clock.Value.AddMinutes 1.0)))
+                    "a refusal names the moment asking resumes — never a silent nothing"
+            }
+
+        testCaseAsync "is not opened by a fault that says nothing about the resource's health" <|
+            async {
+                let _, now = stoppedClock ()
+                let calls = ref 0
+                // One credential's refusal is not the provider being down; counting it would
+                // let one bad token stop everybody else's calls.
+                let guarded =
+                    counting calls (fun _ -> Error Refused)
+                    |> Resilience.Breaker.guard (circuit 2 now (fun fault -> fault = Congested)) Shut
+                for _ in 1 .. 4 do
+                    let! _ = guarded ()
+                    ()
+                Expect.equal calls.Value 4 "every call was made — the circuit had no evidence to act on"
+            }
+
+        testCaseAsync "lets exactly one attempt through once the window passes" <|
+            async {
+                let clock, now = stoppedClock ()
+                let calls = ref 0
+                let guarded =
+                    counting calls (fun _ -> Error Congested)
+                    |> Resilience.Breaker.guard (circuit 1 now Resilience.Breaker.everyFailure) Shut
+                let! _ = guarded ()
+                let! _ = guarded ()
+                Expect.equal calls.Value 1 "shut while the window stands"
+                clock.Value <- clock.Value.AddMinutes 2.0
+                let! _ = guarded ()
+                Expect.equal calls.Value 2 "and one trial goes through to find out whether the resource is back"
+            }
+
+        testCaseAsync "re-opens on a fresh window when the trial fails too" <|
+            async {
+                let clock, now = stoppedClock ()
+                let calls = ref 0
+                let guarded =
+                    counting calls (fun _ -> Error Congested)
+                    |> Resilience.Breaker.guard (circuit 1 now Resilience.Breaker.everyFailure) Shut
+                let! _ = guarded ()
+                clock.Value <- clock.Value.AddMinutes 2.0
+                let! _ = guarded ()
+                let! refused = guarded ()
+                Expect.equal
+                    refused
+                    (Error (Shut (clock.Value.AddMinutes 1.0)))
+                    "the window is measured from the failed trial, not from the first failure"
+                Expect.equal calls.Value 2 "and nothing else got through"
+            }
+
+        testCaseAsync "closes when the trial answers, and forgets the streak that opened it" <|
+            async {
+                let clock, now = stoppedClock ()
+                let calls = ref 0
+                // Two failures open it, the trial recovers, then one more failure: a single
+                // failure after a recovery starts a new streak rather than continuing the old
+                // one, so it is still short of the two this circuit opens on.
+                let guarded =
+                    counting calls (fun call -> if call = 3 then Ok "served" else Error Congested)
+                    |> Resilience.Breaker.guard (circuit 2 now Resilience.Breaker.everyFailure) Shut
+                let! _ = guarded ()
+                let! _ = guarded ()
+                clock.Value <- clock.Value.AddMinutes 2.0
+                let! _ = guarded ()
+                let! _ = guarded ()
+                let! _ = guarded ()
+                Expect.equal calls.Value 5 "the fifth call was still admitted — the streak went with the recovery"
+            }
+
+        testCaseAsync "counts settled failures rather than attempts, when it wraps a guard" <|
+            async {
+                // Composed as documented — guard inside, breaker outside. An operation that
+                // failed once and succeeded on its retry is a resource that WORKS, and a
+                // breaker fed each attempt would have opened on it.
+                let _, now = stoppedClock ()
+                let calls = ref 0
+                let guarded =
+                    counting calls (fun call -> if call % 2 = 0 then Ok "served" else Error Congested)
+                    |> Resilience.Policy.guard (held (ResizeArray ()) 3)
+                    |> Resilience.Breaker.guard (circuit 1 now Resilience.Breaker.everyFailure) Shut
+                let! _ = guarded ()
+                let! second = guarded ()
+                Expect.equal second (Ok "served") "the second call was admitted: the circuit never saw a failure to open on"
             }
     ]
 
@@ -1224,6 +1364,7 @@ let tests =
         guardTests
         verdictTests
         deadlineTests
+        breakerTests
         classificationTests
         feedFailureTests
         channelTests

@@ -176,3 +176,127 @@ module Resilience =
                             | None -> return Error error
                     }
                 attempt 1
+
+    // --- The circuit ----------------------------------------------------------------------
+
+    /// What a breaker did, for whoever is watching a resource rather than a call. A refusal
+    /// costs nothing and says nothing to the caller beyond its own error, so without this the
+    /// difference between "the provider is down" and "we stopped asking" is invisible.
+    type BreakerEvent =
+        /// The circuit opened: nothing is asked until this moment.
+        | BreakerOpened of until: DateTimeOffset
+        /// A call was turned away at the door, unmade.
+        | BreakerRefused of until: DateTimeOffset
+        /// A trial got through and the resource answered. Asking resumes.
+        | BreakerClosed
+
+    /// When to stop asking a resource that is not answering.
+    ///
+    /// A retry policy answers "is this call worth making again"; this answers the question
+    /// after it — "is this RESOURCE worth calling at all just now". They are not the same
+    /// question, and a policy alone cannot ask the second: every caller retries its own way
+    /// into a provider that is down, so a dead dependency costs its full backoff budget per
+    /// caller, per call, for as long as it stays dead.
+    ///
+    /// `Trips` is why this has a classifier of its own rather than reusing `Verdict`. A fault
+    /// can be worth no retry and still say nothing about the resource's health: one
+    /// credential's 401 is that exactly, and counting it would let one bad token stop
+    /// everybody else's calls. Evidence the RESOURCE is unwell is a narrower thing than a
+    /// fault a retry cannot fix.
+    ///
+    /// The clock is a port for the reason `Sleep` is: an entire open-then-recover sequence is
+    /// then asserted without waiting for one.
+    type BreakerPolicy<'error> =
+        { /// Consecutive tripping failures that open the circuit.
+          Failures : int
+          /// How long it stays open before ONE attempt is let through.
+          Reset    : TimeSpan
+          /// Which failures count as evidence about the resource itself.
+          Trips    : 'error -> bool
+          Now      : unit -> DateTimeOffset
+          Observe  : BreakerEvent -> unit }
+
+    /// One resource's circuit. The state is mutable and deliberately opaque: a breaker IS the
+    /// memory of what just happened to a resource, and a value that forgot it between calls
+    /// would be a breaker that never opens. `Link.supervise` holds its liveness state the
+    /// same way and for the same reason.
+    ///
+    /// Held per RESOURCE, not per operation: github.com being down is one fact, so the device
+    /// flow's begin and its poll share a circuit and the first one to find the provider gone
+    /// spares the other the trip.
+    type Breaker<'error> =
+        private
+            { /// May a call go through now? `Error` carries the moment asking resumes.
+              Admit   : unit -> Result<unit, DateTimeOffset>
+              /// How the call that was admitted went. Every admission is settled exactly
+              /// once, or the trial slot never comes back.
+              Settled : Result<unit, 'error> -> unit }
+
+    module Breaker =
+
+        /// A breaker that counts every settled failure — the right default for a resource
+        /// whose faults are all about reaching it.
+        let everyFailure : 'error -> bool = fun _ -> true
+
+        /// Open a circuit over one resource.
+        let create (policy: BreakerPolicy<'error>) : Breaker<'error> =
+            // Closed with a streak of `failures`; open until `openUntil`; and `trying` for
+            // the one trial admitted once that moment passes. Three facts rather than a
+            // three-case state, because the streak SURVIVES the open window: a trial that
+            // fails re-opens immediately rather than spending the whole budget again.
+            let mutable failures = 0
+            let mutable openUntil : DateTimeOffset option = None
+            let mutable trying = false
+            let admit () =
+                match openUntil with
+                | None -> Ok ()
+                | Some until when policy.Now () < until ->
+                    policy.Observe (BreakerRefused until)
+                    Error until
+                | Some until ->
+                    // The window has passed. Exactly one call goes through to find out
+                    // whether the resource is back; the rest are still turned away, because
+                    // a queue released all at once is the stampede this exists to prevent.
+                    if trying then
+                        policy.Observe (BreakerRefused until)
+                        Error until
+                    else
+                        trying <- true
+                        Ok ()
+            let settled outcome =
+                trying <- false
+                match outcome with
+                | Ok () ->
+                    if openUntil.IsSome then policy.Observe BreakerClosed
+                    failures <- 0
+                    openUntil <- None
+                | Error error when not (policy.Trips error) -> ()
+                | Error _ ->
+                    failures <- failures + 1
+                    if failures >= policy.Failures then
+                        let until = (policy.Now ()).Add policy.Reset
+                        openUntil <- Some until
+                        policy.Observe (BreakerOpened until)
+            { Admit = admit; Settled = settled }
+
+        /// Decorate an operation with a breaker's verdict, same shape in and out. `refused`
+        /// builds the error a turned-away call reports, from the moment asking resumes — so
+        /// what reaches a person is "not until 12:05", never a silent nothing.
+        ///
+        /// Compose it OUTSIDE `guard`, so the circuit counts SETTLED failures — an operation
+        /// that failed once and succeeded on its retry is a resource that works, and a
+        /// breaker fed each attempt would open on it.
+        let guard
+            (breaker: Breaker<'error>)
+            (refused: DateTimeOffset -> 'error)
+            (operation: 'a -> Async<Result<'b, 'error>>)
+            : 'a -> Async<Result<'b, 'error>> =
+            fun input ->
+                async {
+                    match breaker.Admit () with
+                    | Error until -> return Error (refused until)
+                    | Ok () ->
+                        let! outcome = operation input
+                        breaker.Settled (outcome |> Result.map ignore)
+                        return outcome
+                }
