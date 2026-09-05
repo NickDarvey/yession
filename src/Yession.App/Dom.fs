@@ -75,6 +75,9 @@ module Dom =
         let messageAuthor = "data-message-author"
         let messageStatus = "data-message-status"
         let messageBody = "data-message-body"
+        /// The reply ref a detached agent reply wears — valued by the id of the message it
+        /// answers, so a test reads WHICH message it points at, not merely that it drew one.
+        let replyRef = "data-reply-ref"
         /// The landmark rail beside the timeline, and one stroke on it valued by the message
         /// it points at. Beside them, the per-item control that puts a mark there — valued by
         /// the same id, and carrying whether the mark is currently on, so a test can read the
@@ -513,6 +516,12 @@ module Dom =
         let turnWokeStreamEnded = "The agent picked this up on its own: the stream behind a terminal it was working in has ended."
         let turnWokeIntegrationLost = "The agent picked this up on its own: a terminal it had a command running in stopped reporting, so nothing will say how that command ended."
         let turnWokePrChanged = "The agent picked this up on its own: a pull request watched here changed state."
+        /// Stands where the quoted message would be when the ref points past the loaded page —
+        /// the reply is real, its cause simply is not on screen yet.
+        let replyRefMissing = "earlier message"
+        /// The accessible name of the ref, said in full for a reader who does not get the
+        /// quote's visual context.
+        let replyRefLabel = "In reply to"
         // Conversation item status.
         let complete = "complete"
         let streaming = "streaming"

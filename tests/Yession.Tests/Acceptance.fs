@@ -102,16 +102,16 @@ let private representativeModel : ClientModel =
                 Status = Complete
                 Kind = ConversationItemKind.Message
                 Offset = EventOffset.create 1L |> expect
-                Woke = None }
+                Woke = None; Replying = None }
               { MessageId = MessageId.create "msg-agent" |> expect
                 Author = ActorRef.Agent
                 Body = "Sounds go"
                 Status = Streaming
                 Kind = ConversationItemKind.Message
                 Offset = EventOffset.create 4L |> expect
-                Woke = None } ]
+                Woke = None; Replying = None } ]
           ActiveAgentMessages = Map.ofList [ turnId, MessageId.create "msg-agent" |> expect ]
-          WokenTurn = None }
+          WokenTurn = None; TriggeredTurn = None }
       // The terminal half of the chat (Plan 14): the fixture's one block, anchored between
       // the two messages — so the checklist renders a chip in the middle of the conversation
       // rather than only at the end, which is the ordering the merge exists for.
@@ -919,7 +919,7 @@ let private uiChecklistTests =
                   Status = Complete
                   Kind = ConversationItemKind.Message
                   Offset = EventOffset.create 1L |> expect
-                  Woke = None }
+                  Woke = None; Replying = None }
             let model =
                 { representativeModel with
                     Conversation = { representativeModel.Conversation with Items = [ richItem ] } }
@@ -950,7 +950,7 @@ let private uiChecklistTests =
                   Status = Complete
                   Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                   Offset = EventOffset.create 1L |> expect
-                  Woke = None }
+                  Woke = None; Replying = None }
             let model =
                 { representativeModel with
                     Conversation = { representativeModel.Conversation with Items = [ note ] } }
@@ -975,7 +975,7 @@ let private uiChecklistTests =
                   Status = Complete
                   Kind = ConversationItemKind.ActNote { Detail = Some "forwarding github from user:ada"; Notable = false }
                   Offset = EventOffset.create 1L |> expect
-                  Woke = None }
+                  Woke = None; Replying = None }
             let model =
                 { representativeModel with
                     Conversation = { representativeModel.Conversation with Items = [ note ] } }
@@ -1002,7 +1002,7 @@ let private uiChecklistTests =
                   Status = Complete
                   Kind = ConversationItemKind.ActNote { Detail = None; Notable = false }
                   Offset = EventOffset.create 1L |> expect
-                  Woke = None }
+                  Woke = None; Replying = None }
             let model =
                 { representativeModel with
                     Conversation = { representativeModel.Conversation with Items = [ note ] } }
@@ -1024,7 +1024,7 @@ let private uiChecklistTests =
                   Status = Complete
                   Kind = ConversationItemKind.Message
                   Offset = EventOffset.create 1L |> expect
-                  Woke = woke }
+                  Woke = woke; Replying = None }
             let model =
                 { representativeModel with
                     Conversation =
@@ -1173,7 +1173,7 @@ let private uiChecklistTests =
                   Status = Complete
                   Kind = ConversationItemKind.Message
                   Offset = EventOffset.create 1L |> expect
-                  Woke = None }
+                  Woke = None; Replying = None }
             let label = ClientModel.landmarkLabel long
             Expect.isTrue (label.Length <= 72) (sprintf "cut to a hearable length, got %d" label.Length)
             Expect.isTrue (label.EndsWith "…") "and says it was cut"
@@ -1186,7 +1186,7 @@ let private uiChecklistTests =
                   Status = Complete
                   Kind = ConversationItemKind.ActNote { Detail = None; Notable = true }
                   Offset = EventOffset.create 1L |> expect
-                  Woke = None }
+                  Woke = None; Replying = None }
             Expect.equal (ClientModel.landmarkLabel act) "PR octo/hello#12 merged" "nothing to cut"
 
         testCase "the rail draws one stroke per mark, and is not there when nothing is marked" <| fun () ->
@@ -1210,7 +1210,7 @@ let private uiChecklistTests =
                   Status = Complete
                   Kind = kind
                   Offset = EventOffset.create 1L |> expect
-                  Woke = None }
+                  Woke = None; Replying = None }
             let model =
                 { representativeModel with
                     Conversation =
@@ -1888,8 +1888,8 @@ let private semanticsTests =
                             Status = Complete
                             Kind = ConversationItemKind.Message
                             Offset = EventOffset.create 1L |> expect
-                            Woke = None } ]
-                      ActiveAgentMessages = Map.empty; WokenTurn = None }
+                            Woke = None; Replying = None } ]
+                      ActiveAgentMessages = Map.empty; WokenTurn = None; TriggeredTurn = None }
                 Timeline = TimelineProjection.empty }
 
         // A peer id is a token, not a person. The roster, the draft summaries and the lease

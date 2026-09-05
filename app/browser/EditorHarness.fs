@@ -483,7 +483,7 @@ let private shellModel : ClientModel =
               Status = Complete
               Kind = ConversationItemKind.Message
               Offset = offset (int64 (10 + i))
-              Woke = None } ]
+              Woke = None; Replying = None } ]
     { ClientModel.init { PeerId = peerId; DisplayName = "swift-heron" } with
         Connection = Connected
         Session = Some (SessionId.create "harness" |> expect)
@@ -507,16 +507,16 @@ let private shellModel : ClientModel =
                     Status = Complete
                     Kind = ConversationItemKind.Message
                     Offset = offset 1L
-                    Woke = None }
+                    Woke = None; Replying = None }
                   { MessageId = wideId
                     Author = ActorRef.Agent
                     Body = wideBody
                     Status = Complete
                     Kind = ConversationItemKind.Message
                     Offset = offset 3L
-                    Woke = None } ]
+                    Woke = None; Replying = None } ]
                 @ filler
-              ActiveAgentMessages = Map.empty; WokenTurn = None }
+              ActiveAgentMessages = Map.empty; WokenTurn = None; TriggeredTurn = None }
         Timeline =
             { TimelineProjection.empty with
                 TerminalItems =

@@ -1570,10 +1570,30 @@ module View =
                 if item.Woke.IsSome || item.Status <> ConversationItemStatus.Complete then
                     html $"""<div class="{Style.messageMeta}">{wokeInner}{statusInner}</div>"""
                 else Lit.nothing
+            // A ref to what this reply answers, drawn ONLY when the projection judged it worth
+            // drawing (`Replying = Some`, the detached case). A quiet quoted line above the
+            // body — the parent's own words, truncated to one line, plain not rich, so it
+            // reads as the context it is and cannot grow taller than the message it heads.
+            // Non-interactive for now; a follow-on makes it jump to its source.
+            let replyRef =
+                match item.Replying with
+                | None -> Lit.nothing
+                | Some target ->
+                    let quote =
+                        model.Conversation.Items
+                        |> List.tryFind (fun i -> i.MessageId = target)
+                        |> Option.map ConversationItem.said
+                        |> Option.defaultValue Dom.Text.replyRefMissing
+                    html $"""
+                        <div class="{Style.replyRef}" data-reply-ref="{MessageId.value target}" aria-label="{Dom.Text.replyRefLabel}">
+                          <span class="{Style.replyRefMark}" aria-hidden="true">↩</span>
+                          <span class="{Style.replyRefQuote}">{quote}</span>
+                        </div>"""
             html $"""
                 <article class="{Style.messageItem}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
                   {itemActions item}
                   {meta}
+                  {replyRef}
                   <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
                 </article>"""
         // One line: who ran what, and how it went. No output — a tail inline would make the

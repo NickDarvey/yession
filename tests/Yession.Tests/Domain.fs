@@ -579,7 +579,7 @@ let private repoTests =
                   Status = Complete
                   Kind = ConversationItemKind.ActNote { Detail = Some "forwarding github from user:ada"; Notable = false }
                   Offset = EventOffset.create 1L |> expect
-                  Woke = None }
+                  Woke = None; Replying = None }
             Expect.equal
                 (ConversationItem.said note)
                 "started sandbox work (srt) — forwarding github from user:ada"
@@ -595,7 +595,7 @@ let private repoTests =
                   Status = Complete
                   Kind = kind
                   Offset = EventOffset.create 1L |> expect
-                  Woke = None }
+                  Woke = None; Replying = None }
             Expect.equal
                 (ConversationItem.said (item (ConversationItemKind.ActNote { Detail = None; Notable = false })))
                 "removed repo octo/hello"
@@ -666,7 +666,7 @@ let private landmarkTests =
           Status = Complete
           Kind = kind
           Offset = EventOffset.create 1L |> expect
-          Woke = None }
+          Woke = None; Replying = None }
     let notable = item "n" (ConversationItemKind.ActNote { Detail = None; Notable = true })
     let ordinary = item "o" (ConversationItemKind.ActNote { Detail = None; Notable = false })
     let said = item "s" ConversationItemKind.Message
