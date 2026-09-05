@@ -863,7 +863,12 @@ let createWithUi
                     | Broker.RefreshFailed (id, reason) ->
                         audit (SecretStore.Audit.connectionRefreshFailed id reason)
                     | Broker.Rejected (id, reason) -> audit (SecretStore.Audit.connectionRejected id reason)
-                    if Broker.changesReadableStatus observation then broadcastConnections.Value ()))
+                    if Broker.changesReadableStatus observation then broadcastConnections.Value ())
+                // The token leg's resilience, composed at the top like every other: real
+                // waiting for the deadline, real waiting and real jitter for the backoff.
+                (Broker.resilient
+                    Resilience.Policy.sleep
+                    (Broker.grantPolicy Resilience.Policy.sleep Interop.random)))
 
     let connectionsApi : Control.ConnectionsApi option =
         match secretStore, broker with
