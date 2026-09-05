@@ -1000,7 +1000,7 @@ let private leaseCommandTests =
 let private turnStarted (n: string) =
     SessionEvent.AgentTurnStarted
         { AgentTurnId = AgentTurnId.create ("t-" + n) |> expect
-          TriggeredByMessageId = Some (MessageId.create ("m-" + n) |> expect); Woke = None }
+          Cause = TurnCause.TriggeredBy (MessageId.create ("m-" + n) |> expect) }
 
 /// A reader that answers from a per-terminal string, so the digest's own slicing is what
 /// is under test rather than a transcript store's.

@@ -228,19 +228,30 @@ module Codec =
     let private agentTurnStarted : Codec<AgentTurnStarted> =
         { Encode =
             fun (p: AgentTurnStarted) ->
+                // The sum is in-memory; the WIRE stays the two optional keys it always was,
+                // exactly one populated. This reads every log ever written (pre-Plan-20 turns
+                // carry only `triggeredByMessageId`; woken turns carry `woke`) without a
+                // second format to migrate — the collapse is a fact about the domain, not the
+                // bytes.
+                let triggeredBy, woke =
+                    match p.Cause with
+                    | TriggeredBy m -> Some m, None
+                    | Woke r -> None, Some r
                 Encode.object
                     [ "agentTurnId", agentTurnId.Encode p.AgentTurnId
-                      "triggeredByMessageId", Encode.option messageId.Encode p.TriggeredByMessageId
-                      "woke", Encode.option wakeReason.Encode p.Woke ]
+                      "triggeredByMessageId", Encode.option messageId.Encode triggeredBy
+                      "woke", Encode.option wakeReason.Encode woke ]
           Decode =
             Decode.object (fun get ->
+                // `woke` wins where present; otherwise the trigger message is Required, so a
+                // line carrying neither cause fails to decode rather than yielding a turn with
+                // none — which is the whole point of the sum, held at the wire boundary too.
+                let cause =
+                    match get.Optional.Field "woke" (Decode.option wakeReason.Decode) |> Option.flatten with
+                    | Some reason -> Woke reason
+                    | None -> TriggeredBy (get.Required.Field "triggeredByMessageId" messageId.Decode)
                 { AgentTurnStarted.AgentTurnId = get.Required.Field "agentTurnId" agentTurnId.Decode
-                  // Optional on the way in: every turn written before Plan 20 carried a bare
-                  // id, and those pages are read back for the life of their session.
-                  AgentTurnStarted.TriggeredByMessageId =
-                    get.Optional.Field "triggeredByMessageId" (Decode.option messageId.Decode) |> Option.flatten
-                  AgentTurnStarted.Woke =
-                    get.Optional.Field "woke" (Decode.option wakeReason.Decode) |> Option.flatten }) }
+                  AgentTurnStarted.Cause = cause }) }
 
     let private agentContextBuilt : Codec<AgentContextBuilt> =
         { Encode =

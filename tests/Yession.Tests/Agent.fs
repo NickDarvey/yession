@@ -118,7 +118,7 @@ let private turnTests =
                 let! events = eventsOf log
                 Expect.equal
                     events
-                    [ AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (humanMessageId); Woke = None }
+                    [ AgentTurnStarted { AgentTurnId = turnId; Cause = TurnCause.TriggeredBy humanMessageId }
                       AgentContextBuilt { AgentTurnId = turnId; MessageCount = 1 }
                       AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None }
                       AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "Hel" }
@@ -223,7 +223,7 @@ let private turnTests =
 
         testCase "the streamed response projects deterministically (deltas -> completed)" <| fun () ->
             let events =
-                [ envelope 0L (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (humanMessageId); Woke = None })
+                [ envelope 0L (AgentTurnStarted { AgentTurnId = turnId; Cause = TurnCause.TriggeredBy humanMessageId })
                   envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None })
                   envelope 2L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "Hel" })
                   envelope 3L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "lo!" }) ]
@@ -288,7 +288,7 @@ let private turnTests =
             let projection, _ =
                 ConversationProjection.applyEvents
                     None
-                    [ envelope 0L (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = None; Woke = Some CommandFinished })
+                    [ envelope 0L (AgentTurnStarted { AgentTurnId = turnId; Cause = TurnCause.Woke CommandFinished })
                       envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None })
                       envelope 2L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "first" })
                       envelope 3L (AgentMessageStarted { AgentTurnId = turnId; MessageId = laterMessageId; Antecedent = Some agentMessageId }) ]
@@ -389,7 +389,7 @@ let private turnTests =
             let projection, _ =
                 ConversationProjection.applyEvents
                     None
-                    [ envelope 0L (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (humanMessageId); Woke = None })
+                    [ envelope 0L (AgentTurnStarted { AgentTurnId = turnId; Cause = TurnCause.TriggeredBy humanMessageId })
                       envelope 1L (AgentTurnFailed { AgentTurnId = turnId; Reason = "context build failed" }) ]
                     ConversationProjection.empty
             Expect.equal
@@ -620,8 +620,7 @@ let private blockCompleted (n: string) =
 let private turnStarted (n: string) =
     AgentTurnStarted
         { AgentTurnId = AgentTurnId.create n |> expect
-          TriggeredByMessageId = Some (MessageId.create ("m-" + n) |> expect)
-          Woke = None }
+          Cause = TurnCause.TriggeredBy (MessageId.create ("m-" + n) |> expect) }
 
 /// A tool call reporting its outcome — `Some n` when it became block `n`, which is how
 /// `check_pending` delivers a finished command back to the turn that made the call.
@@ -1001,7 +1000,11 @@ let private attributionTests =
     testList "A woken turn, in the chat (Plan 20, stage 2)" [
 
         let started (woke: WakeReason option) =
-            envelope 0L (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = None; Woke = woke })
+            let cause =
+                match woke with
+                | Some reason -> TurnCause.Woke reason
+                | None -> TurnCause.TriggeredBy humanMessageId
+            envelope 0L (AgentTurnStarted { AgentTurnId = turnId; Cause = cause })
         let saidSomething =
             envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId; Antecedent = None })
 
@@ -1065,8 +1068,7 @@ let private armTests =
                 scheduler.Wake ()
                 match! startedTurns log with
                 | [ started ] ->
-                    Expect.equal started.Woke (Some CommandFinished) "and it can say why it exists"
-                    Expect.isNone started.TriggeredByMessageId "nobody spoke"
+                    Expect.equal started.Cause (TurnCause.Woke CommandFinished) "its cause is the wake, and it can say why it exists"
                 | other -> failwithf "expected exactly one turn, got %d" (List.length other)
             }
 
@@ -1098,8 +1100,8 @@ let private armTests =
                                 appendNow log (blockCompleted "b2"))
                 scheduler.Wake ()
                 let! started = startedTurns log
-                match started |> List.map (fun t -> t.Woke) with
-                | [ Some CommandFinished; Some CommandFinished ] -> ()
+                match started |> List.map (fun t -> t.Cause) with
+                | [ TurnCause.Woke CommandFinished; TurnCause.Woke CommandFinished ] -> ()
                 | other -> failwithf "expected the second completion to get its own turn, got %A" other
             }
     ]

@@ -200,7 +200,11 @@ module ConversationProjection =
         // only the turn's REASON for existing, which that item cannot re-derive: by the time
         // it arrives, the event that carried the reason is pages behind it.
         | AgentTurnStarted a ->
-            { proj with WokenTurn = a.Woke |> Option.map (fun reason -> a.AgentTurnId, reason) }
+            { proj with
+                WokenTurn =
+                    match a.Cause with
+                    | TurnCause.Woke reason -> Some (a.AgentTurnId, reason)
+                    | TurnCause.TriggeredBy _ -> None }
         | AgentContextBuilt _ -> proj  // lifecycle
         // Environment lifecycle (Step 12) is session state, not conversation content.
         | EnvironmentNeedIdentified _

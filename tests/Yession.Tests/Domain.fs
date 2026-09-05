@@ -209,19 +209,13 @@ let private frameSerializationTests =
                   PeerLeft { PeerId = peerId }
                   MessageSent { MessageId = messageId; QueueId = None; Author = PeerRef peerId; Body = "hi" }
                   MessageSent { MessageId = messageId; QueueId = Some (QueueId.create "q-1" |> expect); Author = ActorRef.System; Body = "" }
-                  AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (messageId); Woke = None }
+                  AgentTurnStarted { AgentTurnId = turnId; Cause = TurnCause.TriggeredBy messageId }
                   // Every wake reason (Plan 20, stages 2 and 5). A turn nobody asked for is
                   // the one whose attribution a reader most needs, and a reason that failed
                   // to decode would take the whole page with it — so each rides this list.
-                  AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = None; Woke = Some CommandFinished }
-                  AgentTurnStarted
-                    { AgentTurnId = turnId
-                      TriggeredByMessageId = None
-                      Woke = Some (StreamEnded (TerminalId.create "term-1" |> expect)) }
-                  AgentTurnStarted
-                    { AgentTurnId = turnId
-                      TriggeredByMessageId = None
-                      Woke = Some (IntegrationLost (TerminalId.create "term-1" |> expect)) }
+                  AgentTurnStarted { AgentTurnId = turnId; Cause = TurnCause.Woke CommandFinished }
+                  AgentTurnStarted { AgentTurnId = turnId; Cause = TurnCause.Woke (StreamEnded (TerminalId.create "term-1" |> expect)) }
+                  AgentTurnStarted { AgentTurnId = turnId; Cause = TurnCause.Woke (IntegrationLost (TerminalId.create "term-1" |> expect)) }
                   AgentContextBuilt { AgentTurnId = turnId; MessageCount = 3 }
                   AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId; Antecedent = None }
                   AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId; Antecedent = Some (MessageId.create "msg-0" |> expect) }
@@ -359,6 +353,27 @@ let private frameSerializationTests =
                       MessageId = MessageId.create "msg-legacy" |> expect
                       Antecedent = None })
                 "a line without antecedent decodes with Antecedent = None"
+
+        testCase "a turn started before wakes existed decodes to a message cause" <| fun () ->
+            // Pre-Plan-20 turns carried only `triggeredByMessageId` — every one was
+            // message-triggered, wakes not yet a thing. The sum reads that back as
+            // `TriggeredBy`, so the whole history of every session opens.
+            let legacy =
+                """{"type":"agentTurnStarted","payload":{"agentTurnId":"turn-legacy","triggeredByMessageId":"msg-legacy"}}"""
+            let decoded = Codec.fromString Codec.sessionEvent legacy |> expect
+            Expect.equal
+                decoded
+                (AgentTurnStarted
+                    { AgentTurnId = AgentTurnId.create "turn-legacy" |> expect
+                      Cause = TurnCause.TriggeredBy (MessageId.create "msg-legacy" |> expect) })
+                "a bare trigger id is a TriggeredBy cause"
+
+        testCase "a turn line carrying neither cause fails to decode rather than yielding one with none" <| fun () ->
+            // The sum's promise, held at the wire: a turn with no recorded cause is not a
+            // thing this event can be. No real log holds such a line — this pins that a
+            // corrupt one is refused, not silently admitted as an unauditable turn.
+            let malformed = """{"type":"agentTurnStarted","payload":{"agentTurnId":"turn-x"}}"""
+            Expect.isError (Codec.fromString Codec.sessionEvent malformed) "neither cause present is not decodable"
 
         testCase "a sandbox persisted before repos could declare one still decodes" <| fun () ->
             // The scope rides in the SAME string rather than a new field, so a log written

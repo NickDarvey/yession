@@ -1900,7 +1900,7 @@ let private acceptanceTests =
                           Body = "hi" }
                       AgentTurnStarted
                         { AgentTurnId = AgentTurnId.create "t1" |> expect
-                          TriggeredByMessageId = Some (MessageId.create "m1" |> expect); Woke = None }
+                          Cause = TurnCause.TriggeredBy (MessageId.create "m1" |> expect) }
                       EnvironmentNeedIdentified { Reason = "task"; AgentTurnId = None }
                       EnvironmentStarted { EnvironmentId = "env"; ContainerRef = "ctr" }
                       SessionEvent.TerminalOpened
