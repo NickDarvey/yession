@@ -56,6 +56,21 @@ let private failingAt (index: int) : Sandbox =
 let private cannotSpawn : Sandbox =
     sandboxAnswering (fun _ -> async { return Error "no shell here" })
 
+/// A sandbox whose first `unnamed` runs fail while NAMING no check — the shape of a docker
+/// exec that raced the container's own start command — and which passes after that.
+let private settlingAfter (unnamed: int ref) : Sandbox =
+    sandboxAnswering (fun onChunk ->
+        async {
+            let failing = unnamed.Value > 0
+            if failing then
+                unnamed.Value <- unnamed.Value - 1
+                onChunk (Stdout, "daemon says no")
+            return Ok { WriteStdin = ignore
+                        CloseStdin = ignore
+                        Kill = ignore
+                        Exited = async { return SandboxExited (if failing then 1 else 0) } }
+        })
+
 /// A sandbox whose verification program finds nothing wrong — the ordinary case, and the
 /// only one from which an environment ever ends up running.
 let private passesEveryCheck : Sandbox =
@@ -624,6 +639,43 @@ let private sandboxPolicyTests =
                         (sprintf "and not the ones that never ran, said: %s" reason)
             }
 
+        // A container's "started" is not its "ready", so a failure that names no check is
+        // waited out. Driven under a policy whose clock returns at once, so the whole
+        // sequence is asserted without spending the two and a half seconds it ships with.
+        testCaseAsync "a verification that names nothing is asked again until it settles" <|
+            async {
+                let policy = { Support.emptyPolicy with Env = Map.ofList [ "HOME", "/data/home" ] }
+                let unnamed = ref 3
+                let retrying =
+                    Yession.SessionProcess.SessionEnvironment.verificationPolicy (fun _ -> async { return () })
+                match! Yession.SessionProcess.SessionEnvironment.verifyUnder retrying policy (settlingAfter unnamed) with
+                | Ok () -> Expect.equal unnamed.Value 0 "every unsettled answer was asked again, and the fourth stood"
+                | Error reason -> failwithf "expected the sandbox to settle, said: %s" reason
+            }
+
+        testCaseAsync "a verification that names a check is believed the first time" <|
+            async {
+                // The other half: a named failure is the sandbox up and the grant not held,
+                // so asking again spends two and a half seconds to be told the same thing.
+                let policy = { Support.emptyPolicy with Env = Map.ofList [ "HOME", "/data/home" ] }
+                let asked = ref 0
+                let counting =
+                    sandboxAnswering (fun onChunk ->
+                        async {
+                            asked.Value <- asked.Value + 1
+                            onChunk (Stdout, "0")
+                            return Ok { WriteStdin = ignore
+                                        CloseStdin = ignore
+                                        Kill = ignore
+                                        Exited = async { return SandboxExited 1 } }
+                        })
+                let retrying =
+                    Yession.SessionProcess.SessionEnvironment.verificationPolicy (fun _ -> async { return () })
+                match! Yession.SessionProcess.SessionEnvironment.verifyUnder retrying policy counting with
+                | Ok () -> failwith "expected the sandbox to be refused"
+                | Error _ -> Expect.equal asked.Value 1 "asked once, and believed"
+            }
+
         // A sandbox that cannot run a shell cannot run a command, which is the only thing
         // anybody wants one for. Not a false alarm, and it must not read as a policy fault.
         testCaseAsync "a sandbox that cannot run a command at all is refused in those words" <|
@@ -767,6 +819,25 @@ let private sandboxPolicyTests =
                 (Sandboxes.SrtSandbox.startFailure (fun path -> path <> "/usr/bin/rg") namedToolsConfig)
                 Sandboxes.HostCannotConfine
                 "that answer does not change while the process lives, so it is the one kept"
+
+        testCase "the srt start policy waits out what settled nothing and believes what did not" <| fun () ->
+            // The pace and the decision as VALUES: three attempts a quarter-second apart for
+            // a fork this box could not take, and no second ask for a host that has not got
+            // the tools — which will not have got them by the third.
+            let policy = Sandboxes.SrtSandbox.startPolicy Resilience.Policy.sleep
+            let noSuchTool = System.Exception "ripgrep (/usr/bin/rg) not found"
+            Expect.equal
+                (policy.Classify (Sandboxes.NothingSettled, noSuchTool))
+                Resilience.Retry
+                "a fork it could not take is a condition that passes"
+            Expect.equal
+                (policy.Classify (Sandboxes.HostCannotConfine, noSuchTool))
+                Resilience.Fatal
+                "a host without the tools does not acquire them by waiting"
+            Expect.equal
+                [ for n in 1 .. 3 -> policy.Schedule n |> Option.map (fun d -> d.TotalMilliseconds) ]
+                [ Some 250.0; Some 250.0; None ]
+                "two further attempts, a quarter of a second apart, then it is believed"
 
         testCase "the sentence for a probe that did not run contradicts srt instead of repeating it" <| fun () ->
             let said =

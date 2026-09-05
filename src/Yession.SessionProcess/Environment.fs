@@ -66,19 +66,62 @@ module SessionEnvironment =
     /// A sandbox that cannot run `/bin/sh` at all fails here too, and says so. That is
     /// not a false alarm — a sandbox that cannot run a shell cannot run a command, which
     /// is the only thing anybody wants one for.
-    let verify (policy: SandboxPolicy) (sandbox: Sandbox) : Async<Result<unit, string>> =
+    /// Why a verification produced no verdict this session can act on. `Named` is a check
+    /// the sandbox answered for and failed; `Unnamed` is everything else, which is the case
+    /// the retry exists for.
+    type VerifyFault =
+        | Named of reason: string
+        | Unnamed of reason: string
+
+    module VerifyFault =
+
+        let reason (fault: VerifyFault) : string =
+            match fault with
+            | Named reason | Unnamed reason -> reason
+
+        /// A container's "started" is not its "ready": its own start command may still be
+        /// running when the first exec lands, and a docker exec that races it fails with
+        /// daemon-level garbage rather than a check's index (measured: the same sandbox start
+        /// won or lost this race per coin flip while its cmd was still materialising /etc).
+        /// So a failure that NAMES a check is final — the sandbox is up and the grant is not
+        /// held — and a failure that names nothing is worth asking again.
+        let verdict (fault: VerifyFault) : Resilience.Verdict =
+            match fault with
+            | Named _ -> Resilience.Fatal
+            | Unnamed _ -> Resilience.Retry
+
+    /// The shipped policy for a verification: five further attempts, half a second apart.
+    ///
+    /// Constant rather than backed off, and that is the point: what is being waited out is a
+    /// container finishing its own start, which takes about as long as it takes whether this
+    /// is the first ask or the fifth. Unjittered for the same reason there is nobody else to
+    /// collide with — one session verifies one sandbox.
+    let verificationPolicy (sleep: TimeSpan -> Async<unit>) : Resilience.Policy<VerifyFault> =
+        { Schedule = Resilience.Schedule.constant (TimeSpan.FromMilliseconds 500.0) 5
+          Classify = VerifyFault.verdict
+          Sleep = sleep
+          Observe = ignore }
+
+    /// Ask the sandbox to grade itself against the policy it was built from, under `retrying`.
+    ///
+    /// The policy the sandbox was BUILT from is what gets checked, which is why this
+    /// takes the prepared policy rather than asking the sandbox what it thinks it holds:
+    /// a backend that quietly dropped something would otherwise be asked to grade its own
+    /// work.
+    ///
+    /// A sandbox that cannot run `/bin/sh` at all fails here too, and says so. That is
+    /// not a false alarm — a sandbox that cannot run a shell cannot run a command, which
+    /// is the only thing anybody wants one for.
+    let verifyUnder
+        (retrying: Resilience.Policy<VerifyFault>)
+        (policy: SandboxPolicy)
+        (sandbox: Sandbox)
+        : Async<Result<unit, string>> =
         async {
             match SandboxVerification.plan policy with
             | [] -> return Ok ()
             | checks ->
-                // A container's "started" is not its "ready": its own start command may
-                // still be running when the first exec lands, and a docker exec that
-                // races it fails with daemon-level garbage rather than a check's index
-                // (measured: the same sandbox start won or lost this race per coin flip
-                // while its cmd was still materialising /etc). So a failure that NAMES a
-                // check is final — the sandbox is up and the grant is not held — and a
-                // failure that names nothing is retried briefly before it is believed.
-                let attempt () =
+                let attempt (_: unit) =
                     async {
                         let said = System.Text.StringBuilder ()
                         let exec =
@@ -88,27 +131,28 @@ module SessionEnvironment =
                               WorkingDirectory = None }
                         match! sandbox.Spawn exec (fun (_, chunk) -> said.Append chunk |> ignore) with
                         | Error reason ->
-                            return Error (true, sprintf "this sandbox cannot run a command at all: %s" reason)
+                            return Error (Named (sprintf "this sandbox cannot run a command at all: %s" reason))
                         | Ok handle ->
                             match! handle.Exited with
                             | SandboxExited 0 -> return Ok ()
                             | SandboxExited _ ->
                                 let output = said.ToString ()
-                                return Error (SandboxVerification.named checks output, SandboxVerification.explain checks output)
+                                let explained = SandboxVerification.explain checks output
+                                return
+                                    Error (
+                                        if SandboxVerification.named checks output then Named explained
+                                        else Unnamed explained)
                             | SandboxRunFailed reason ->
-                                return Error (true, sprintf "this sandbox cannot run a command at all: %s" reason)
+                                return Error (Named (sprintf "this sandbox cannot run a command at all: %s" reason))
                     }
-                let rec go (left: int) =
-                    async {
-                        match! attempt () with
-                        | Ok () -> return Ok ()
-                        | Error (final, reason) when final || left <= 1 -> return Error reason
-                        | Error _ ->
-                            do! Async.Sleep 500
-                            return! go (left - 1)
-                    }
-                return! go 6
+                match! Resilience.Policy.guard retrying attempt () with
+                | Ok () -> return Ok ()
+                | Error fault -> return Error (VerifyFault.reason fault)
         }
+
+    /// The verification as it ships: real waiting.
+    let verify (policy: SandboxPolicy) (sandbox: Sandbox) : Async<Result<unit, string>> =
+        verifyUnder (verificationPolicy Resilience.Policy.sleep) policy sandbox
 
     let create
         (log: EventLog<SessionEvent>)

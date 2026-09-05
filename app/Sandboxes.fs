@@ -10,6 +10,8 @@ module Yession.Host.Sandboxes
 // LocalProcessBackend) is exactly how `ANTHROPIC_API_KEY` leaked into every
 // agent-issued command.
 
+open System
+
 open Fable.Core
 open Fable.Core.JsInterop
 open Yession.Domain
@@ -1708,6 +1710,27 @@ module SrtSandbox =
     let private startAttempts = 3
     let private startBackoffMs = 250
 
+    /// A start that failed, as the retry policy reads it: what this host's own tools say the
+    /// failure MEANS, and the exception itself — kept because a host that cannot confine
+    /// re-raises the provider's own error rather than a sentence written here.
+    type StartFault = StartFailure * exn
+
+    /// The shipped pace for a start that settled nothing: two further attempts, a quarter of
+    /// a second apart. Constant and unjittered, because what is being waited out is a fork
+    /// this box could not take just then — no provider to collide with, and no reason for the
+    /// second wait to be longer than the first.
+    let startPolicy (sleep: TimeSpan -> Async<unit>) : Resilience.Policy<StartFault> =
+        { Schedule = Resilience.Schedule.constant (TimeSpan.FromMilliseconds (float startBackoffMs)) (startAttempts - 1)
+          // A host that cannot confine says so on the first attempt and says it again on the
+          // third: the tools it needs are not going to appear while it waits.
+          Classify =
+            fun (failure, _) ->
+                match failure with
+                | HostCannotConfine -> Resilience.Fatal
+                | NothingSettled -> Resilience.Retry
+          Sleep = sleep
+          Observe = ignore }
+
     /// What a start that asked and never got an answer says. srt's own sentence — `ripgrep
     /// (/nix/store/…-ripgrep-15.2.0/bin/rg) not found` — sends whoever reads it to look for
     /// a tool that is right there, so it is quoted rather than passed on, next to the thing
@@ -1779,7 +1802,7 @@ module SrtSandbox =
                         let! srt = Interop.awaitPromise (importSrt ())
                         if not (supportedPlatform srt) then
                             return failwith "this platform has no srt sandbox"
-                        let rec attempt (left: int) =
+                        let attempt (_: unit) =
                             async {
                                 try
                                     // Always CONFINED, whichever sandbox got here first: srt
@@ -1788,16 +1811,19 @@ module SrtSandbox =
                                     // hand its exemption to the session. The exemption rides
                                     // `customConfig` per spawn, which wins outright over this.
                                     do! Interop.awaitPromise (initialize srt (toJs { config with FilesystemDisabled = false }))
-                                    return srt
+                                    return Ok srt
                                 with ex ->
-                                    match startFailure Fs.executable config with
-                                    | HostCannotConfine -> return raise ex
-                                    | NothingSettled when left > 1 ->
-                                        do! Async.Sleep startBackoffMs
-                                        return! attempt (left - 1)
-                                    | NothingSettled -> return failwith (probeDidNotRun config startAttempts ex.Message)
+                                    return Error (startFailure Fs.executable config, ex)
                             }
-                        return! attempt startAttempts
+                        // The schedule decides how many times and how long apart; what a
+                        // settled failure MEANS is still this module's own answer.
+                        match! Resilience.Policy.guard (startPolicy Resilience.Policy.sleep) attempt () with
+                        | Ok srt -> return srt
+                        // The provider's own error, unwrapped: a host missing a tool is told
+                        // which one by srt, and a sentence written here would only paraphrase.
+                        | Error (HostCannotConfine, ex) -> return raise ex
+                        | Error (NothingSettled, ex) ->
+                            return failwith (probeDidNotRun config startAttempts ex.Message)
                     })
             starting <- Some promise
             // The forgetting rides the PROMISE rather than a caller: attached before anyone
