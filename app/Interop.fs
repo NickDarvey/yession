@@ -150,6 +150,12 @@ let headerOf (req: IncomingMessage) (name: string) : string option = jsNative
 [<Emit("crypto.randomUUID()")>]
 let randomSecret () : string = jsNative
 
+/// Uniform `[0, 1)` — what a jittered retry schedule spreads its delays with. Not
+/// cryptographic and not meant to be: the only thing it decides is which millisecond inside
+/// a backoff window a retry lands on.
+[<Emit("Math.random()")>]
+let random () : float = jsNative
+
 /// A repeating timer, for the beats a long-lived process keeps (the MCP poll, the activity
 /// report). Returns the handle `clearInterval` wants.
 [<Emit("setInterval($1, $0)")>]

@@ -177,6 +177,47 @@ module Resilience =
                     }
                 attempt 1
 
+    // --- What an HTTP answer says about trying again -------------------------------------
+
+    /// One classification of an HTTP-shaped outcome, because it is one question and this
+    /// repository was answering it four times: the event feed's `isTransient`, the broker's
+    /// `isFinalRefusal`, the pull-request poller's `failureOf`, and a boolean pair inside
+    /// sandbox verification. Four answers to "is this status worth another go" drift, and the
+    /// drift is invisible — each one looks right beside the port it was written for.
+    ///
+    /// A resource still owns what is peculiar to IT (`invalid_grant` is a dead authorization
+    /// whatever its status; a 404 on a pull request is not a hiccup), by composing over this
+    /// rather than by answering it again.
+    module Http =
+
+        /// What an attempt came back as. `Unreached` is the case a status cannot express and
+        /// the one most often flattened away: DNS, a refused socket, a connection dropped
+        /// mid-body — nothing answered, which is the most retryable thing that can happen and
+        /// reads as a fatal zero when it is folded into a status code.
+        type Outcome =
+            | Unreached
+            | Answered of status: int * retryAfter: TimeSpan option
+
+        /// The verdict an HTTP outcome earns on its own.
+        ///
+        /// A window the provider named is honoured wherever the status is one providers name
+        /// one WITH — 429 and 503 by the RFC, 403 because that is how GitHub says "too many"
+        /// — and ignored elsewhere, because a `retry-after` beside a 401 is a header on a
+        /// decision, not a promise to reconsider it.
+        ///
+        /// Anything under 400 is `Fatal` for want of a fifth case rather than as a judgement:
+        /// a classifier is asked about FAULTS, and an answer that already arrived is not made
+        /// better by asking again.
+        let verdict (outcome: Outcome) : Verdict =
+            match outcome with
+            | Unreached -> Retry
+            | Answered (status, Some window) when status = 429 || status = 503 || status = 403 ->
+                RetryAfter window
+            // 5xx is the other end in trouble; 408 and 429 are it asking to be left alone
+            // briefly. Every other status is a decision.
+            | Answered (status, _) when status >= 500 || status = 408 || status = 429 -> Retry
+            | Answered _ -> Fatal
+
     // --- The circuit ----------------------------------------------------------------------
 
     /// What a breaker did, for whoever is watching a resource rather than a call. A refusal

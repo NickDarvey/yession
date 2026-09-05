@@ -384,6 +384,31 @@ let private githubTests =
             Expect.equal (GitHubConnection.classifyPasted false "ghu_apptoken") (Ok "ghu_apptoken") "app user token"
             Expect.equal (GitHubConnection.classifyPasted false "gho_devicetoken") (Ok "gho_devicetoken") "oauth device token"
 
+        // The panel used to print `String(e)` for both of these, which fits "your phone lost
+        // the network" and "github refused the client id" equally well and cures neither.
+        testCase "a fault names which leg failed" <| fun () ->
+            Expect.stringContains
+                (GitHubConnection.GitHubFault.describe (GitHubConnection.GitHubUnreachable "ECONNREFUSED"))
+                "could not reach github.com"
+                "this session's leg out"
+            Expect.stringContains
+                (GitHubConnection.GitHubFault.describe (GitHubConnection.GitHubRefused (422, "bad verification code")))
+                "github.com answered 422"
+                "github's own answer, with its status"
+
+        testCase "reaching github is worth another go; being refused by it is not" <| fun () ->
+            let verdict = GitHubConnection.GitHubFault.verdict
+            Expect.equal (verdict (GitHubConnection.GitHubUnreachable "socket hang up")) Resilience.Retry "nothing answered"
+            Expect.equal (verdict GitHubConnection.GitHubTimedOut) Resilience.Retry "nothing answered yet"
+            Expect.equal (verdict (GitHubConnection.GitHubRefused (503, ""))) Resilience.Retry "github in trouble"
+            Expect.equal (verdict (GitHubConnection.GitHubRefused (401, ""))) Resilience.Fatal "a decision"
+
+        // The panel's half of the same distinction: which failed poll ends a sign-in.
+        testCase "only the session's own refusal ends a sign-in flow" <| fun () ->
+            Expect.isTrue (Yession.App.GitHubFlow.ended 400) "no flow in progress, expired, denied — start again"
+            Expect.isFalse (Yession.App.GitHubFlow.ended 502) "a bad gateway is a bad moment, and the code is still good"
+            Expect.isFalse (Yession.App.GitHubFlow.ended 0) "and a fetch that never answered is not an answer"
+
         testCase "every kind rides GITHUB_TOKEN" <| fun () ->
             Expect.equal (GitHubConnection.envVarFor OAuthConnection "t") ("GITHUB_TOKEN", "t") "oauth"
             Expect.equal (GitHubConnection.envVarFor StaticConnection "t") ("GITHUB_TOKEN", "t") "static"
@@ -1569,9 +1594,16 @@ let private recordingConnections () : RecordingConnections =
 let private stored (kind: ConnectionKind) (health: ConnectionHealth) (id: SecretId) : ConnectionStatus =
     { Id = id; Kind = kind; Health = health; UpdatedAt = DateTimeOffset.Parse "2026-08-21T00:00:00Z" }
 
-let private startGitHubRoutes (connections: ControlClient.SessionConnections) (statusOf: SecretId -> ConnectionStatus option) =
+/// The routes over a given leg to github.com. Unguarded by default — these cases are about
+/// what the routes DO with an answer, and a policy in front of them would only add real
+/// seconds; the policy's own decisions are pinned in the cheap tier.
+let private startGitHubRoutesOver
+    (post: GitHubConnection.GitHubPost)
+    (connections: ControlClient.SessionConnections)
+    (statusOf: SecretId -> ConnectionStatus option)
+    =
     async {
-        let route = GitHubConnection.routes sessionA (stubAuth ()) connections statusOf ""
+        let route = GitHubConnection.routes sessionA (stubAuth ()) connections statusOf post ""
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
             if not (route req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
@@ -1581,6 +1613,9 @@ let private startGitHubRoutes (connections: ControlClient.SessionConnections) (s
             Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
         return sprintf "http://127.0.0.1:%d" (Interop.serverPort listening)
     }
+
+let private startGitHubRoutes (connections: ControlClient.SessionConnections) (statusOf: SecretId -> ConnectionStatus option) =
+    startGitHubRoutesOver GitHubConnection.posting connections statusOf
 
 /// Point the module at the stub for the duration of one test, and put the environment back
 /// afterwards — these are process-wide and the suite runs beside others.
@@ -1719,6 +1754,59 @@ let private githubRouteTests =
                         let! replay = postJsonWithCookie (url + "/github/poll") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
                         Expect.equal replay.status 400 "single-use"
                         Expect.equal recorder.Grants.Count 1 "and stored nothing twice"
+                    })
+            }
+
+        testCaseAsync "a poll that could not reach github keeps the flow, and the code, alive" <|
+            async {
+                // The bug this exists for: one dropped packet mid-approval used to end the
+                // sign-in. The leg's failure was folded into the token endpoint's BODY, so a
+                // `TypeError` decoded as an unrecognised protocol answer, the pending device
+                // code was thrown away, and the panel showed an error over a code the human
+                // may already have approved on github.com.
+                let! stub = startStubGitHub ()
+                let recorder = recordingConnections ()
+                let mutable dropNext = true
+                let flaky : GitHubConnection.GitHubPost =
+                    fun (url, body) ->
+                        async {
+                            if dropNext && url = stub.TokenUrl then
+                                dropNext <- false
+                                return Error (GitHubConnection.GitHubUnreachable "socket hang up")
+                            else return! GitHubConnection.posting (url, body)
+                        }
+                let! url = startGitHubRoutesOver flaky recorder.Client (fun _ -> None)
+                do! withStubGitHub stub (Some "Iv1.test") (fun () ->
+                    async {
+                        let! _ = postJsonWithCookie (url + "/github/begin") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        stub.SetTokenReply """{"access_token":"ghu_granted","token_type":"bearer"}"""
+
+                        let! dropped = postJsonWithCookie (url + "/github/poll") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        Expect.equal dropped.status 200 "the panel is told to keep waiting"
+                        Expect.isTrue (dropped.body.Contains "\"status\":\"pending\"") "pending, not failed"
+                        Expect.equal stub.TokenRequests.Count 0 "and github was never asked"
+
+                        // The very next poll finds the flow exactly where it was — same device
+                        // code, same scope — and finishes it.
+                        let! recovered = postJsonWithCookie (url + "/github/poll") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        Expect.isTrue (recovered.body.Contains "\"status\":\"connected\"") "the sign-in survived the blip"
+                        Expect.isTrue ((stub.TokenRequests.[0]).Contains deviceCode) "redeeming the code it kept"
+                        Expect.equal recorder.Grants.Count 1 "one grant, from a flow nobody had to start again"
+                    })
+            }
+
+        testCaseAsync "a github that refuses the begin says so in github's own words, and names the leg" <|
+            async {
+                let! stub = startStubGitHub ()
+                let recorder = recordingConnections ()
+                let unreachable : GitHubConnection.GitHubPost =
+                    fun _ -> async { return Error (GitHubConnection.GitHubUnreachable "getaddrinfo ENOTFOUND github.com") }
+                let! url = startGitHubRoutesOver unreachable recorder.Client (fun _ -> None)
+                do! withStubGitHub stub (Some "Iv1.test") (fun () ->
+                    async {
+                        let! began = postJsonWithCookie (url + "/github/begin") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        Expect.equal began.status 502 "the session could not do it"
+                        Expect.stringContains began.body "could not reach github.com" "and says which leg failed"
                     })
             }
 

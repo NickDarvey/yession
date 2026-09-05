@@ -221,11 +221,11 @@ module Client =
         /// is congestion the policy's own backoff answers.
         let verdict : FeedFault -> Resilience.Verdict =
             function
-            | FeedUnreachable _ -> Resilience.Retry
-            // 5xx is a Session Process in trouble; 408/429 are it asking to be left alone
-            // briefly. Every other status is a decision, not a hiccup.
-            | FeedRefused status ->
-                if status >= 500 || status = 408 || status = 429 then Resilience.Retry else Resilience.Fatal
+            | FeedUnreachable _ -> Resilience.Http.verdict Resilience.Http.Unreached
+            // No window is ever passed: this feed's provider is the session's own process,
+            // which names none — a 429 from it is congestion the policy's backoff answers.
+            | FeedRefused status -> Resilience.Http.verdict (Resilience.Http.Answered (status, None))
+            // Not an HTTP fault at all: the answer arrived and does not decode.
             | FeedCorrupt _ -> Resilience.Fatal
 
         /// A short reason, for the degraded feed's line in the UI.

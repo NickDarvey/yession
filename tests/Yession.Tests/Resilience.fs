@@ -199,6 +199,35 @@ let private verdictTests =
             }
     ]
 
+// --- One classification of an HTTP answer --------------------------------------------------
+
+let private httpTests =
+    testList "What an HTTP answer says about trying again" [
+        testCase "nothing answered at all is the most retryable thing that can happen" <| fun () ->
+            // The case a status cannot express, and the one every port here used to flatten
+            // into a zero — which then reads as a decision rather than a dropped packet.
+            Expect.equal (Resilience.Http.verdict Resilience.Http.Unreached) Resilience.Retry "no answer is not a no"
+
+        testCase "a status says whether asking again can help" <| fun () ->
+            let answered status = Resilience.Http.verdict (Resilience.Http.Answered (status, None))
+            Expect.equal (answered 500) Resilience.Retry "the other end is in trouble"
+            Expect.equal (answered 503) Resilience.Retry "and says so"
+            Expect.equal (answered 408) Resilience.Retry "it asked for a moment"
+            Expect.equal (answered 429) Resilience.Retry "too many, with no window named"
+            Expect.equal (answered 401) Resilience.Fatal "a credential is not fixed by waiting"
+            Expect.equal (answered 404) Resilience.Fatal "nor is a thing that is not there"
+
+        testCase "a window the provider named beats any backoff invented here" <| fun () ->
+            let window = TimeSpan.FromSeconds 90.0
+            let named status = Resilience.Http.verdict (Resilience.Http.Answered (status, Some window))
+            Expect.equal (named 429) (Resilience.RetryAfter window) "the RFC's status for it"
+            Expect.equal (named 503) (Resilience.RetryAfter window) "and the other one"
+            Expect.equal (named 403) (Resilience.RetryAfter window) "which is how github says too many"
+            // A `retry-after` beside a decision is a header on a refusal, not a promise to
+            // reconsider it — honouring one there would retry an unauthorized call on a timer.
+            Expect.equal (named 401) Resilience.Fatal "a window does not resurrect a decision"
+    ]
+
 // --- Deadlines ----------------------------------------------------------------------------
 
 /// A computation that never settles — the hang a deadline exists for. Used as the operation
@@ -1363,6 +1392,7 @@ let tests =
         scheduleTests
         guardTests
         verdictTests
+        httpTests
         deadlineTests
         breakerTests
         classificationTests

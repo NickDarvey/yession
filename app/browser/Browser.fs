@@ -886,10 +886,13 @@ let private viewOf (kind: string option) (signInRequired: string option) : Conne
 let private fetchClaudeStatus () =
     fetchClaudeStatusAt (SessionRoute.relative ClaudeStatus)
 
+/// `status` rides beside `ok` because a panel that only knows THAT a post failed cannot tell
+/// a refusal from a session it could not reach, and those end a sign-in flow differently
+/// (`GitHubFlow.ended`). `0` is a fetch that never answered.
 [<Emit("""fetch($0, { method: 'POST', headers: { 'content-type': 'application/json' }, body: $1 })
-  .then(async r => ({ ok: r.ok, body: await r.text() }))
-  .catch(e => ({ ok: false, body: String(e) }))""")>]
-let private postClaude (url: string) (body: string) : JS.Promise<{| ok: bool; body: string |}> = jsNative
+  .then(async r => ({ ok: r.ok, status: r.status, body: await r.text() }))
+  .catch(e => ({ ok: false, status: 0, body: String((e && e.message) || e) }))""")>]
+let private postClaude (url: string) (body: string) : JS.Promise<{| ok: bool; status: int; body: string |}> = jsNative
 
 [<Emit("JSON.stringify({ scope: $0, code: $1 || undefined, token: $2 || undefined })")>]
 let private claudeBody (scope: string) (code: string) (token: string) : string = jsNative
@@ -1404,7 +1407,14 @@ let private start () =
                                 (SessionRoute.relative (GitHub GitHubAction.Poll))
                                 (githubBody scope "")
                             |> Async.AwaitPromise
-                        if not reply.ok then dispatchRef (GitHubFlowMsg (GitHubError reply.body))
+                        if not reply.ok then
+                            // A poll that failed is not necessarily a flow that ended. Only the
+                            // session's own 4xx says this one is over; a 5xx or a fetch that
+                            // never answered is a bad moment, and the code on screen — which the
+                            // human may already have approved — is still good.
+                            if GitHubFlow.ended reply.status then
+                                dispatchRef (GitHubFlowMsg (GitHubError reply.body))
+                            else pollGitHubWhileAwaiting ()
                         else
                             let outcome = parseDevicePoll reply.body
                             match outcome.status with
