@@ -51,8 +51,9 @@ module SignatureSpec =
     let webSub : SignatureSpec = { Header = "x-hub-signature-256"; Encoding = "hex"; Prefix = "sha256=" }
 
     /// `header:encoding:prefix`, e.g. `x-shopify-hmac-sha256:base64:`. Split on the first
-    /// two colons only, so a prefix may contain anything but a colon.
-    let parse (raw: string) : Result<SignatureSpec, string> =
+    /// two colons only, so a prefix may contain anything at all — `sha256=` included, which
+    /// is the default's own.
+    let decode (raw: string) : Result<SignatureSpec, string> =
         match raw.Trim () with
         | "" -> Ok webSub
         | trimmed ->
@@ -70,50 +71,112 @@ module SignatureSpec =
 
 // --- what an operator declared --------------------------------------------------------
 
-/// One endpoint as configured: a name, and which rotation of its secret is current.
+    /// Back to the text that decodes to it. The trailing colon appears only when there is a
+    /// prefix to put after it, so the empty-prefix form is `header:encoding` — which is one
+    /// of the two spellings `decode` accepts for it, and the one worth writing.
+    let encode (spec: SignatureSpec) : string =
+        if spec.Prefix = "" then sprintf "%s:%s" spec.Header spec.Encoding
+        else sprintf "%s:%s:%s" spec.Header spec.Encoding spec.Prefix
+
+/// One endpoint as configured: a name, which rotation of its secret is current, and how a
+/// delivery to it is signed.
 type EndpointSpec = { Name : string; Rotation : int; Signature : SignatureSpec }
 
-/// One endpoint as served: its accepted secrets, newest first.
+/// The grammar of one `--webhook`, both ways.
+///
+/// A CODEC rather than a parser, and the encode side is not symmetry for its own sake: it is
+/// what the manager page renders, so the section that shows an operator their generated
+/// secret can also show the exact option that produced the endpoint — the one thing needed to
+/// rotate it, and otherwise invisible, since a rotation counter appears nowhere else.
+///
+/// It also pins the grammar in a way no parser test can. `decode (encode spec) = spec` holds
+/// for every spec, so a decoder that silently drops a field, or an encoder that cannot
+/// express one the decoder accepts, is red. The other direction deliberately does NOT hold:
+/// `encode (decode text)` canonicalises — a defaulted signature disappears, `@0` disappears,
+/// an empty prefix loses its trailing colon — which is what makes the rendered form the one
+/// worth copying rather than a transcript of what somebody typed.
+module EndpointSpec =
+
+    [<Literal>]
+    let private SignatureSeparator = '='
+
+    [<Literal>]
+    let private RotationSeparator = '@'
+
+    /// `name[@rotation][=header:encoding[:prefix]]`, e.g. `github`, `github@1`,
+    /// `shopify@2=x-shopify-hmac-sha256:base64:`.
+    ///
+    /// Three separators, each unambiguous by construction: a NAME is letters, digits, `-`
+    /// and `_` (below), so neither `@` nor `=` can appear in one; a rotation is digits; and
+    /// the signature is split on its first two colons only, so a prefix may hold anything —
+    /// including the `=` in the default's own `sha256=`, which is why the split here is on
+    /// the FIRST `=` and not the last.
+    let decode (raw: string) : Result<EndpointSpec, string> =
+        let trimmed = raw.Trim ()
+        let head, signature =
+            match trimmed.Split ([| SignatureSeparator |], 2) with
+            | [| h; sign |] -> h.Trim (), sign
+            | _ -> trimmed, ""
+        let name, rotation =
+            match head.Split ([| RotationSeparator |], 2) with
+            | [| n; r |] ->
+                n.Trim (),
+                (match System.Int32.TryParse (r.Trim ()) with
+                 | true, value when value >= 0 -> Ok value
+                 | _ -> Error (sprintf "endpoint %s has a rotation that is not a whole number" (n.Trim ())))
+            | _ -> head, Ok 0
+        if name = "" then Error "an endpoint name is empty"
+        elif name |> Seq.exists (fun c -> not (System.Char.IsLetterOrDigit c || c = '-' || c = '_')) then
+            // The name is a URL path segment and a declaration's own field at once, so it is
+            // held to what both accept rather than escaped for each.
+            Error (sprintf "endpoint name %s is not letters, digits, - or _" name)
+        else
+            rotation
+            |> Result.bind (fun r ->
+                SignatureSpec.decode signature
+                |> Result.map (fun spec -> { Name = name; Rotation = r; Signature = spec }))
+
+    /// Back to the option that decodes to it, in its shortest form: rotation 0 and the
+    /// default signature are what absence already means, so writing them would be noise on
+    /// a page whose whole job is to be copied.
+    let encode (spec: EndpointSpec) : string =
+        let rotation = if spec.Rotation > 0 then sprintf "%c%d" RotationSeparator spec.Rotation else ""
+        let signature =
+            if spec.Signature = SignatureSpec.webSub then ""
+            else sprintf "%c%s" SignatureSeparator (SignatureSpec.encode spec.Signature)
+        sprintf "%s%s%s" spec.Name rotation signature
+
+    /// Every `--webhook` given, or the first that could not be read. A name declared twice
+    /// is refused rather than resolved: two declarations of one endpoint disagree about its
+    /// rotation or its signature, and picking either silently is how a deployment serves a
+    /// secret the operator did not think they had asked for.
+    let decodeAll (declarations: string list) : Result<EndpointSpec list, string> =
+        declarations
+        |> List.filter (fun raw -> raw.Trim () <> "")
+        |> List.fold
+            (fun acc raw ->
+                acc
+                |> Result.bind (fun done' ->
+                    decode raw
+                    |> Result.bind (fun spec ->
+                        if done' |> List.exists (fun s -> s.Name = spec.Name) then
+                            Error (sprintf "endpoint %s is declared more than once" spec.Name)
+                        else Ok (done' @ [ spec ]))))
+            (Ok [])
+
+/// One endpoint as served: its accepted secrets, newest first, and the declaration that
+/// produced it — carried so the manager page can show an operator the option to write, which
+/// is the only place a rotation counter is visible at all.
 type HookEndpoint =
     { Name : string
+      /// What an operator wrote (canonicalised): `EndpointSpec.encode` of its spec.
+      Declared : EndpointSpec
       /// Newest first, and there is more than one during a rotation: bump the counter, read
       /// the new secret off the manager page, paste it into the provider, and the previous
       /// one keeps working until the counter moves again. Without the overlap every
       /// rotation would have a window where live deliveries are refused.
       Secrets : string list
       Signature : SignatureSpec }
-
-/// Parse `YESSION_WEBHOOK_ENDPOINTS` — a comma-separated list of names, each optionally
-/// `name@<rotation>`. `signatureOf` reads the per-endpoint override
-/// (`YESSION_WEBHOOK_SIGNATURE_<NAME>`), empty for the default.
-let parseEndpoints (declaration: string) (signatureOf: string -> string) : Result<EndpointSpec list, string> =
-    let one (raw: string) : Result<EndpointSpec, string> =
-        let trimmed = raw.Trim ()
-        let name, rotation =
-            match trimmed.Split ([| '@' |], 2) with
-            | [| n |] -> n.Trim (), Ok 0
-            | [| n; r |] ->
-                n.Trim (),
-                (match System.Int32.TryParse (r.Trim ()) with
-                 | true, value when value >= 0 -> Ok value
-                 | _ -> Error (sprintf "endpoint %s has a rotation that is not a whole number" (n.Trim ())))
-            | _ -> trimmed, Ok 0
-        if name = "" then Error "an endpoint name is empty"
-        elif name |> Seq.exists (fun c -> not (System.Char.IsLetterOrDigit c || c = '-' || c = '_')) then
-            // The name is a URL path segment and an environment-variable suffix at once, so
-            // it is held to what both accept rather than escaped for each.
-            Error (sprintf "endpoint name %s is not letters, digits, - or _" name)
-        else
-            rotation
-            |> Result.bind (fun r ->
-                SignatureSpec.parse (signatureOf name)
-                |> Result.map (fun spec -> { Name = name; Rotation = r; Signature = spec }))
-    declaration.Split ','
-    |> Array.toList
-    |> List.filter (fun raw -> raw.Trim () <> "")
-    |> List.fold
-        (fun acc raw -> acc |> Result.bind (fun done' -> one raw |> Result.map (fun spec -> done' @ [ spec ])))
-        (Ok [])
 
 /// The signing secret for an endpoint at a rotation. Derived from the Manager's KEK — the
 /// key the OS credential manager already holds for the secret store — so it is stable
@@ -129,6 +192,7 @@ let endpointsFor (kek: string) (specs: EndpointSpec list) : HookEndpoint list =
     specs
     |> List.map (fun spec ->
         { Name = spec.Name
+          Declared = spec
           Secrets =
             [ secretAt kek spec.Name spec.Rotation
               if spec.Rotation > 0 then secretAt kek spec.Name (spec.Rotation - 1) ]
@@ -333,17 +397,16 @@ let tryHandle (relay: Relay) (req: Interop.IncomingMessage) (res: Interop.Server
 /// the operator a secret to paste into a provider that stops working at the next restart —
 /// silently, and only for inbound deliveries. Better to refuse at boot and say why.
 let compose
-    (declaration: string)
-    (signatureOf: string -> string)
+    (declarations: string list)
     (kek: unit -> Async<Result<string option, string>>)
     (notify: string -> SessionNotification -> unit)
     (mintId: unit -> string)
     : Async<Result<Relay, string>> =
     async {
-        match declaration.Trim () with
-        | "" -> return Ok Relay.none
+        match declarations |> List.filter (fun raw -> raw.Trim () <> "") with
+        | [] -> return Ok Relay.none
         | declared ->
-            match parseEndpoints declared signatureOf with
+            match EndpointSpec.decodeAll declared with
             | Error e -> return Error e
             | Ok specs ->
                 match! kek () with
@@ -351,10 +414,10 @@ let compose
                 | Ok None ->
                     return
                         Error
-                            "YESSION_WEBHOOK_ENDPOINTS needs a durable secret store, because each \
-                             endpoint's signing secret is derived from the key that seals it. This \
-                             deployment has an ephemeral store, so the key — and every secret an \
-                             operator pasted into a provider — would be different after a restart. \
-                             Run with a usable OS credential manager, or declare no endpoints."
+                            "--webhook needs a durable secret store, because each endpoint's \
+                             signing secret is derived from the key that seals it. This deployment \
+                             has an ephemeral store, so the key — and every secret an operator \
+                             pasted into a provider — would be different after a restart. Run with \
+                             a usable OS credential manager, or declare no endpoints."
                 | Ok (Some payload) -> return Ok (create (endpointsFor payload specs) notify mintId)
     }

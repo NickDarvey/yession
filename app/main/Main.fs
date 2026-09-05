@@ -46,11 +46,17 @@ let private defaultSessionOption =
 let private spawnBinOption =
     Cli.value "spawn-bin" "command" "the command that runs a session (default this Node on the packaged entry)"
 
+// Repeatable, because endpoints are a SET rather than a choice: one per service, each with
+// its own rotation and signature scheme, and a separator inside a single option would be a
+// grammar this parser had to invent. `WebhookRelay.EndpointSpec` owns the one it does have.
+let private webhookOption =
+    Cli.values "webhook" "name[@rotation][=header:encoding[:prefix]]" "serve a hook endpoint at /hooks/<name>"
+
 let private cli =
     Cli.spec
         "yession-manager"
         [ authOption; secretsOption; portOption; dataDirOption; idleTimeoutOption
-          defaultSessionOption; spawnBinOption ]
+          defaultSessionOption; spawnBinOption; webhookOption ]
 
 let private args = Cli.parseOrExit cli Version.current
 
@@ -173,7 +179,8 @@ Async.StartImmediate(
                     Public = publicAccess
                     OnEvent = telemetry.Log
                     Strategy = Some strategy
-                    Secrets = Some secretsBacking }
+                    Secrets = Some secretsBacking
+                    Webhooks = Cli.valuesOf webhookOption args }
                 (Some ManagerUi.tryHandle)
 
         // Ensure the default session exists (an existing registration is resume).

@@ -486,6 +486,12 @@ let private mcpTemplate (views: ProcessManager.SessionView list) (declarations: 
 /// The secret is on the page rather than behind a reveal. This page is the operator's own,
 /// behind whatever the deployment's authentication strategy is, and a secret you have to
 /// click to see is one you copy wrong.
+///
+/// Beside it, the option that produced the endpoint (`EndpointSpec.encode`). Rotating is
+/// bumping a counter, and that counter appears NOWHERE else — not in the address, not in the
+/// secret, not in the header — so an operator reading this page had no way to tell which
+/// rotation they were on or what to write for the next one. Canonicalised rather than
+/// echoed: this is a line to copy, not a transcript of what somebody typed.
 let private hooksTemplate (access: PublicAccess) (endpoints: WebhookRelay.HookEndpoint list) : TemplateResult =
     let origin =
         match PublicAccess.managerUrl access with
@@ -509,7 +515,7 @@ let private hooksTemplate (access: PublicAccess) (endpoints: WebhookRelay.HookEn
                 <tr class="border-b border-hair" data-hook-endpoint="{endpoint.Name}">
                   <td class="py-3 pr-4 align-top {Style.body}">{endpoint.Name}</td>
                   <td class="py-3 pr-4 align-top font-terminal text-code text-ink-faint break-all">{origin}/hooks/{endpoint.Name}</td>
-                  <td class="py-3 pr-4 align-top {Style.small}">{endpoint.Signature.Header}</td>
+                  <td class="py-3 pr-4 align-top font-terminal text-code text-ink-faint break-all" data-hook-declared>--webhook {WebhookRelay.EndpointSpec.encode endpoint.Declared}</td>
                   <td class="py-3 pl-4 align-top">{secrets}</td>
                 </tr>""")
     html $"""
@@ -523,7 +529,7 @@ let private hooksTemplate (access: PublicAccess) (endpoints: WebhookRelay.HookEn
               <tr class="border-b border-hair">
                 <th scope="col" class="py-2 pr-4 {Style.label}">name</th>
                 <th scope="col" class="py-2 pr-4 {Style.label}">deliver to</th>
-                <th scope="col" class="py-2 pr-4 {Style.label} {Col.status}">signed in</th>
+                <th scope="col" class="py-2 pr-4 {Style.label} {Col.status}">declared as</th>
                 <th scope="col" class="py-2 pl-4 {Style.label}">secret</th>
               </tr>
             </thead>

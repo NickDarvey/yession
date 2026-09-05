@@ -174,7 +174,11 @@ type Options =
       /// because it trades a launch on the next visit for everything an idle session
       /// holds — and, on a deployment that tracks a fast-moving build, for sessions that
       /// come back on the new one without the Manager having to restart.
-      IdleTimeout : TimeSpan option }
+      IdleTimeout : TimeSpan option
+      /// The hook endpoints this deployment serves, as declared (`--webhook`, once per
+      /// endpoint). Empty = none, and the relay is inert: an endpoint is an inbound door,
+      /// so it exists only where an operator asked for one by name.
+      Webhooks : string list }
 
 /// How the secret store is keyed on this host — the RESOLVED outcome, after the host has
 /// been probed for a credential manager.
@@ -223,7 +227,8 @@ module Options =
           OnEvent = (fun _ _ -> ())
           Strategy = None
           Secrets = None
-          IdleTimeout = None }
+          IdleTimeout = None
+          Webhooks = [] }
 
 module ManagerPort =
 
@@ -787,8 +792,7 @@ let createWithUi
         async {
             match!
                 WebhookRelay.compose
-                    (Interop.envOr "YESSION_WEBHOOK_ENDPOINTS" "")
-                    (fun name -> Interop.envOr (sprintf "YESSION_WEBHOOK_SIGNATURE_%s" (name.ToUpperInvariant ())) "")
+                    options.Webhooks
                     (fun () ->
                         match options.Secrets with
                         | Some (DurableSecrets keyStore) -> keyStore.Get ()

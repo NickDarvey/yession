@@ -125,8 +125,9 @@ let private readers (bindings: Binding list) =
 
 /// Every read of a variable this project names outright, and where it is read.
 ///
-/// A name that is not a literal is not one of these — `sprintf "YESSION_WEBHOOK_SIGNATURE_%s"`
-/// reads a family rather than a variable, and there is nothing for a rule to count. A
+/// A name that is not a literal is not one of these — `Retirements.found` is handed a lookup
+/// and reads whatever names its data holds, which is a family rather than a variable, and
+/// there is nothing for a rule to count. A
 /// `[<Literal>]` is: the compiler has already put its value in the caller, which is what makes
 /// `Launch.Variable` a read of `YESSION_LAUNCH` at the one place that reads it.
 let reads (bindings: Binding list) : (string * range) list =
