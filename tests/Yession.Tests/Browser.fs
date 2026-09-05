@@ -126,6 +126,18 @@ let private startHost () : unit =
     psi.ArgumentList.Add dataDir
     psi.UseShellExecute <- false
     psi.RedirectStandardOutput <- true   // stderr inherits → visible in the log
+    // No ambient credential for this suite's session. One case is about what a session
+    // with NOTHING connected offers, and `SessionMain`'s documented last resort is the
+    // environment — so on a box that has a key, the picker is filled from it and the
+    // refusal that case begins from never appears. The release gate is exactly such a
+    // box (`verify` carries the LiveAgent secret), which is how a case that let the
+    // environment decide passed on every laptop and failed there.
+    //
+    // Empty rather than removed, which is what `ambientCredential` reads as absent and
+    // what the Node suites plant for the same reason. It reaches the session because the
+    // Manager spawns one with `{...process.env, ...}` (`Spawn.fs`).
+    psi.EnvironmentVariables.["ANTHROPIC_API_KEY"] <- ""
+    psi.EnvironmentVariables.["CLAUDE_CODE_OAUTH_TOKEN"] <- ""
     let p = new Process (StartInfo = psi)
     let ready = TaskCompletionSource<bool> ()
     // Keep draining stdout (like the JS 'data' handler) so the pipe never blocks the host;
