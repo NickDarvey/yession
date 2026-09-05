@@ -242,7 +242,11 @@ scopes: `/control/secrets/resolve`, which feeds `SecretRef` env injection at the
 session's own sandbox spawn (sandboxes are session-owned, so the injection point is
 there rather than in the Manager), and `/control/connections/resolve`, which releases a
 connection credential for one agent turn. Refresh tokens never leave the Manager, and no
-agent tool wraps either route.
+agent tool wraps either route. That refresh is one of the resilience policies (`Broker.
+resilient`, composed in `ProcessManager`): it runs where nobody is looking, inside a turn
+or a git verb, so a provider's bad minute used to read as a broken credential — and a
+provider calling the grant dead still stops at once, which is a different answer from a
+failed one.
 
 MCP servers are Manager-owned authority in the same way: a declaration names a url and
 who reaches it, it lives in `ManagerState`, and every session it names connects itself

@@ -10,6 +10,7 @@ module Yession.Host.Broker
 // refresher means providers that rotate refresh tokens on use never see two racing
 // refreshes for one stored credential.
 
+open System
 open System.Collections.Generic
 
 open Fable.Core
@@ -32,13 +33,21 @@ let private s256Challenge (verifier: string) : JS.Promise<string> = jsNative
   .then(async r => ({ status: r.status, body: await r.text() }))""")>]
 let private postGrant (url: string) (contentType: string) (body: string) : JS.Promise<{| status: int; body: string |}> = jsNative
 
-/// Why a token request produced no grant, and the one distinction a caller acts on.
+/// Why a token request produced no grant, and the two distinctions callers act on.
 ///
 /// `Final` means the provider said this authorization is DEAD, not that it could not answer
 /// — so retrying cannot help and a person has to sign in again. Everything else (a 5xx, a
 /// timeout, a socket refused) is "try later", and treating those alike would send someone to
 /// re-authorize because their wifi dropped.
-type private GrantFailure = { Message : string; Final : bool }
+///
+/// `Outcome` is the HTTP shape of the same failure, kept because "is this authorization
+/// dead" and "is this call worth making again" are different questions with different
+/// answers: a 400 that is not `invalid_grant` is worth no retry and says nothing about the
+/// grant, and a socket that never connected is worth several and says nothing either.
+type GrantFailure =
+    { Message : string
+      Final : bool
+      Outcome : Resilience.Http.Outcome }
 
 /// RFC 6749 §5.2: `invalid_grant` is the standard code for an authorization grant that is
 /// "expired, revoked, malformed, or invalid" — the shape of a refresh token whose App was
@@ -51,7 +60,9 @@ type private GrantFailure = { Message : string; Final : bool }
 let private isFinalRefusal (status: int) (body: string) : bool =
     status >= 400 && status < 500 && body.Contains "invalid_grant"
 
-let private grantAt (tokenUrl: string) (request: TokenRequest) : Async<Result<string, GrantFailure>> =
+/// One request to a token endpoint, its outcome as a value. Takes its pair as a tuple
+/// because that is the shape the resilience decorators compose over.
+let private askFor ((tokenUrl, request): string * TokenRequest) : Async<Result<string, GrantFailure>> =
     async {
         try
             let! reply = postGrant tokenUrl request.ContentType request.Body |> Interop.awaitPromise
@@ -60,10 +71,73 @@ let private grantAt (tokenUrl: string) (request: TokenRequest) : Async<Result<st
                 return
                     Error
                         { Message = sprintf "token endpoint refused (%d): %s" reply.status reply.body
-                          Final = isFinalRefusal reply.status reply.body }
+                          Final = isFinalRefusal reply.status reply.body
+                          Outcome = Resilience.Http.Answered (reply.status, None) }
         with e ->
-            return Error { Message = sprintf "token endpoint unreachable: %s" e.Message; Final = false }
+            return
+                Error
+                    { Message = sprintf "token endpoint unreachable: %s" e.Message
+                      Final = false
+                      Outcome = Resilience.Http.Unreached }
     }
+
+/// Whether asking again can help: the shared HTTP rule, and nothing else.
+///
+/// `Final` is deliberately NOT a second clause here. A grant the provider called dead is a
+/// 4xx by `isFinalRefusal`'s own definition, and the shared rule already refuses to retry a
+/// 4xx — so a `Final -> Fatal` clause beside it would be a rule that never fires and could
+/// only ever come to disagree. `Final` answers the other question, which is this module's
+/// alone: whether to tell the person their sign-in is finished.
+let grantVerdict (failure: GrantFailure) : Resilience.Verdict = Resilience.Http.verdict failure.Outcome
+
+/// How long one token request may take before it counts as no answer. Fifteen seconds
+/// because a refresh runs INSIDE something a person is waiting on — a turn, a git verb — and
+/// a hung fetch there is a turn that never starts and never says why.
+let grantDeadline = TimeSpan.FromSeconds 15.0
+
+let private grantTimedOut =
+    { Message = "the token endpoint did not answer in time"
+      Final = false
+      Outcome = Resilience.Http.Unreached }
+
+/// Asking a token endpoint, as everything below the composition root sees it: a settled body
+/// or a failure, with whatever resilience was put behind it. A tuple because that is the
+/// shape the decorators compose over.
+type GrantLeg = string * TokenRequest -> Async<Result<string, GrantFailure>>
+
+/// The unguarded leg — one request, no waiting. What the composition root wraps.
+let asking : GrantLeg = askFor
+
+/// The shipped policy for a token endpoint: three retries, backed off from 300ms to a 4s
+/// ceiling, jittered — every session refreshes against the same few providers, and a Manager
+/// restart brings them all due at once.
+///
+/// It earns its place on the REFRESH rather than on the sign-in: a refresh happens where
+/// nobody is looking, per turn and per network verb, and its failure reads as a broken
+/// credential. Before this, one dropped packet was a turn that could not run and a panel
+/// that said so.
+let grantPolicy
+    (sleep: TimeSpan -> Async<unit>)
+    (random: unit -> float)
+    : Resilience.Policy<GrantFailure> =
+    { Schedule =
+        Resilience.Schedule.exponential (TimeSpan.FromMilliseconds 300.0) 2.0 (TimeSpan.FromSeconds 4.0) 3
+        |> Resilience.Schedule.jittered 0.5 random
+      Classify = grantVerdict
+      Sleep = sleep
+      Observe = ignore }
+
+/// The leg as it ships: each attempt bounded, handled failures retried.
+///
+/// `waiting` is the DEADLINE's clock and is deliberately not the policy's. They look like one
+/// parameter and are not: a suite that spends its backoff in zero real time would, sharing a
+/// clock, spend the deadline in zero time too — and then every attempt times out before it is
+/// made, which is a green-looking policy that never asks anybody anything. That is not
+/// hypothetical; it is what this function was written to stop being possible.
+let resilient (waiting: TimeSpan -> Async<unit>) (policy: Resilience.Policy<GrantFailure>) : GrantLeg =
+    asking
+    |> Resilience.Policy.deadline waiting grantDeadline grantTimedOut
+    |> Resilience.Policy.guard policy
 
 /// What the broker observed — identifiers only, adapted to audit records by the caller.
 type BrokerObservation =
@@ -130,7 +204,12 @@ let create
     (redirectUri: unit -> string)
     (store: SecretStore.SecretStore)
     (observe: BrokerObservation -> unit)
+    (ask: GrantLeg)
     : BrokerService =
+
+    // Every token request goes through the leg the composition root handed in, so no call
+    // site below here holds a notion of retrying, waiting, or giving up.
+    let grantAt (tokenUrl: string) (request: TokenRequest) = ask (tokenUrl, request)
 
     let pending = PendingFlows (fun () -> System.DateTimeOffset.UtcNow.ToUnixTimeSeconds ())
     let now () = System.DateTimeOffset.UtcNow

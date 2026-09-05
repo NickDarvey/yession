@@ -477,6 +477,18 @@ let private githubTests =
             | other -> failwithf "garbage should fail the poll, got %A" other
     ]
 
+/// The broker's token leg unguarded: these suites are about what the broker DOES with an
+/// answer, and a policy in front of it would make a case that pins one refused request
+/// assert three. The retrying itself is pinned by the case that asks for it.
+let private noGrantRetries : Broker.GrantLeg = Broker.asking
+
+/// The shipped leg on a test clock: the real schedule spent in zero real time, under a
+/// deadline that never comes due — the two clocks are separate for exactly this reason.
+let private grantRetries : Broker.GrantLeg =
+    Broker.resilient
+        (fun _ -> Async.FromContinuations (fun _ -> ()))
+        (Broker.grantPolicy (fun _ -> async { return () }) (fun () -> 0.0))
+
 // --- [Ports]: the broker service against a fake token endpoint ------------------------------
 
 type private HttpReply =
@@ -492,12 +504,17 @@ let private postControl (url: string) (secret: string) (body: string) : JS.Promi
 type private TokenEndpoint =
     { Url : string
       SetResponse : string -> unit
+      /// Make the next `n` requests answer 503, then behave.
+      FailNext : int -> unit
       Requests : ResizeArray<string>
       ContentTypes : ResizeArray<string option> }
 
 let private startTokenEndpoint () : Async<TokenEndpoint> =
     async {
         let mutable response = """{"access_token":"at-1","refresh_token":"rt-1","expires_in":3600}"""
+        // How many of the next requests answer 503 before the endpoint behaves. A provider
+        // having a bad moment is a status, not a special kind of endpoint.
+        let mutable failing = 0
         let requests = ResizeArray<string> ()
         let contentTypes = ResizeArray<string option> ()
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
@@ -506,15 +523,21 @@ let private startTokenEndpoint () : Async<TokenEndpoint> =
             req.on ("end", fun _ ->
                 requests.Add acc
                 contentTypes.Add (Interop.headerOf req "content-type")
-                let status = if response.StartsWith "{" then 200 else 400
-                res.writeHead (status, Fable.Core.JsInterop.createObj [ "content-type", box "application/json" ]) |> ignore
-                res.``end`` response) |> ignore
+                if failing > 0 then
+                    failing <- failing - 1
+                    res.writeHead (503, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
+                    res.``end`` "the provider is having a moment"
+                else
+                    let status = if response.StartsWith "{" then 200 else 400
+                    res.writeHead (status, Fable.Core.JsInterop.createObj [ "content-type", box "application/json" ]) |> ignore
+                    res.``end`` response) |> ignore
         let server = Interop.createServer handler
         let! listening =
             Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
         return
             { Url = sprintf "http://127.0.0.1:%d/token" (Interop.serverPort listening)
               SetResponse = (fun r -> response <- r)
+              FailNext = (fun n -> failing <- n)
               Requests = requests
               ContentTypes = contentTypes }
     }
@@ -551,7 +574,7 @@ let private brokerTests =
             async {
                 let! endpoint = startTokenEndpoint ()
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://manager.local/connections/callback") store ignore
+                let broker = Broker.create (fun () -> "http://manager.local/connections/callback") store ignore noGrantRetries
                 let request = { beginRequest with TokenUrl = endpoint.Url }
                 let! began = broker.Begin request
                 let began = expect began
@@ -575,7 +598,7 @@ let private brokerTests =
                 // still decides it when that grant renews.
                 let! endpoint = startTokenEndpoint ()
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore noGrantRetries
                 let request = { beginRequest with TokenUrl = endpoint.Url; TokenDialect = JsonEncoded }
                 let! began = broker.Begin request
                 let began = expect began
@@ -607,7 +630,7 @@ let private brokerTests =
             async {
                 let! endpoint = startTokenEndpoint ()
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://manager.local/connections/callback") store ignore
+                let broker = Broker.create (fun () -> "http://manager.local/connections/callback") store ignore noGrantRetries
                 let request =
                     { beginRequest with
                         TokenUrl = endpoint.Url
@@ -628,7 +651,7 @@ let private brokerTests =
             async {
                 let! endpoint = startTokenEndpoint ()
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore noGrantRetries
                 let! unknown = broker.CompleteCallback "never-began" "c"
                 Expect.isError unknown "unknown state"
                 let request = { beginRequest with TokenUrl = endpoint.Url }
@@ -646,7 +669,7 @@ let private brokerTests =
             async {
                 let! endpoint = startTokenEndpoint ()
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore noGrantRetries
                 let request = { beginRequest with TokenUrl = endpoint.Url }
                 let! began = broker.Begin request
                 let! wrongTarget = broker.Complete (target (SessionScope sessionA)) (sprintf "code#%s" (expect began).State)
@@ -663,7 +686,7 @@ let private brokerTests =
         testCaseAsync "static put stores verbatim and never refreshes" <|
             async {
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore noGrantRetries
                 let t = target (PeerScope peer1)
                 let! put = broker.Put t "sk-ant-oat01-tok"
                 expect put
@@ -677,7 +700,7 @@ let private brokerTests =
             async {
                 let! endpoint = startTokenEndpoint ()
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore noGrantRetries
                 let t = target (UserScope alice)
                 // Seed a grant already inside the refresh margin, pointing at the fake.
                 let stale =
@@ -713,7 +736,7 @@ let private brokerTests =
                 let! endpoint = startTokenEndpoint ()
                 let! store = openEphemeral ()
                 let mutable observed : Broker.BrokerObservation list = []
-                let broker = Broker.create (fun () -> "http://m/cb") store (fun o -> observed <- o :: observed)
+                let broker = Broker.create (fun () -> "http://m/cb") store (fun o -> observed <- o :: observed) noGrantRetries
                 let t = target (UserScope alice)
                 let stale =
                     BrokeredOAuth
@@ -747,12 +770,63 @@ let private brokerTests =
         // token revoked long before the expiry it stated — somebody removes the App at the
         // provider. RFC 6749 §5.2 gives it a standard name, which is the only reason the
         // broker can read it without learning whose service this is.
+        testCaseAsync "a refresh outlives a provider having a bad moment" <|
+            async {
+                // A refresh runs where nobody is looking — inside a turn, inside a git verb —
+                // and its failure reads as a broken credential. Before it was guarded, one
+                // 503 between a session and its provider was a turn that could not run.
+                let! endpoint = startTokenEndpoint ()
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore grantRetries
+                let t = target (UserScope alice)
+                let due =
+                    BrokeredOAuth
+                        { AccessToken = "at-stale"
+                          RefreshToken = Some "rt-1"
+                          ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 60.0)
+                          RefreshExpiresAt = None
+                          TokenUrl = endpoint.Url
+                          ClientId = "cid"
+                          Dialect = FormEncoded }
+                let! _ = store.Set t (BrokeredCredentialCodec.toString due)
+                endpoint.FailNext 2
+                endpoint.SetResponse """{"access_token":"at-fresh","refresh_token":"rt-2","expires_in":3600}"""
+                let! resolved = broker.Resolve t
+                Expect.equal resolved (Ok (OAuthConnection, "at-fresh")) "the attempt that landed is the one that counted"
+                Expect.equal endpoint.Requests.Count 3 "two refusals it waited out, then the ask that worked"
+            }
+
+        testCaseAsync "a provider that refuses the grant is not asked again" <|
+            async {
+                // The other side of the same policy: `invalid_grant` is a dead authorization,
+                // so retrying it is three requests spent to be told the same thing, and three
+                // delays before a person learns they have to sign in again.
+                let! endpoint = startTokenEndpoint ()
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore grantRetries
+                let t = target (UserScope alice)
+                let due =
+                    BrokeredOAuth
+                        { AccessToken = "at-stale"
+                          RefreshToken = Some "rt-revoked"
+                          ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 60.0)
+                          RefreshExpiresAt = None
+                          TokenUrl = endpoint.Url
+                          ClientId = "cid"
+                          Dialect = FormEncoded }
+                let! _ = store.Set t (BrokeredCredentialCodec.toString due)
+                endpoint.SetResponse "error=invalid_grant"
+                let! resolved = broker.Resolve t
+                Expect.isError resolved "the refresh cannot succeed"
+                Expect.equal endpoint.Requests.Count 1 "asked once, and believed"
+            }
+
         testCaseAsync "a provider calling the grant invalid is a sign-in to redo, not a fault to retry" <|
             async {
                 let! endpoint = startTokenEndpoint ()
                 let! store = openEphemeral ()
                 let mutable observed : Broker.BrokerObservation list = []
-                let broker = Broker.create (fun () -> "http://m/cb") store (fun o -> observed <- o :: observed)
+                let broker = Broker.create (fun () -> "http://m/cb") store (fun o -> observed <- o :: observed) noGrantRetries
                 let t = target (UserScope alice)
                 let due =
                     BrokeredOAuth
@@ -779,7 +853,7 @@ let private brokerTests =
         testCaseAsync "a grant handed over by a session is refreshable, unlike a pasted one" <|
             async {
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore noGrantRetries
                 let t = target (UserScope alice)
                 let! stored =
                     broker.PutGrant
@@ -815,7 +889,7 @@ let private brokerTests =
             async {
                 let! endpoint = startTokenEndpoint ()
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore noGrantRetries
                 let t = target (UserScope alice)
                 // Due for refresh, and holding a refresh token that has itself lapsed.
                 let finished =
@@ -844,7 +918,7 @@ let private brokerTests =
             async {
                 let! endpoint = startTokenEndpoint ()
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore noGrantRetries
                 let t = target (UserScope alice)
                 let finished =
                     BrokeredOAuth
@@ -870,7 +944,7 @@ let private brokerTests =
         testCaseAsync "a provider's refusal is what makes a static token read as finished" <|
             async {
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore noGrantRetries
                 let t = target (UserScope alice)
                 let! _ = broker.Put t "ghu_expired"
                 let healthOf () =
@@ -889,7 +963,7 @@ let private brokerTests =
         testCaseAsync "the same refusal reported twice is news once" <|
             async {
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore noGrantRetries
                 let t = target (UserScope alice)
                 let! _ = broker.Put t "ghu_expired"
                 let! first = broker.Reject t "github refused this credential"
@@ -903,7 +977,7 @@ let private brokerTests =
         testCaseAsync "a refusal cannot outlive the credential it describes" <|
             async {
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore noGrantRetries
                 let t = target (UserScope alice)
                 // Nothing connected: there is nothing for a provider to have refused.
                 let! orphan = broker.Reject t "github refused this credential"
@@ -924,7 +998,7 @@ let private brokerTests =
         testCaseAsync "a status reports the same dead end a resolve refuses by" <|
             async {
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore noGrantRetries
                 let dead = target (UserScope alice)
                 let live = target (SessionScope sessionA)
                 let! _ =
@@ -954,7 +1028,7 @@ let private brokerTests =
             async {
                 let! endpoint = startTokenEndpoint ()
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore noGrantRetries
                 let t = target (UserScope alice)
                 let stale =
                     BrokeredOAuth
@@ -980,7 +1054,7 @@ let private brokerTests =
         testCaseAsync "disconnect deletes and reports existence" <|
             async {
                 let! store = openEphemeral ()
-                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore noGrantRetries
                 let t = target (UserScope alice)
                 let! _ = broker.Put t "sk-ant-x"
                 let! first = broker.Disconnect t
@@ -1073,8 +1147,11 @@ let private startConnectionsServer (callers: (string * Control.ControlCaller) li
                         }))
             | None -> ()
         let broker =
-            Broker.create (fun () -> "http://manager.local/connections/callback") store (fun o ->
-                if Broker.changesReadableStatus o then broadcast ())
+            Broker.create
+                (fun () -> "http://manager.local/connections/callback")
+                store
+                (fun o -> if Broker.changesReadableStatus o then broadcast ())
+                noGrantRetries
         let api = ProcessManager.connectionsApiFor (fun _ -> ()) store broker
         apiRef.Value <- Some api
         let dummyRegister (_: string) (_: SessionId) (_: string) : Yession.Oidc.RegisterClientResponse =
