@@ -78,6 +78,9 @@ module Dom =
         /// The reply ref a detached agent reply wears — valued by the id of the message it
         /// answers, so a test reads WHICH message it points at, not merely that it drew one.
         let replyRef = "data-reply-ref"
+        /// Marks the ref that is a JUMP — a live control, as against the inert one whose source
+        /// paged out of the loaded conversation. Presence is the difference a test reads.
+        let replyJump = "data-reply-jump"
         /// The landmark rail beside the timeline, and one stroke on it valued by the message
         /// it points at. Beside them, the per-item control that puts a mark there — valued by
         /// the same id, and carrying whether the mark is currently on, so a test can read the
@@ -522,6 +525,9 @@ module Dom =
         /// The accessible name of the ref, said in full for a reader who does not get the
         /// quote's visual context.
         let replyRefLabel = "In reply to"
+        /// The accessible name of the ref that JUMPS: a control's name says what it does, and
+        /// this one takes the reader to the message it quotes.
+        let replyRefJumpLabel = "Go to the message this replies to"
         // Conversation item status.
         let complete = "complete"
         let streaming = "streaming"

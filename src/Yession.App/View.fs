@@ -1528,7 +1528,7 @@ module View =
         // two apart at render time.
         let actNoteItem (facts: ActNoteFacts) (item: ConversationItem) =
             html $"""
-                <article class="{Style.actNote}" data-message-id="{MessageId.value item.MessageId}" data-act-note data-message-author="{authorLabel item.Author}">
+                <article class="{Style.actNote}" data-message-id="{MessageId.value item.MessageId}" tabindex="-1" data-act-note data-message-author="{authorLabel item.Author}">
                   {itemActions item}
                   <span class="{Style.actNoteText}"><span class="{Style.actNoteWho}">{authorName model item.Author}</span> {item.Body}</span>
                   {actNoteDetail facts}
@@ -1574,23 +1574,33 @@ module View =
             // drawing (`Replying = Some`, the detached case). A quiet quoted line above the
             // body — the parent's own words, truncated to one line, plain not rich, so it
             // reads as the context it is and cannot grow taller than the message it heads.
-            // Non-interactive for now; a follow-on makes it jump to its source.
+            //
+            // It jumps to its source through the SAME `RevealMessage` the landmark rail uses —
+            // scroll it to the middle, flash it, put the cursor on it — but only when the
+            // source is on hand to jump to. A target still in the loaded conversation is a
+            // button; one paged off (the quote falls back to a bare label) is inert, because a
+            // control that scrolls to nothing is worse than a line that never offered to.
             let replyRef =
                 match item.Replying with
                 | None -> Lit.nothing
                 | Some target ->
-                    let quote =
-                        model.Conversation.Items
-                        |> List.tryFind (fun i -> i.MessageId = target)
-                        |> Option.map ConversationItem.said
-                        |> Option.defaultValue Dom.Text.replyRefMissing
-                    html $"""
-                        <div class="{Style.replyRef}" data-reply-ref="{MessageId.value target}" aria-label="{Dom.Text.replyRefLabel}">
-                          <span class="{Style.replyRefMark}" aria-hidden="true">↩</span>
-                          <span class="{Style.replyRefQuote}">{quote}</span>
-                        </div>"""
+                    match model.Conversation.Items |> List.tryFind (fun i -> i.MessageId = target) with
+                    | Some parent ->
+                        html $"""
+                            <button type="button" class="{Style.replyRefJump}" data-reply-ref="{MessageId.value target}" data-reply-jump
+                                    aria-label="{Dom.Text.replyRefJumpLabel}"
+                                    @click={Ev(fun _ -> actions.RevealMessage target)}>
+                              <span class="{Style.replyRefMark}" aria-hidden="true">↩</span>
+                              <span class="{Style.replyRefQuote}">{ConversationItem.said parent}</span>
+                            </button>"""
+                    | None ->
+                        html $"""
+                            <div class="{Style.replyRef}" data-reply-ref="{MessageId.value target}" aria-label="{Dom.Text.replyRefLabel}">
+                              <span class="{Style.replyRefMark}" aria-hidden="true">↩</span>
+                              <span class="{Style.replyRefQuote}">{Dom.Text.replyRefMissing}</span>
+                            </div>"""
             html $"""
-                <article class="{Style.messageItem}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
+                <article class="{Style.messageItem}" data-message-id="{MessageId.value item.MessageId}" tabindex="-1" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
                   {itemActions item}
                   {meta}
                   {replyRef}

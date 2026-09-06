@@ -516,6 +516,17 @@ let private shellModel : ClientModel =
                     Offset = offset 3L
                     Woke = None; Replying = None } ]
                 @ filler
+                // A detached reply at the BOTTOM whose source is the very first message — the
+                // long column between them is what makes the ref's jump a real scroll, the same
+                // precondition the rail's own jump case needs. `Replying = Some` because it is
+                // pushed far from what it answers; the ref renders as a live jump control.
+                @ [ { MessageId = MessageId.create "msg-reply" |> expect
+                      Author = ActorRef.Agent
+                      Body = "Rebased and pushed, as you asked up top."
+                      Status = Complete
+                      Kind = ConversationItemKind.Message
+                      Offset = offset 30L
+                      Woke = None; Replying = Some messageId } ]
               ActiveAgentMessages = Map.empty; WokenTurn = None; TriggeredTurn = None }
         Timeline =
             { TimelineProjection.empty with

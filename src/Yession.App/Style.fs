@@ -985,6 +985,13 @@ module Style =
     let replyRef = "pl-8 flex items-baseline gap-1.5 text-small text-ink-faint"
     let replyRefMark = "shrink-0 text-ink-faint"
     let replyRefQuote = "truncate min-w-0 italic"
+    /// The same quiet line as `replyRef`, but a real control — it jumps to the message it
+    /// quotes. Borderless and transparent (it rides above the body, not a box of its own),
+    /// brightening under the pointer and wearing the shared focus ring so a keyboard reaches
+    /// it. `text-left` because a button centres its text by default and this is a quote.
+    let replyRefJump =
+        cls [ "pl-8 flex items-baseline gap-1.5 text-small text-ink-faint w-full text-left"
+              "bg-transparent border-0 p-0 cursor-pointer hover:text-ink"; focusRing ]
 
     let caret =
         "inline-block w-[7px] h-[15px] bg-blue align-[-2px] ml-0.5 animate-blink motion-reduce:animate-none"

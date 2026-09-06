@@ -1857,6 +1857,55 @@ let editorTests =
                 Expect.isTrue reached "the message a stroke points at is on the screen, not under what covers the top of it"
                 return ()
             }
+        // The reply ref's jump — the same `revealMessage` the rail drives, reached from the
+        // other end. A detached reply sits at the bottom of the harness; its source is the very
+        // first message, off the top. Tapping the ref must bring that message on screen AND put
+        // the cursor on it, or a keyboard reader is shown the message and stranded on the
+        // control that scrolled away. Only a browser settles focus: `activeElement` is empty in
+        // every cheap tier that reads markup.
+        editorCaseIn 1440 900 "the reply ref takes you to the message it answers, and lands the cursor on it" (EDITOR_PORT + 34) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-reply-jump][data-reply-ref='msg-harness']")
+                // To the bottom, where the reply sits, so its source is off the top and the jump is real.
+                let! _ =
+                    await (page.EvaluateAsync<bool>
+                            """() => { const t = document.querySelector('#shell [data-conversation]')
+                                       t.scrollTop = t.scrollHeight
+                                       return t.scrollTop > 0 }""")
+                do! awaitU (page.ClickAsync "#shell [data-reply-jump][data-reply-ref='msg-harness']")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector("#shell [data-conversation] [data-message-id='msg-harness']")
+                             ?.classList.contains('animate-reveal') === true""")
+                let! landed =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 const item = document.querySelector("#shell [data-conversation] [data-message-id='msg-harness']")
+                                 const box = item.getBoundingClientRect()
+                                 const at = document.elementFromPoint(box.left + box.width / 2, box.top + 4)
+                                 return item.contains(at) && item === document.activeElement
+                               }""")
+                Expect.isTrue landed "the message the ref answers is on the screen and holds the cursor"
+                return ()
+            }
+        // The rail's half of the same promise, now that the reveal moves focus for both: a
+        // stroke does not only scroll to its message, it puts the cursor there. This is the
+        // parity — one `revealMessage`, two triggers — and regressing the focus line fails this
+        // case and the ref's together, which is what says they are the one function.
+        editorCaseIn 1440 900 "a rail stroke lands the cursor on its message, the same jump the ref makes" (EDITOR_PORT + 35) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-landmark-rail] [data-landmark]")
+                do! awaitU (page.ClickAsync "#shell [data-landmark='msg-filler-8']")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector("#shell [data-conversation] [data-message-id='msg-filler-8']")
+                             ?.classList.contains('animate-reveal') === true""")
+                let! focused =
+                    await (page.EvaluateAsync<bool>
+                            """() => document.querySelector("#shell [data-conversation] [data-message-id='msg-filler-8']") === document.activeElement""")
+                Expect.isTrue focused "the rail moves the cursor to its message, through the same reveal the ref uses"
+                return ()
+            }
         // The rail's whole promise, and the one nothing but a rendered page can settle: a
         // stroke stands LEVEL with the message it marks. `Rail.place` is pinned in the cheap
         // tier and says nothing about what it is given — a syncer measuring against the wrong

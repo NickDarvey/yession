@@ -1532,6 +1532,36 @@ let private replyRefRenderTests =
         testCase "an adjacent agent reply draws no ref" <| fun () ->
             let html = Support.render (clientOf (conversation "1" "please rebase onto master" []))
             Expect.isFalse (html.Contains Dom.Hooks.replyRef) "a reply under its cause says nothing the eye cannot see"
+
+        // The jump's two halves that only the markup settles: the ref whose source is loaded is
+        // a live control, and the article it will land on is focusable so the cursor can.
+        testCase "a ref whose source is loaded is a jump control, and its target can hold focus" <| fun () ->
+            let html = Support.render (clientOf (conversation "1" "please rebase onto master" [ "2", "and squash the fixups" ]))
+            Expect.isTrue (html.Contains Dom.Hooks.replyJump) "the ref is the jump control, not an inert line"
+            // The reveal lands the cursor on the target article, which a plain <article> cannot
+            // hold — so every message is `tabindex=-1`, focusable on purpose and never a Tab stop.
+            Expect.isTrue (html.Contains "tabindex=\"-1\"") "the message a jump lands on can take focus"
+
+        // The other side of the model-membership gate: a ref whose source has paged out of the
+        // loaded conversation is inert — it still SAYS what it answered, but offers no jump to a
+        // message that is not there to jump to.
+        testCase "a ref whose source is not loaded is inert, not a dead jump" <| fun () ->
+            let turnId = turn "reply"
+            let agentMsg = message "agent"
+            // The turn was triggered by `m-gone`, but that message is not in this page; another
+            // message sits last, so the reply is detached and the ref is due — yet unresolvable.
+            let events =
+                [ at 1L 0.0 (sent "here" "a line that is loaded")
+                  at 2L 1.0 (AgentTurnStarted { AgentTurnId = turnId; Cause = TurnCause.TriggeredBy (message "gone") })
+                  at 3L 2.0 (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMsg; Antecedent = None })
+                  at 4L 3.0 (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMsg; Delta = "on it" })
+                  at 5L 4.0 (AgentMessageCompleted { AgentTurnId = turnId; MessageId = agentMsg; Body = "on it" }) ]
+            let html = Support.render (clientOf events)
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.replyRef (MessageId.value (message "gone"))))
+                "the ref still names what it answered"
+            Expect.isFalse (html.Contains Dom.Hooks.replyJump) "but it offers no jump to a message that is not loaded"
+            Expect.isTrue (html.Contains Dom.Text.replyRefMissing) "and says so, standing where the quote would be"
     ]
 
 let tests =
