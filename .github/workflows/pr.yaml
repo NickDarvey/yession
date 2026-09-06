@@ -94,6 +94,10 @@ jobs:
           set -euo pipefail
           url="$(jq -er '.nodes.nixpkgs.locked.url' devenv.lock)"
           nix profile install "tarball+$url#devenv"
+      # Before anything depends on the shell, and retried: see the action for the failure it
+      # absorbs and why one warm-up covers a whole job.
+      - name: Warm the devenv shell
+        uses: ./.github/actions/devenv-warm
       # First, and cheap: source judged without running it. actionlint over .github/workflows —
       # release.yml only runs on master, so nothing else here would notice it was broken until
       # after a merge, which is exactly how a colon-space in an unquoted step name once took

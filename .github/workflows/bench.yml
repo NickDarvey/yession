@@ -98,6 +98,10 @@ jobs:
           set -euo pipefail
           url="$(jq -er '.nodes.nixpkgs.locked.url' devenv.lock)"
           nix profile install "tarball+$url#devenv"
+      # Before anything depends on the shell, and retried: see the action for the failure it
+      # absorbs and why one warm-up covers a whole job.
+      - name: Warm the devenv shell
+        uses: ./.github/actions/devenv-warm
       # `bench` provisions Chromium itself (the same PLAYWRIGHT_BROWSERS_PATH every browser tier
       # uses) and runs only the `Editor performance` suite — no host, no WebRTC, no addon.
       # Best effort whenever nothing is being guarded, which is the release's case: a benchmark

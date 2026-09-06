@@ -1,0 +1,40 @@
+name: Warm the devenv shell
+description: >
+  Evaluate the dev shell once, before anything depends on it, retrying the one
+  Nix failure that is known to be transient and self-healing.
+
+runs:
+  using: composite
+  steps:
+    # `nix` materialises a source file it needs during EVALUATION — nixpkgs patches perl from a
+    # plain file in its own tree — and intermittently declines to, leaving perl's .drv naming a
+    # reference the store does not have:
+    #
+    #   error: path '/nix/store/…-CVE-2026-8376.patch' is not valid
+    #
+    # It fails in ~250ms, before a single test runs, and takes the whole job with it: seven
+    # times in the week to 2026-09-05, across `lint`, `bench` and the release gate, and on
+    # master that is a red release blocking everybody. Every occurrence was the job's FIRST
+    # devenv invocation, and every re-run passed — the retry substitutes the path and the
+    # store is warm for every later invocation, which is why one warm-up covers a whole job
+    # rather than each call site needing a wrapper.
+    #
+    # It retries THIS failure and nothing else. A retry that cannot say what it is absorbing
+    # absorbs the next real bug too, so anything that is not the known signature fails on the
+    # first attempt, as it would have without this step.
+    - shell: bash
+      run: |
+        set -uo pipefail
+        log="$(mktemp)"
+        for attempt in 1 2; do
+          if devenv shell -- true 2>&1 | tee "$log"; then
+            exit 0
+          fi
+          if ! grep -q "is not valid" "$log"; then
+            echo "::error::devenv shell failed, and not with the transient invalid-store-path evaluation this step retries"
+            exit 1
+          fi
+          echo "::warning::devenv shell hit the transient invalid-store-path evaluation (attempt ${attempt}); retrying"
+        done
+        echo "::error::devenv shell hit the transient invalid-store-path evaluation twice, which is no longer transient"
+        exit 1
