@@ -31,13 +31,6 @@ open System.Threading
 open System.Threading.Tasks
 open Microsoft.Playwright
 
-/// The session's address, learned from the Manager's readiness line rather than pinned.
-/// Sessions are addressed by an OS-assigned port here (this fixture is deliberately the
-/// UNMOUNTED shape), so the fixture reads the port it was actually given — the mounted
-/// fixture below is the one that exercises a stable address.
-let mutable private BASE = ""
-let private dataDir = "tests/browser/.data"
-
 /// The URL out of a "launched at http://127.0.0.1:PORT/ …" line. Same shape the packaged
 /// composition test uses to learn both endpoints from stdout.
 let private urlIn (line: string) =
@@ -111,58 +104,6 @@ let internal chromiumPath () : string =
                     root
                     (List.length revisions)
                     (String.Join (", ", chromiumExecutableNames))
-
-// --- Host spawn / readiness (ported): the real product entry on a test port -------------
-let mutable private host : Process = null
-
-let private startHost () : unit =
-    let psi = ProcessStartInfo "node"
-    psi.ArgumentList.Add "app/out/Main.js"
-    // Single-machine loopback trust (the shipped default `none` denies everything and
-    // the login bounce would 401 before any page ever connects).
-    psi.ArgumentList.Add "--auth"
-    psi.ArgumentList.Add "localhost"
-    psi.ArgumentList.Add "--data-dir"
-    psi.ArgumentList.Add dataDir
-    psi.UseShellExecute <- false
-    psi.RedirectStandardOutput <- true   // stderr inherits → visible in the log
-    // No ambient credential for this suite's session. One case is about what a session
-    // with NOTHING connected offers, and `SessionMain`'s documented last resort is the
-    // environment — so on a box that has a key, the picker is filled from it and the
-    // refusal that case begins from never appears. The release gate is exactly such a
-    // box (`verify` carries the LiveAgent secret), which is how a case that let the
-    // environment decide passed on every laptop and failed there.
-    //
-    // Empty rather than removed, which is what `ambientCredential` reads as absent and
-    // what the Node suites plant for the same reason. It reaches the session because the
-    // Manager spawns one with `{...process.env, ...}` (`Spawn.fs`).
-    psi.EnvironmentVariables.["ANTHROPIC_API_KEY"] <- ""
-    psi.EnvironmentVariables.["CLAUDE_CODE_OAUTH_TOKEN"] <- ""
-    let p = new Process (StartInfo = psi)
-    let ready = TaskCompletionSource<bool> ()
-    // Keep draining stdout (like the JS 'data' handler) so the pipe never blocks the host;
-    // resolve readiness on the "launched at" line.
-    p.OutputDataReceived.Add (fun e ->
-        if e.Data <> null && e.Data.Contains "launched at" then
-            match urlIn e.Data with
-            | Some url ->
-                BASE <- url
-                ready.TrySetResult true |> ignore
-            | None -> ())
-    p.Start () |> ignore
-    p.BeginOutputReadLine ()
-    host <- p
-    if not (ready.Task.Wait 30000) then failwith "host never reported readiness"
-    if BASE = "" then failwith "the readiness line carried no session URL"
-
-let private killHost () : unit =
-    try if host <> null then host.Kill true with _ -> ()
-
-// --- Shared browser state across the sequential cases -----------------------------------
-let mutable private playwright : IPlaywright = null
-let mutable private browser : IBrowser = null
-let mutable private pageA : IPage = null
-let mutable private pageB : IPage = null
 
 // Task -> Async adapters (this whole file is CLR-only, so Async.AwaitTask is available).
 let internal await (t: Task<'a>) : Async<'a> = Async.AwaitTask t
@@ -369,43 +310,205 @@ let private waitCommandLine (page: IPage) (selector: string) (expected: string) 
             failwithf "expected the command line %s to say %A, it says %A" selector expected actual
     }
 
+/// Which terminals have a command line ON SCREEN, in the order they are in the document.
+///
+/// The pane shows one terminal at a time, so this is one entry deep in practice — and that is
+/// exactly the fact worth reading when a case cannot find the line it expected: "the pane is
+/// showing a different terminal" and "the line is not there yet" are different faults, and a
+/// locator timeout says neither.
+let private commandLinesOn (page: IPage) : Async<string[]> =
+    await (page.EvaluateAsync<string[]> ("""() =>
+        [...document.querySelectorAll("[data-terminal-input^='term-draft:']")]
+          .map(i => i.getAttribute('data-terminal-input') + (i.readOnly ? ' (readonly)' : ''))"""))
+
+/// Show a terminal in the pane, and wait until its own command line is the one on screen.
+///
+/// Two facts a case may not assume, both of which cost a red run to find. Clicking a tab that
+/// is ALREADY selected PINS it rather than selecting it (`activate` in the view: a selected,
+/// pinnable tab toggles its pin) — so a case that clicks blind can silently pin a terminal and
+/// then wait out its timeout on a pane that never moved. And the pane follows the terminal most
+/// recently OPENED, which arrives on an event: "the terminal I just asked for is the one
+/// showing" is not a state to assume, it is one to wait for.
+let private showTerminal (page: IPage) (terminal: string) : Async<unit> =
+    async {
+        let! selected =
+            await (page.EvaluateAsync<bool> (
+                    "id => document.querySelector(`[data-terminal-tab='${id}']`)?.getAttribute('aria-selected') === 'true'",
+                    box terminal))
+        if not selected then do! awaitU (page.ClickAsync (sprintf "[data-terminal-tab='%s']" terminal))
+        try
+            do! await (page.WaitForSelectorAsync (commandLine terminal)) |> Async.Ignore
+        with _ ->
+            let! lines = commandLinesOn page
+            failwithf
+                "expected terminal %s to be showing its own command line, the pane offers: %s"
+                terminal
+                (String.Join (", ", lines))
+    }
+
 /// The terminals the tab strip is offering, in the order it offers them.
 let private terminalTabs (page: IPage) : Async<string[]> =
     await (page.EvaluateAsync<string[]> (
             """() => [...document.querySelectorAll('[data-terminal-tab]')].map(t => t.getAttribute('data-terminal-tab'))"""))
 
+// --- One case, one world -----------------------------------------------------------------
+//
+// Every case below arranges what it asserts on and takes it away again: its own data dir, its
+// own Manager + session on ports the OS picks, its own browser, and a fresh peer per page.
+//
+// It used to be one host and one pair of pages threaded through module-level mutables, set up
+// by the FIRST case and torn down by a last one that asserted nothing. Three things came with
+// that. `--only` could not name a case here: narrowing to one filtered out the case that
+// assigned the pages, so the run died on a null reference that named nothing about why.
+// Order was load-bearing and unstated — the two-terminals case had to ask
+// whether something before it had left the terminal column open. And an arrangement leaked —
+// a credential connected in one case was still connected in the next, so that case had to
+// disconnect it by hand on behalf of the ones after it.
+//
+// Independence is also what running these in parallel needs, which the runner cannot do yet:
+// Pyxpecto executes its flat tests in a `for` loop and never reads the `sequenced` field its
+// own model carries. When it can, nothing here has to change.
+
+/// A Manager + session of one case's own.
+type private Host =
+    { /// The session's URL, off the readiness line.
+      Base : string
+      Process : Process
+      DataDir : string }
+
+let private hostsStarted = ref 0
+
+/// Boot the real product entry on ports the OS picks, in a data dir nothing else touches.
+///
+/// `--port 0` is what makes a case's host its own: the shipped default is a fixed 8321, so
+/// two hosts at once — and, on a runner, two hosts in a row inside the same TIME_WAIT — would
+/// be fighting over one port. The session's own address comes off the readiness line, which is
+/// the only place it is stated.
+let private startHost () : Host =
+    let ordinal = System.Threading.Interlocked.Increment hostsStarted
+    let dataDir = sprintf "tests/browser/.data/host-%d-%d" (Process.GetCurrentProcess().Id) ordinal
+    if Directory.Exists dataDir then Directory.Delete (dataDir, true)
+    let psi = ProcessStartInfo "node"
+    psi.ArgumentList.Add "app/out/Main.js"
+    // Single-machine loopback trust (the shipped default `none` denies everything and
+    // the login bounce would 401 before any page ever connects).
+    psi.ArgumentList.Add "--auth"
+    psi.ArgumentList.Add "localhost"
+    psi.ArgumentList.Add "--data-dir"
+    psi.ArgumentList.Add dataDir
+    psi.ArgumentList.Add "--port"
+    psi.ArgumentList.Add "0"
+    psi.UseShellExecute <- false
+    psi.RedirectStandardOutput <- true   // stderr inherits → visible in the log
+    // No ambient credential for any session this suite boots. One case is about what a
+    // session with NOTHING connected offers, and `SessionMain`'s documented last resort is
+    // the environment — so on a box that has a key, the picker is filled from it and the
+    // refusal that case begins from never appears. The release gate is exactly such a box
+    // (`verify` carries the LiveAgent secret), which is how a case that let the environment
+    // decide passed on every laptop and failed there.
+    //
+    // Empty rather than removed, which is what `ambientCredential` reads as absent and what
+    // the Node suites plant for the same reason. It reaches the session because the Manager
+    // spawns one with `{...process.env, ...}` (`Spawn.fs`).
+    psi.EnvironmentVariables.["ANTHROPIC_API_KEY"] <- ""
+    psi.EnvironmentVariables.["CLAUDE_CODE_OAUTH_TOKEN"] <- ""
+    let p = new Process (StartInfo = psi)
+    let ready = TaskCompletionSource<string> ()
+    // Keep draining stdout (like the JS 'data' handler) so the pipe never blocks the host;
+    // resolve readiness on the "launched at" line.
+    p.OutputDataReceived.Add (fun e ->
+        if e.Data <> null && e.Data.Contains "launched at" then
+            match urlIn e.Data with
+            | Some url -> ready.TrySetResult url |> ignore
+            | None -> ())
+    p.Start () |> ignore
+    p.BeginOutputReadLine ()
+    if not (ready.Task.Wait 30000) then
+        try p.Kill true with _ -> ()
+        failwith "host never reported readiness"
+    { Base = ready.Task.Result; Process = p; DataDir = dataDir }
+
+let private stopHost (host: Host) : unit =
+    try host.Process.Kill true with _ -> ()
+    if Directory.Exists host.DataDir then
+        try Directory.Delete (host.DataDir, true) with _ -> ()
+
+/// Print what every page saw, then let the failure through — `reporting` for as many pages as
+/// the case asked for, so a two-peer case says what BOTH of them said.
+let private reportingAll (name: string) (pages: (IPage * Evidence) list) (body: Async<unit>) : Async<unit> =
+    pages
+    |> List.mapi (fun i (page, ev) -> (fun inner -> reporting (sprintf "%s [peer %d]" name (i + 1)) page ev inner))
+    |> List.fold (fun inner wrap -> wrap inner) body
+
+/// A case and the world it runs in: a host, a browser, and `peers` first visits that have
+/// settled into Connected. Everything is gone when the case ends, however it ends.
+///
+/// One CONTEXT per peer, never two pages in one: a peer id lives in origin-partitioned
+/// localStorage, so two pages in one context are one person in two tabs rather than the two
+/// collaborators a convergence case is about.
+let private peersCase (name: string) (peers: int) (body: IPage list -> Async<unit>) =
+    testCaseAsync name <|
+        async {
+            let host = startHost ()
+            let! pw = await (Playwright.CreateAsync ())
+            let! br =
+                await (pw.Chromium.LaunchAsync (
+                    BrowserTypeLaunchOptions (
+                        ExecutablePath = chromiumPath (),
+                        // Headless sandboxes stall ICE gathering when host candidates hide behind mDNS.
+                        Args = [| "--disable-features=WebRtcHideLocalIpsWithMdns" |])))
+            let! opened =
+                [ 1 .. peers ]
+                |> List.map (fun _ ->
+                    async {
+                        let! ctx = await (br.NewContextAsync ())
+                        let! page = await (ctx.NewPageAsync ())
+                        page.SetDefaultTimeout 30000.0f
+                        return page, watching page
+                    })
+                |> Async.Sequential
+            let opened = List.ofArray opened
+            let pages = opened |> List.map fst
+            let arranged =
+                async {
+                    // A first visit, through the login bounce, to a shell that has connected.
+                    // Nothing may be evaluated before that: the bounce destroys the execution
+                    // context, and `connected` is only true back on the shell.
+                    for page in pages do
+                        let! _ = await (page.GotoAsync host.Base)
+                        ()
+                    for i, page in List.indexed pages do
+                        do! waitFor (sprintf "peer %d to connect" (i + 1)) page connected
+                    do! body pages
+                }
+            let! outcome = Async.Catch (reportingAll name opened arranged)
+            // Teardown that cannot strand a host: a browser refusing to close must not stop
+            // the process being killed or its data dir going. A leaked Chromium costs memory;
+            // a leaked host holds a port and a session nobody will ever look at again.
+            try do! awaitU (br.CloseAsync ()) with _ -> ()
+            try pw.Dispose () with _ -> ()
+            stopHost host
+            match outcome with
+            | Choice1Of2 () -> ()
+            | Choice2Of2 e -> raise e
+        }
+
+/// A case with one peer in it.
+let private sessionCase (name: string) (body: IPage -> Async<unit>) =
+    peersCase name 1 (fun pages -> body pages.Head)
+
+/// A case with two, which is what convergence and presence are about.
+let private sessionPair (name: string) (body: IPage -> IPage -> Async<unit>) =
+    peersCase name 2 (fun pages ->
+        match pages with
+        | [ a; b ] -> body a b
+        | other -> failwithf "expected two peers, got %d" other.Length)
+
 let tests =
     testList "Browser E2E" [
-        testCaseAsync "markdown typed in the rich composer renders formatted, converges, and sends as markdown" <|
+        sessionPair "markdown typed in the rich composer renders formatted, converges, and sends as markdown" <|
+            fun pageA pageB ->
             async {
-                if Directory.Exists dataDir then Directory.Delete (dataDir, true)
-                startHost ()
-                let! pw = await (Playwright.CreateAsync ())
-                playwright <- pw
-                let! b =
-                    await (playwright.Chromium.LaunchAsync (
-                        BrowserTypeLaunchOptions (
-                            ExecutablePath = chromiumPath (),
-                            // Headless sandboxes stall ICE gathering when host candidates hide behind mDNS.
-                            Args = [| "--disable-features=WebRtcHideLocalIpsWithMdns" |])))
-                browser <- b
-                // One isolated context per peer: the peer id is stable per browser
-                // PROFILE now (localStorage), so two pages in one context
-                // would be one peer — a single human in two tabs — not the two distinct
-                // collaborators this flow verifies.
-                let! contextA = await (browser.NewContextAsync ())
-                let! contextB = await (browser.NewContextAsync ())
-                let! a = await (contextA.NewPageAsync ())
-                let! bb = await (contextB.NewPageAsync ())
-                pageA <- a
-                pageB <- bb
-                let! _ = await (pageA.GotoAsync BASE)
-                let! _ = await (pageB.GotoAsync BASE)
-
-                // Both browser peers reach Connected over native WebRTC.
-                do! waitFor "A to connect" pageA connected
-                do! waitFor "B to connect" pageB connected
-
                 // A types Markdown into its rich composer with REAL key events, so the input
                 // rules fire: "# " turns the block into a heading rendered live as an <h1> —
                 // the syntax itself is never left as literal text (Linear-style WYSIWYG).
@@ -465,7 +568,8 @@ let tests =
         // machine this test can run on", which is precisely what a capability is for. It cost
         // an agent a stash-and-re-run to discover that once.
         Tag.needs "a command that really runs" [ Tag.Browser; Tag.Native; Tag.Srt ] (fun () ->
-        testCaseAsync "a command typed in the terminal composer converges, runs in the sandbox, and both peers see the block" <|
+        sessionPair "a command typed in the terminal composer converges, runs in the sandbox, and both peers see the block" <|
+            fun pageA pageB ->
             async {
                 // The column starts shut, so the header control is the way back in — and
                 // that this can find it is the test that one exists at all.
@@ -532,50 +636,51 @@ let tests =
         // box that cannot host one, no terminal ever appears and this waits out its timeout
         // instead of failing.
         Tag.needs "two terminals at once" [ Tag.Browser; Tag.Native; Tag.Srt ] (fun () ->
-        testCaseAsync "each terminal's composer types into that terminal's command line" <|
+        sessionCase "each terminal's composer types into that terminal's command line" <|
+            fun page ->
             async {
-                // The reopen control is present only while the column is SHUT (there are never
-                // two controls for one column), and a case that ran before this one may have
-                // left it open.
-                let! shut =
-                    await (pageA.EvaluateAsync<bool> ("""() => !!document.querySelector('[data-terminal-toggle="show"]')"""))
-                if shut then do! awaitU (pageA.Locator("[data-terminal-toggle='show']").First.ClickAsync ())
-                let! before = terminalTabs pageA
-                do! awaitU (pageA.Locator("[data-terminal-new]").First.ClickAsync ())
-                do! awaitU (pageA.Locator("[data-terminal-new]").First.ClickAsync ())
+                // The column starts shut in a session of this case's own, so the reopen control
+                // is there and there are no terminals yet. (It used to ask whether something
+                // before it had left the column open, which is a question a case that arranges
+                // its own session does not have.)
+                do! awaitU (page.Locator("[data-terminal-toggle='show']").First.ClickAsync ())
+                do! awaitU (page.Locator("[data-terminal-new]").First.ClickAsync ())
+                do! awaitU (page.Locator("[data-terminal-new]").First.ClickAsync ())
                 do!
-                    await (pageA.WaitForFunctionAsync (
-                            "n => document.querySelectorAll('[data-terminal-tab]').length >= n",
-                            box (before.Length + 2)))
+                    await (page.WaitForFunctionAsync
+                            "document.querySelectorAll('[data-terminal-tab]').length >= 2")
                     |> Async.Ignore
-                let! tabs = terminalTabs pageA
-                let opened = tabs |> Array.filter (fun id -> not (Array.contains id before))
-                Expect.isTrue (opened.Length >= 2) (sprintf "expected two more terminals, the strip offers: %s" (String.Join (", ", tabs)))
-                let one, two = opened.[0], opened.[1]
+                let! tabs = terminalTabs page
+                Expect.isTrue (tabs.Length >= 2) (sprintf "expected two terminals, the strip offers: %s" (String.Join (", ", tabs)))
+                let one, two = tabs.[0], tabs.[1]
+                // Settle first: opening is an event, and the pane follows the newest terminal
+                // when it lands. Until that has happened there is no telling which terminal a
+                // click is acting on.
+                do! showTerminal page two
 
                 // One command, half-written, in the first terminal.
-                do! awaitU (pageA.ClickAsync (sprintf "[data-terminal-tab='%s']" one))
-                do! awaitU (pageA.ClickAsync (commandLine one))
-                do! awaitU (pageA.Keyboard.TypeAsync "echo one")
-                do! waitCommandLine pageA (commandLine one) "echo one"
+                do! showTerminal page one
+                do! awaitU (page.ClickAsync (commandLine one))
+                do! awaitU (page.Keyboard.TypeAsync "echo one")
+                do! waitCommandLine page (commandLine one) "echo one"
 
                 // The second terminal is a second command line, not the first one's: it opens
                 // empty, and typing into it stays in it.
-                do! awaitU (pageA.ClickAsync (sprintf "[data-terminal-tab='%s']" two))
-                let! fresh = commandLineValue pageA (commandLine two)
+                do! showTerminal page two
+                let! fresh = commandLineValue page (commandLine two)
                 Expect.equal fresh "" "a terminal opens with its own empty command line"
-                do! awaitU (pageA.ClickAsync (commandLine two))
-                do! awaitU (pageA.Keyboard.TypeAsync "echo two")
-                do! waitCommandLine pageA (commandLine two) "echo two"
+                do! awaitU (page.ClickAsync (commandLine two))
+                do! awaitU (page.Keyboard.TypeAsync "echo two")
+                do! waitCommandLine page (commandLine two) "echo two"
 
                 // And the half-written command is still where it was written. Both directions,
                 // because a line that writes into its neighbour breaks whichever of the two
                 // the input was bound to first.
-                do! awaitU (pageA.ClickAsync (sprintf "[data-terminal-tab='%s']" one))
-                let! kept = commandLineValue pageA (commandLine one)
+                do! showTerminal page one
+                let! kept = commandLineValue page (commandLine one)
                 Expect.equal kept "echo one" "the first terminal kept the command written in it"
-                do! awaitU (pageA.ClickAsync (sprintf "[data-terminal-tab='%s']" two))
-                let! keptToo = commandLineValue pageA (commandLine two)
+                do! showTerminal page two
+                let! keptToo = commandLineValue page (commandLine two)
                 Expect.equal keptToo "echo two" "and the second kept its own"
             })
 
@@ -585,7 +690,8 @@ let tests =
         // offer to reopen a stopped session on every single-machine deployment. Only the
         // fallback to the Manager's own endpoint makes this pass — and it has to be a real
         // origin, so the test fetches it.
-        testCaseAsync "the shell carries a manager origin that actually answers" <|
+        sessionCase "the shell carries a manager origin that actually answers" <|
+            fun pageA ->
             async {
                 let! origin =
                     await (pageA.EvaluateAsync<string> ("""() => document.querySelector('meta[name="yession-manager"]')?.getAttribute('content')"""))
@@ -620,7 +726,8 @@ let tests =
         // Measured against each PANEL's own box rather than the pane's, so the settings face's
         // slide-in (`Style.settingsLane1` translates the section 24px) cannot read as an
         // overflow while it is still arriving.
-        testCaseAsync "a value longer than the lane stays inside it" <|
+        sessionCase "a value longer than the lane stays inside it" <|
+            fun pageA ->
             async {
                 do! awaitU (pageA.ClickAsync "[data-settings-toggle='open']")
                 // A session always has its default work sandbox, so this panel always has a
@@ -660,7 +767,8 @@ let tests =
         // than the value, legitimately), and rather than a pixel count, which would pin
         // the lane. A third is the promise: whatever a label costs, a value keeps enough
         // of the row to be read as words.
-        testCaseAsync "a label longer than the lane never starves its value" <|
+        sessionCase "a label longer than the lane never starves its value" <|
+            fun pageA ->
             async {
                 do! awaitU (pageA.ClickAsync "[data-settings-toggle='open']")
                 let! _ = await (pageA.WaitForSelectorAsync "[data-query-panel='work_sandboxes'] [data-query-row]")
@@ -692,7 +800,8 @@ let tests =
         // re-probed the status alone. So the panel went green and the note went on naming
         // an account that was by then connected. No cheap tier can see it: the markup is
         // right in both states, and each half is right on its own.
-        testCaseAsync "connecting an account with the drawer open clears the picker's refusal" <|
+        sessionCase "connecting an account with the drawer open clears the picker's refusal" <|
+            fun pageA ->
             async {
                 do! awaitU (pageA.ClickAsync "[data-settings-toggle='open']")
                 let! _ = await (pageA.WaitForSelectorAsync "[data-model-note='unavailable']")
@@ -718,13 +827,11 @@ let tests =
                     await (pageA.WaitForFunctionAsync
                             """!(document.querySelector('[data-model-note]')?.textContent ?? '')
                                  .includes('no Claude account connected')""")
-
-                // Put the session back as the cases after this one expect to find it.
-                do! awaitU (pageA.ClickAsync "[data-claude-disconnect='mine']")
-                do! awaitU (pageA.ClickAsync "[data-settings-toggle='close']")
+                ()
             }
 
-        testCaseAsync "the doc store is keyed by session" <|
+        sessionCase "the doc store is keyed by session" <|
+            fun pageA ->
             async {
                 // The store is keyed by SESSION (embedded in the served page), not by address.
                 let! sessionId =
@@ -737,53 +844,40 @@ let tests =
                     (sprintf "expected a session-keyed doc store, found: %s" (String.Join (", ", dbNames)))
             }
 
-        testCaseAsync "a first-visit browser connects as the peer id it keeps" <|
+        sessionCase "a first-visit browser connects as the peer id it keeps" <|
+            fun page ->
             async {
                 // The peer a browser SIGNS IN as (the id riding the login bounce, which the
                 // Manager witnesses into the launch) must be the peer it KEEPS (the id in
                 // localStorage that every later load asserts) — otherwise the whole
                 // peer-scoped surface is denied for the life of the launch. The break was
                 // invisible to the HTTP tests, which pass one id through by hand: it needs a
-                // FIRST VISIT in a real browser, which is what a fresh context is.
-                let! context = await (browser.NewContextAsync ())
-                let! page = await (context.NewPageAsync ())
-                page.SetDefaultTimeout 20000.0f
-                try
-                    let! _ = await (page.GotoAsync BASE)
-                    // Nothing may be evaluated until the login bounce has settled (it destroys
-                    // the execution context); `connected` is only true back on the shell.
-                    let! _ = await (page.WaitForFunctionAsync connected)
+                // FIRST VISIT in a real browser.
+                //
+                // Which is what every case here now gets — the fixture opens a context of its
+                // own and the page it hands over has been nowhere. This case used to arrange
+                // that for itself, because it was the only one that could not use the pages
+                // the suite kept.
 
-                    // Sign a credential in for "all my sessions" — the peer's own scope — from
-                    // settings, exactly as a human does. The control is the sidebar's `settings`
-                    // pivot: its own accessible name is the word it shows, so the hook — which is
-                    // the contract — is what to click. (`data-settings-toggle="prompt"` marks the
-                    // calls to action that also lead there; `open` is the pivot alone.)
-                    do! awaitU (page.ClickAsync "[data-settings-toggle='open']")
-                    let! _ = await (page.WaitForSelectorAsync "[data-claude-connect]")
-                    do! awaitU (page.ClickAsync "[data-claude-connect]")
+                // Sign a credential in for "all my sessions" — the peer's own scope — from
+                // settings, exactly as a human does. The control is the sidebar's `settings`
+                // pivot: its own accessible name is the word it shows, so the hook — which is
+                // the contract — is what to click. (`data-settings-toggle="prompt"` marks the
+                // calls to action that also lead there; `open` is the pivot alone.)
+                do! awaitU (page.ClickAsync "[data-settings-toggle='open']")
+                let! _ = await (page.WaitForSelectorAsync "[data-claude-connect]")
+                do! awaitU (page.ClickAsync "[data-claude-connect]")
 
-                    // The flow settles either into the paste-the-code step (the broker minted a
-                    // provider authorize URL — no network involved) or into a legible error.
-                    let! _ =
-                        await (page.WaitForFunctionAsync
-                                """!!document.querySelector('[data-claude-authorize]')
-                                   || !!document.querySelector('[data-claude-error]')""")
-                    let! error =
-                        await (page.EvaluateAsync<string>
-                                "() => document.querySelector('[data-claude-error]')?.textContent ?? ''")
-                    Expect.equal error "" "connecting must not be refused for the browser's own peer"
-                finally
-                    context.CloseAsync () |> ignore
-            }
-
-        testCaseAsync "shut down the browser peers and the host" <|
-            async {
-                if browser <> null then do! awaitU (browser.CloseAsync ())
-                if playwright <> null then playwright.Dispose ()
-                killHost ()
-                if Directory.Exists dataDir then
-                    try Directory.Delete (dataDir, true) with _ -> ()
+                // The flow settles either into the paste-the-code step (the broker minted a
+                // provider authorize URL — no network involved) or into a legible error.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                            """!!document.querySelector('[data-claude-authorize]')
+                               || !!document.querySelector('[data-claude-error]')""")
+                let! error =
+                    await (page.EvaluateAsync<string>
+                            "() => document.querySelector('[data-claude-error]')?.textContent ?? ''")
+                Expect.equal error "" "connecting must not be refused for the browser's own peer"
             }
     ]
 
