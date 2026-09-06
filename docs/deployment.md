@@ -16,21 +16,19 @@ environment, because inheritance is how a child gets it. So a mistyped setting i
 where it is a decision, and `--help` is the list.
 
 ```sh
-yession-manager --help     # what it accepts
-yession-manager --check    # what it resolved to, then stop
+yession-manager --help                # what it accepts
+yession-manager --check               # what it resolved to, then stop
+yession-manager --check --detailed    # the same, plus what each setting and state means
 ```
 
-`--check` runs every parser this bin has and prints the result — the trust rule, the
-addresses, the endpoints it would serve, the window it would reap on — launching nothing and
-binding no port. Use it as the loop when configuring a deployment: a setting that resolved to
-something other than what you meant does not announce itself otherwise, it just behaves
-differently somewhere later.
+`--check` runs every parser this bin has and prints the result, launching nothing and binding
+no port. Each line says where its value came from: `set` (you gave it), `default` (you gave
+nothing) or `off` (the feature is not enabled). Use it while configuring a deployment — a
+value alone cannot tell you whether the setting you wrote took effect.
 
-Its last section lists every `YESSION_*` in the environment, unread and unjudged. A child
-inherits the whole environment, so that is what a session sees, and a name nothing reads —
-a typo, a leftover, one of the examples' own — is visible there. Nothing refuses it: the
-examples use this prefix deliberately (`YESSION_PROXY_*`, `YESSION_SERIAL_PORT`), so a bin
-that rejected what it did not recognise would reject them.
+Its last section lists every `YESSION_*` in the environment. A session inherits all of them,
+so that is what a session sees. Nothing is refused for being unrecognised: the examples use
+this prefix for their own variables (`YESSION_PROXY_PORT`, `YESSION_SERIAL_PORT`).
 
 | shape | who sets it | example |
 |---|---|---|

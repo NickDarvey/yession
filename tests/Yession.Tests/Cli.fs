@@ -38,6 +38,30 @@ let private parsed (args: string list) =
     | Ok p -> p
     | Error e -> failwithf "expected a parse, got: %s" e
 
+/// A fronted deployment with a chosen trust rule and a defaulted port: the two origins the
+/// report has to tell apart.
+let private fronted : ManagerCli.Report =
+    { Version = "1.2.3"
+      TrustRule = "trusted-headers", ManagerCli.Chosen
+      Secrets = "durable", ManagerCli.Chosen
+      Port = "8321", ManagerCli.Default
+      DataDir = "/srv/yession", ManagerCli.Chosen
+      DefaultSession = "local-session", ManagerCli.Default
+      IdleTimeout = "30m", ManagerCli.Chosen
+      Spawn = "/nix/store/x/bin/yession-session", ManagerCli.Chosen
+      Addressing = [ "manager at", "https://host.ts.net:8321", ManagerCli.Chosen ]
+      Webhooks = [ "github"; "shop@1=x-shop-hmac:base64" ]
+      Inherited = [ "YESSION_MANAGER_URL"; "YESSION_PROXY_PORT" ] }
+
+/// Nothing configured: every default, and the two features that can be off.
+let private loopback : ManagerCli.Report =
+    { fronted with
+        Port = "8321", ManagerCli.Default
+        IdleTimeout = "never", ManagerCli.Off
+        Addressing = [ "addressing", "loopback (only this machine)", ManagerCli.Default ]
+        Webhooks = []
+        Inherited = [] }
+
 let private refused (args: string list) =
     match parse args with
     | Error e -> e
@@ -150,36 +174,34 @@ let tests =
         // `--check`: what the report SAYS, over values a boot has already resolved. The
         // rendering is the half worth pinning — the resolution is every other case in this
         // file, and a report that cannot be read is a report nobody believes.
-        testCase "the report says what every setting came to" <| fun () ->
-            let report : ManagerCli.Report =
-                { Version = "1.2.3"
-                  TrustRule = "trusted-headers"
-                  Secrets = "durable"
-                  Port = 8321
-                  DataDir = "/srv/yession"
-                  DefaultSession = "local-session"
-                  IdleTimeout = "00:30:00"
-                  Spawn = "/nix/store/x/bin/yession-session"
-                  Addressing = [ "addressing", "fronted"; "  manager", "https://host.ts.net:8321" ]
-                  Webhooks = [ "github"; "shop@1=x-shop-hmac:base64" ]
-                  Inherited = [ "YESSION_MANAGER_URL"; "YESSION_PROXY_PORT" ] }
-            let text = ManagerCli.Report.render report
+        testCase "the report says what every setting came to, and where it came from" <| fun () ->
+            let text = ManagerCli.Report.render false fronted
             for expected in
-                [ "yession-manager 1.2.3"; "trusted-headers"; "8321"; "/srv/yession"; "00:30:00"
+                [ "yession-manager 1.2.3"; "trusted-headers"; "8321"; "/srv/yession"; "30m"
                   "https://host.ts.net:8321"; "shop@1=x-shop-hmac:base64"; "YESSION_PROXY_PORT" ] do
                 Expect.isTrue (text.Contains expected) (sprintf "the report says %s" expected)
 
+        testCase "a value the operator chose is told apart from one the bin defaulted to" <| fun () ->
+            // The question --check exists to answer: a value alone cannot say whether the
+            // setting you wrote took effect, because `8321` is the same text either way.
+            let text = ManagerCli.Report.render false fronted
+            let lineFor (label: string) =
+                text.Split '\n' |> Array.find (fun (l: string) -> l.Trim().StartsWith label)
+            Expect.isTrue ((lineFor "trust rule").EndsWith "set") "a chosen value says set"
+            Expect.isTrue ((lineFor "port").EndsWith "default") "and a defaulted one says default"
+
+        testCase "a feature that is not enabled says off, not blank" <| fun () ->
+            let text = ManagerCli.Report.render false loopback
+            let lineFor (label: string) =
+                text.Split '\n' |> Array.find (fun (l: string) -> l.Trim().StartsWith label)
+            Expect.isTrue ((lineFor "webhooks").EndsWith "off") "no endpoints is off"
+            Expect.isTrue ((lineFor "webhooks").Contains "none declared") "and it says so in words"
+
         testCase "a setting that is empty says so in words, never as a blank" <| fun () ->
-            // A label with nothing after it reads as a rendering fault, which is the wrong
-            // thing for a report whose whole job is to be believed. Asserted as the PROMISE
-            // — every labelled line says something — rather than against the column the
-            // labels happen to be padded to, which is a layout a redesign is free to move.
-            let report : ManagerCli.Report =
-                { Version = "1.2.3"; TrustRule = "none"; Secrets = "ephemeral"; Port = 0
-                  DataDir = ".yession"; DefaultSession = "local-session"
-                  IdleTimeout = "never (sessions are not reaped)"; Spawn = "node app/SessionMain.js"
-                  Addressing = [ "addressing", "loopback" ]; Webhooks = []; Inherited = [] }
-            let text = ManagerCli.Report.render report
+            // A label with nothing after it reads as a rendering fault. Asserted as the
+            // PROMISE — every labelled line says something — rather than against the column
+            // the labels happen to be padded to, which a redesign is free to move.
+            let text = ManagerCli.Report.render false loopback
             for label in [ "webhooks"; "inherited" ] do
                 match text.Split '\n' |> Array.tryFind (fun l -> l.Trim().StartsWith label) with
                 | None -> failwithf "the report has no %s line at all" label
@@ -187,21 +209,39 @@ let tests =
                     let after = found.Trim().Substring(label.Length).Trim ()
                     Expect.notEqual after "" (sprintf "%s says something, even when it is empty" label)
 
-        testCase "an idle window is reported in the vocabulary the option accepts" <| fun () ->
-            // `parse (describe w) = w`, because a report shows what an operator could type
-            // back. Rendered as a TimeSpan it read `1800000` — a number whose unit a reader
-            // has to guess, and would guess wrong.
-            for text in [ "90s"; "30m"; "2h"; "45s" ] do
-                let window =
-                    match Yession.Manager.IdleWindow.parse text with
-                    | Ok w -> w
-                    | Error e -> failwithf "%s did not parse: %s" text e
-                Expect.equal (Yession.Manager.IdleWindow.describe window) text (sprintf "%s round-trips" text)
-            Expect.equal (Yession.Manager.IdleWindow.describe None) "never" "and absence has a word"
+        testCase "a value longer than its column is still separated from its state" <| fun () ->
+            // A store path is longer than any column worth keeping, and a value that ran into
+            // its own state read as one word (`…SessionMain.jsdefault`).
+            let long = { fronted with Spawn = String.replicate 80 "x", ManagerCli.Default }
+            let text = ManagerCli.Report.render false long
+            let row = text.Split '\n' |> Array.find (fun (l: string) -> l.Trim().StartsWith "spawn")
+            Expect.isTrue (row.EndsWith "  default") "two spaces before the state, at least"
 
-        testCase "--check is a switch the Manager declares" <| fun () ->
-            Expect.isTrue ((Cli.usage ManagerCli.spec).Contains "--check") "so --help names it"
-            Expect.isTrue (Cli.isSet ManagerCli.checkOption (Cli.parse ManagerCli.spec [| "--check" |] |> function Ok p -> p | Error e -> failwith e)) "and it parses"
+        testCase "--detailed says what every setting and every state means" <| fun () ->
+            let plain = ManagerCli.Report.render false fronted
+            let detailed = ManagerCli.Report.render true fronted
+            Expect.isTrue (detailed.Length > plain.Length) "detailed adds to the plain report"
+            Expect.isTrue (detailed.Contains "The Manager listens on this port.") "a setting is described"
+            Expect.isTrue (detailed.Contains "You gave this value on the command line.") "and so is a state"
+            for state, _ in ManagerCli.Origin.meanings do
+                Expect.isTrue (detailed.Contains state) (sprintf "%s is explained" state)
+            Expect.isFalse (plain.Contains "The Manager listens on this port.") "and the plain report stays a report"
+
+        testCase "every setting the report renders carries a description" <| fun () ->
+            // Adding a line without saying what it does would make --detailed silently
+            // partial, which is worse than not having it.
+            let detailed = ManagerCli.Report.render true fronted
+            let labels =
+                [ "trust rule"; "secrets"; "port"; "data dir"; "default session"
+                  "idle timeout"; "spawn"; "webhooks" ]
+            let describedSection = detailed.Substring (detailed.IndexOf "what each setting does")
+            for label in labels do
+                Expect.isTrue (describedSection.Contains label) (sprintf "%s is described" label)
+
+        testCase "--check and --detailed are switches the Manager declares" <| fun () ->
+            let usage = Cli.usage ManagerCli.spec
+            Expect.isTrue (usage.Contains "--check") "--help names --check"
+            Expect.isTrue (usage.Contains "--detailed") "and --detailed"
 
         // Retirements: a setting that MOVED, and an environment that has not caught up.
         testCase "a retired variable the environment still sets is found, and named with its option" <| fun () ->
