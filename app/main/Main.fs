@@ -118,43 +118,55 @@ let private sessionCommand, sessionArgs =
 // to it are the check's own first half — a configuration that cannot be resolved never
 // reaches this line, and says why.
 let private checkReport () =
+    // Whether the operator chose a value, or the bin fell back to its own. Only this file
+    // knows: the resolved values above have already lost the difference, and the difference
+    // is the question `--check` is asked.
+    let origin (option: Cli.Opt) =
+        if Cli.isSet option args then ManagerCli.Chosen else ManagerCli.Default
     let addressing =
+        // Loopback is what nothing configured resolves to, so it reports as a default; a
+        // fronted pair was written by somebody.
         match publicAccess with
-        | Loopback -> [ "addressing", "loopback (nothing fronted; remote browsers cannot reach a session)" ]
+        | Loopback ->
+            [ "addressing", "loopback (only this machine)", ManagerCli.Default ]
         | Fronted (manager, sessions) ->
-            [ "addressing", "fronted"
-              "  manager", ManagerOrigin.value manager
-              "  sessions", SessionTemplate.value sessions ]
-    let secrets =
-        match Cli.valueOf ManagerCli.secretsOption args with
-        | Some mode -> mode
-        // What absence RESOLVES to, spelled out. The name of the default is the one thing a
-        // report must not leave as "unset": it is the answer to the question being asked.
-        | None -> "durable where this host has a credential manager, in-memory where it has none"
-    // Decoded and re-encoded, so what is printed is what the relay will serve rather than
-    // what was typed. A declaration that could not be decoded refused the boot above.
-    let webhooks =
-        Cli.valuesOf ManagerCli.webhookOption args
-        |> WebhookRelay.EndpointSpec.decodeAll
-        |> Result.map (List.map WebhookRelay.EndpointSpec.encode)
-        |> Result.defaultValue []
-    let inherited =
-        Interop.envNames ()
-        |> Array.filter (fun name -> name.StartsWith "YESSION_")
-        |> List.ofArray
+            [ "manager at", ManagerOrigin.value manager, ManagerCli.Chosen
+              "sessions at", SessionTemplate.value sessions, ManagerCli.Chosen ]
     let report : ManagerCli.Report =
         { Version = Version.current
-          TrustRule = strategy.Name
-          Secrets = secrets
-          Port = managerPort
-          DataDir = dataDir
-          DefaultSession = defaultSession
-          IdleTimeout = Yession.Manager.IdleWindow.describe idleTimeout
-          Spawn = String.concat " " (sessionCommand :: sessionArgs)
+          TrustRule = strategy.Name, origin ManagerCli.authOption
+          Secrets =
+            (match Cli.valueOf ManagerCli.secretsOption args with
+             | Some mode -> mode, ManagerCli.Chosen
+             // Not `auto`: `--secrets` deliberately has no such spelling, so printing one
+             // would name a value the parser refuses. What it resolves to is both outcomes.
+             | None -> "durable or in-memory", ManagerCli.Default)
+          Port = string managerPort, origin ManagerCli.portOption
+          DataDir = dataDir, origin ManagerCli.dataDirOption
+          DefaultSession = defaultSession, origin ManagerCli.defaultSessionOption
+          IdleTimeout =
+            (match idleTimeout with
+             | Some _ -> Yession.Manager.IdleWindow.describe idleTimeout, ManagerCli.Chosen
+             | None -> "never", ManagerCli.Off)
+          Spawn = String.concat " " (sessionCommand :: sessionArgs), origin ManagerCli.spawnBinOption
           Addressing = addressing
-          Webhooks = webhooks
-          Inherited = inherited }
-    ManagerCli.Report.render report
+          // Decoded and re-encoded, so what is printed is what the relay will serve rather
+          // than what was typed. A declaration that could not be decoded refused the boot
+          // above.
+          Webhooks =
+            Cli.valuesOf ManagerCli.webhookOption args
+            |> WebhookRelay.EndpointSpec.decodeAll
+            |> Result.map (List.map WebhookRelay.EndpointSpec.encode)
+            |> Result.defaultValue []
+          Inherited =
+            Interop.envNames ()
+            |> Array.filter (fun name -> name.StartsWith "YESSION_")
+            |> List.ofArray }
+    ManagerCli.Report.render (Cli.isSet ManagerCli.detailedOption args) report
+
+// `--detailed` alone does nothing, so it is refused rather than ignored.
+if Cli.isSet ManagerCli.detailedOption args && not (Cli.isSet ManagerCli.checkOption args) then
+    Cli.rejectValue cli "--detailed says what a --check report means, so it needs --check"
 
 if Cli.isSet ManagerCli.checkOption args then
     printfn "%s" (checkReport ())

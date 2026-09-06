@@ -57,6 +57,11 @@ let webhookOption =
 let checkOption =
     Cli.flag "check" None "resolve the configuration, print what it came to, and exit"
 
+/// Only meaningful beside `--check`, and refused without it: a flag that silently did
+/// nothing would be indistinguishable from one that had no effect to have.
+let detailedOption =
+    Cli.flag "detailed" None "with --check, also say what each setting and state means"
+
 /// `--version` and `--help` answer from this before any configuration is read — no data
 /// directory, no ports, no sessions launched — and an unknown option or a missing value stops
 /// the boot with the reason and the usage, rather than being ignored into a deny-everything
@@ -65,7 +70,7 @@ let spec =
     Cli.spec
         "yession-manager"
         [ authOption; secretsOption; portOption; dataDirOption; idleTimeoutOption
-          defaultSessionOption; spawnBinOption; webhookOption; checkOption ]
+          defaultSessionOption; spawnBinOption; webhookOption; checkOption; detailedOption ]
 
 /// What `--check` reports: the RESOLVED configuration, as text that has already been through
 /// every parser this bin has.
@@ -74,55 +79,137 @@ let spec =
 /// before the Manager's own, so it could not name them; and the report is a rendering, which
 /// is the one job it should be possible to test without building a Manager. The boot resolves,
 /// this prints.
+/// Where a value came from.
+///
+/// This is the question `--check` exists to answer. An operator reads a report to find out
+/// whether the setting they wrote took effect, and a value alone cannot say: `8321` is the
+/// same text whether it was chosen or defaulted to.
+type Origin =
+    /// The operator gave this on the command line.
+    | Chosen
+    /// The operator gave nothing. This is the value the bin uses when nobody chooses one.
+    | Default
+    /// The feature is not enabled, and the value describes what that means.
+    | Off
+
+module Origin =
+
+    let describe =
+        function
+        | Chosen -> "set"
+        | Default -> "default"
+        | Off -> "off"
+
+    /// What each state means, in the order a reader meets them.
+    let meanings =
+        [ "set", "You gave this value on the command line."
+          "default", "You gave no value. The Manager uses this one."
+          "off", "The feature is not enabled." ]
+
+/// One line of the report: a value, where it came from, and what it does.
+type Setting =
+    { Label : string
+      Value : string
+      Origin : Origin
+      /// What this setting does, in one sentence. Printed by `--detailed`.
+      Detail : string }
+
+/// The resolved configuration, as text that has already been through every parser this bin
+/// has, paired with where each value came from.
+///
+/// Strings rather than the domain types they came from, deliberately. This module is compiled
+/// before the Manager's own, so it could not name them; and the report is a rendering, which
+/// is the one job it should be possible to test without building a Manager. The boot
+/// resolves, this prints.
 type Report =
     { Version : string
-      TrustRule : string
-      Secrets : string
-      Port : int
-      DataDir : string
-      DefaultSession : string
-      IdleTimeout : string
-      Spawn : string
-      /// Label and value per line: one line for loopback, two when fronted.
-      Addressing : (string * string) list
+      TrustRule : string * Origin
+      Secrets : string * Origin
+      Port : string * Origin
+      DataDir : string * Origin
+      DefaultSession : string * Origin
+      IdleTimeout : string * Origin
+      Spawn : string * Origin
+      /// One entry for loopback, two when fronted: the Manager's origin and the session
+      /// template are separate addresses and a reader needs both.
+      Addressing : (string * string * Origin) list
       /// Canonicalised by `WebhookRelay.EndpointSpec.encode`, so what is printed is what
       /// could be typed back.
       Webhooks : string list
-      /// Every `YESSION_*` name in this process's environment, unread and unjudged. A child
-      /// inherits the whole environment, so this is the list a session sees — and printing it
-      /// is how a name nothing reads becomes visible (a typo, a variable from another
-      /// version, one of the examples' own) without a bin having to refuse it. The examples
-      /// use this prefix on purpose; refusing what a bin does not recognise would refuse
-      /// them.
+      /// Every `YESSION_*` name in this process's environment. A child inherits the whole
+      /// environment, so this is the list a session sees. Names only: this bin does not read
+      /// most of them, and the examples use the same prefix for their own
+      /// (`YESSION_PROXY_PORT`, `YESSION_SERIAL_PORT`), so a bin that refused what it did not
+      /// recognise would refuse them.
       Inherited : string list }
 
 module Report =
 
-    let private line (label: string) (value: string) = sprintf "  %-18s%s" label value
+    [<Literal>]
+    let private ValueColumn = 52
 
-    /// A list, or a phrase saying it is empty — never a blank. An empty value beside a label
-    /// reads as a rendering fault, which is the wrong thing for a report whose whole job is
-    /// to be believed.
+    /// A row. The state is padded to a column where it can be, and separated by two spaces
+    /// where it cannot: a store path is longer than any column worth keeping, and a value
+    /// that ran into its own state read as one word (`…SessionMain.jsdefault`).
+    let private line (label: string) (value: string) (origin: Origin) =
+        let padded = if value.Length >= ValueColumn then value + "  " else value.PadRight ValueColumn
+        sprintf "  %-18s%s%s" label padded (Origin.describe origin)
+
+    /// A list, or a phrase saying it is empty — never a blank. A label with nothing after it
+    /// reads as a rendering fault, and a report has to be believed.
     let private listing (empty: string) (values: string list) =
         match values with
         | [] -> empty
         | _ -> String.concat ", " values
 
-    let render (report: Report) : string =
+    /// What each setting does. One sentence, subject verb object, printed by `--detailed`.
+    ///
+    /// Here rather than at the call site because a description is part of what this report
+    /// IS, and the composition root is the one place a test cannot reach.
+    let private settings (report: Report) : Setting list =
+        let setting label (value, origin) detail =
+            { Label = label; Value = value; Origin = origin; Detail = detail }
         let head =
-            [ sprintf "yession-manager %s" report.Version
-              ""
-              line "trust rule" report.TrustRule
-              line "secrets" report.Secrets
-              line "port" (string report.Port)
-              line "data dir" report.DataDir
-              line "default session" report.DefaultSession
-              line "idle timeout" report.IdleTimeout
-              line "spawn" report.Spawn ]
-        let addressing = report.Addressing |> List.map (fun (label, value) -> line label value)
-        let tail =
-            [ line "webhooks" (listing "none declared" report.Webhooks)
-              ""
-              line "inherited" (listing "none" report.Inherited)
-              "  (every session inherits these; this bin reads only some of them)" ]
-        head @ addressing @ tail |> String.concat "\n"
+            [ setting "trust rule" report.TrustRule
+                "The Manager identifies the user behind each request with this rule."
+              setting "secrets" report.Secrets
+                "The Manager stores connected credentials this way. It uses the OS credential manager where this host has one."
+              setting "port" report.Port
+                "The Manager listens on this port."
+              setting "data dir" report.DataDir
+                "The Manager writes its state to this directory."
+              setting "default session" report.DefaultSession
+                "The Manager creates and launches this session at boot."
+              setting "idle timeout" report.IdleTimeout
+                "The Manager stops a session after this long without use."
+              setting "spawn" report.Spawn
+                "The Manager runs this command to start a session." ]
+        let addressing =
+            report.Addressing
+            |> List.map (fun (label, value, origin) ->
+                setting label (value, origin) "A browser reaches this deployment at this address.")
+        let webhooks =
+            [ setting
+                "webhooks"
+                (listing "none declared" report.Webhooks, (if report.Webhooks.IsEmpty then Off else Chosen))
+                "The Manager serves these endpoints and gives each delivery to the sessions that asked for it." ]
+        head @ addressing @ webhooks
+
+    /// The report. `detailed` adds what every setting and every state means.
+    let render (detailed: bool) (report: Report) : string =
+        let resolved = settings report
+        let rows = resolved |> List.map (fun s -> line s.Label s.Value s.Origin)
+        let inherited =
+            [ ""
+              sprintf "  %-18s%s" "inherited" (listing "none" report.Inherited)
+              "  Every session inherits these variables. This bin reads only some of them." ]
+        let details =
+            if not detailed then
+                []
+            else
+                [ ""; "what each setting does" ]
+                @ (resolved |> List.map (fun s -> sprintf "  %-18s%s" s.Label s.Detail))
+                @ [ ""; "what each state means" ]
+                @ (Origin.meanings |> List.map (fun (state, meaning) -> sprintf "  %-18s%s" state meaning))
+        [ sprintf "yession-manager %s" report.Version; "" ] @ rows @ inherited @ details
+        |> String.concat "\n"
