@@ -124,14 +124,10 @@ let private checkReport () =
     let origin (option: Cli.Opt) =
         if Cli.isSet option args then ManagerCli.Chosen else ManagerCli.Default
     let addressing =
-        // Loopback is what nothing configured resolves to, so it reports as a default; a
-        // fronted pair was written by somebody.
         match publicAccess with
-        | Loopback ->
-            [ "addressing", "loopback (only this machine)", ManagerCli.Default ]
+        | Loopback -> ManagerCli.Addressing.OnLoopback
         | Fronted (manager, sessions) ->
-            [ "manager at", ManagerOrigin.value manager, ManagerCli.Chosen
-              "sessions at", SessionTemplate.value sessions, ManagerCli.Chosen ]
+            ManagerCli.Addressing.Fronted (ManagerOrigin.value manager, SessionTemplate.value sessions)
     let report : ManagerCli.Report =
         { Version = Version.current
           TrustRule = strategy.Name, origin ManagerCli.authOption

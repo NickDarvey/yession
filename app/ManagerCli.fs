@@ -106,6 +106,16 @@ module Origin =
           "default", "You gave no value. The Manager uses this one."
           "off", "The feature is not enabled." ]
 
+/// Where this deployment answers. A case rather than a list of rows, so the labels, the
+/// descriptions and the origins live here with every other piece of the report's prose —
+/// the caller supplies the two addresses and nothing else.
+[<RequireQualifiedAccess>]
+type Addressing =
+    /// Nothing was configured.
+    | OnLoopback
+    /// Both addresses were configured.
+    | Fronted of manager: string * sessions: string
+
 /// One line of the report: a value, where it came from, and what it does.
 type Setting =
     { Label : string
@@ -130,9 +140,7 @@ type Report =
       DefaultSession : string * Origin
       IdleTimeout : string * Origin
       Spawn : string * Origin
-      /// One entry for loopback, two when fronted: the Manager's origin and the session
-      /// template are separate addresses and a reader needs both.
-      Addressing : (string * string * Origin) list
+      Addressing : Addressing
       /// Canonicalised by `WebhookRelay.EndpointSpec.encode`, so what is printed is what
       /// could be typed back.
       Webhooks : string list
@@ -162,11 +170,14 @@ module Report =
         | [] -> empty
         | _ -> String.concat ", " values
 
-    /// What each setting does. One sentence, subject verb object, printed by `--detailed`.
+    /// Every line of the report, as data: the label, the value, where it came from, and what
+    /// it does. One sentence each, subject verb object.
     ///
-    /// Here rather than at the call site because a description is part of what this report
-    /// IS, and the composition root is the one place a test cannot reach.
-    let private settings (report: Report) : Setting list =
+    /// Public because it is what the report IS. `render` is one way to print this list, and a
+    /// test that asserted against the printing would go red on a column moving — which is not
+    /// a fault. Descriptions live here rather than at the call site for the same reason: the
+    /// composition root is the one place a test cannot reach.
+    let settings (report: Report) : Setting list =
         let setting label (value, origin) detail =
             { Label = label; Value = value; Origin = origin; Detail = detail }
         let head =
@@ -184,10 +195,18 @@ module Report =
                 "The Manager stops a session after this long without use."
               setting "spawn" report.Spawn
                 "The Manager runs this command to start a session." ]
+        // Two addresses, two facts. They shared a description until a report of a real
+        // deployment printed the same sentence twice, which reads as padding.
         let addressing =
-            report.Addressing
-            |> List.map (fun (label, value, origin) ->
-                setting label (value, origin) "A browser reaches this deployment at this address.")
+            match report.Addressing with
+            | Addressing.OnLoopback ->
+                [ setting "addressing" ("loopback (only this machine)", Default)
+                    "Nothing outside this machine reaches this deployment." ]
+            | Addressing.Fronted (manager, sessions) ->
+                [ setting "manager at" (manager, Chosen)
+                    "A browser reaches the Manager here. Every session sends its users here to sign in."
+                  setting "sessions at" (sessions, Chosen)
+                    "The Manager builds each session's own address from this template." ]
         let webhooks =
             [ setting
                 "webhooks"
@@ -207,9 +226,9 @@ module Report =
             if not detailed then
                 []
             else
-                [ ""; "what each setting does" ]
+                [ ""; "settings" ]
                 @ (resolved |> List.map (fun s -> sprintf "  %-18s%s" s.Label s.Detail))
-                @ [ ""; "what each state means" ]
+                @ [ ""; "states" ]
                 @ (Origin.meanings |> List.map (fun (state, meaning) -> sprintf "  %-18s%s" state meaning))
         [ sprintf "yession-manager %s" report.Version; "" ] @ rows @ inherited @ details
         |> String.concat "\n"

@@ -49,7 +49,7 @@ let private fronted : ManagerCli.Report =
       DefaultSession = "local-session", ManagerCli.Default
       IdleTimeout = "30m", ManagerCli.Chosen
       Spawn = "/nix/store/x/bin/yession-session", ManagerCli.Chosen
-      Addressing = [ "manager at", "https://host.ts.net:8321", ManagerCli.Chosen ]
+      Addressing = ManagerCli.Addressing.Fronted ("https://host.ts.net:8321", "https://host.ts.net:8321/s/{id}")
       Webhooks = [ "github"; "shop@1=x-shop-hmac:base64" ]
       Inherited = [ "YESSION_MANAGER_URL"; "YESSION_PROXY_PORT" ] }
 
@@ -58,9 +58,15 @@ let private loopback : ManagerCli.Report =
     { fronted with
         Port = "8321", ManagerCli.Default
         IdleTimeout = "never", ManagerCli.Off
-        Addressing = [ "addressing", "loopback (only this machine)", ManagerCli.Default ]
+        Addressing = ManagerCli.Addressing.OnLoopback
         Webhooks = []
         Inherited = [] }
+
+/// The setting a report renders under this label.
+let private settingFor (label: string) (report: ManagerCli.Report) =
+    match ManagerCli.Report.settings report |> List.tryFind (fun s -> s.Label = label) with
+    | Some setting -> setting
+    | None -> failwithf "the report has no %s setting" label
 
 let private refused (args: string list) =
     match parse args with
@@ -174,69 +180,58 @@ let tests =
         // `--check`: what the report SAYS, over values a boot has already resolved. The
         // rendering is the half worth pinning — the resolution is every other case in this
         // file, and a report that cannot be read is a report nobody believes.
-        testCase "the report says what every setting came to, and where it came from" <| fun () ->
-            let text = ManagerCli.Report.render false fronted
-            for expected in
-                [ "yession-manager 1.2.3"; "trusted-headers"; "8321"; "/srv/yession"; "30m"
-                  "https://host.ts.net:8321"; "shop@1=x-shop-hmac:base64"; "YESSION_PROXY_PORT" ] do
-                Expect.isTrue (text.Contains expected) (sprintf "the report says %s" expected)
-
+        // `--check`: what the report PROMISES, asserted against the list it is built from
+        // rather than the printing of it. A case that quoted a sentence or counted a column
+        // would go red on a rewording or a moved label, which is not a fault — and this file
+        // has already reworded these twice.
         testCase "a value the operator chose is told apart from one the bin defaulted to" <| fun () ->
             // The question --check exists to answer: a value alone cannot say whether the
             // setting you wrote took effect, because `8321` is the same text either way.
+            Expect.equal (settingFor "trust rule" fronted).Origin ManagerCli.Chosen "a chosen value"
+            Expect.equal (settingFor "port" fronted).Origin ManagerCli.Default "a defaulted one"
+            Expect.equal (settingFor "webhooks" loopback).Origin ManagerCli.Off "and a feature that is off"
+
+        testCase "every setting says something, and says what it does" <| fun () ->
+            // Two promises over the whole list, so a setting added without either is red.
+            // A label with nothing after it reads as a rendering fault, and a report has to
+            // be believed; a setting with no description makes --detailed silently partial.
+            for report in [ fronted; loopback ] do
+                for setting in ManagerCli.Report.settings report do
+                    Expect.notEqual setting.Value "" (sprintf "%s has a value" setting.Label)
+                    Expect.notEqual setting.Detail "" (sprintf "%s has a description" setting.Label)
+
+        testCase "the two addresses are two facts, described separately" <| fun () ->
+            // They shared one description until a report of a real deployment printed it
+            // twice, which reads as padding.
+            Expect.notEqual
+                (settingFor "manager at" fronted).Detail
+                (settingFor "sessions at" fronted).Detail
+                "the Manager's origin and the session template say different things"
+
+        testCase "the report prints every setting it holds" <| fun () ->
             let text = ManagerCli.Report.render false fronted
-            let lineFor (label: string) =
-                text.Split '\n' |> Array.find (fun (l: string) -> l.Trim().StartsWith label)
-            Expect.isTrue ((lineFor "trust rule").EndsWith "set") "a chosen value says set"
-            Expect.isTrue ((lineFor "port").EndsWith "default") "and a defaulted one says default"
+            for setting in ManagerCli.Report.settings fronted do
+                Expect.isTrue (text.Contains setting.Label) (sprintf "%s is printed" setting.Label)
+                Expect.isTrue (text.Contains setting.Value) (sprintf "%s's value is printed" setting.Label)
 
-        testCase "a feature that is not enabled says off, not blank" <| fun () ->
-            let text = ManagerCli.Report.render false loopback
-            let lineFor (label: string) =
-                text.Split '\n' |> Array.find (fun (l: string) -> l.Trim().StartsWith label)
-            Expect.isTrue ((lineFor "webhooks").EndsWith "off") "no endpoints is off"
-            Expect.isTrue ((lineFor "webhooks").Contains "none declared") "and it says so in words"
-
-        testCase "a setting that is empty says so in words, never as a blank" <| fun () ->
-            // A label with nothing after it reads as a rendering fault. Asserted as the
-            // PROMISE — every labelled line says something — rather than against the column
-            // the labels happen to be padded to, which a redesign is free to move.
-            let text = ManagerCli.Report.render false loopback
-            for label in [ "webhooks"; "inherited" ] do
-                match text.Split '\n' |> Array.tryFind (fun l -> l.Trim().StartsWith label) with
-                | None -> failwithf "the report has no %s line at all" label
-                | Some found ->
-                    let after = found.Trim().Substring(label.Length).Trim ()
-                    Expect.notEqual after "" (sprintf "%s says something, even when it is empty" label)
-
-        testCase "a value longer than its column is still separated from its state" <| fun () ->
+        testCase "a value longer than its column is still a word apart from its state" <| fun () ->
             // A store path is longer than any column worth keeping, and a value that ran into
             // its own state read as one word (`…SessionMain.jsdefault`).
             let long = { fronted with Spawn = String.replicate 80 "x", ManagerCli.Default }
-            let text = ManagerCli.Report.render false long
-            let row = text.Split '\n' |> Array.find (fun (l: string) -> l.Trim().StartsWith "spawn")
-            Expect.isTrue (row.EndsWith "  default") "two spaces before the state, at least"
+            let row =
+                (ManagerCli.Report.render false long).Split '\n'
+                |> Array.find (fun (l: string) -> l.Contains "xxxx")
+            Expect.isTrue (row.EndsWith " default") "whitespace separates the state from the value"
 
-        testCase "--detailed says what every setting and every state means" <| fun () ->
+        testCase "--detailed explains, and a plain report does not" <| fun () ->
+            let detailed = ManagerCli.Report.render true fronted
             let plain = ManagerCli.Report.render false fronted
-            let detailed = ManagerCli.Report.render true fronted
-            Expect.isTrue (detailed.Length > plain.Length) "detailed adds to the plain report"
-            Expect.isTrue (detailed.Contains "The Manager listens on this port.") "a setting is described"
-            Expect.isTrue (detailed.Contains "You gave this value on the command line.") "and so is a state"
-            for state, _ in ManagerCli.Origin.meanings do
-                Expect.isTrue (detailed.Contains state) (sprintf "%s is explained" state)
-            Expect.isFalse (plain.Contains "The Manager listens on this port.") "and the plain report stays a report"
-
-        testCase "every setting the report renders carries a description" <| fun () ->
-            // Adding a line without saying what it does would make --detailed silently
-            // partial, which is worse than not having it.
-            let detailed = ManagerCli.Report.render true fronted
-            let labels =
-                [ "trust rule"; "secrets"; "port"; "data dir"; "default session"
-                  "idle timeout"; "spawn"; "webhooks" ]
-            let describedSection = detailed.Substring (detailed.IndexOf "what each setting does")
-            for label in labels do
-                Expect.isTrue (describedSection.Contains label) (sprintf "%s is described" label)
+            for setting in ManagerCli.Report.settings fronted do
+                Expect.isTrue (detailed.Contains setting.Detail) (sprintf "%s is explained" setting.Label)
+                Expect.isFalse (plain.Contains setting.Detail) (sprintf "%s is not, without the flag" setting.Label)
+            for state, meaning in ManagerCli.Origin.meanings do
+                Expect.isTrue (detailed.Contains state) (sprintf "the %s state is named" state)
+                Expect.isTrue (detailed.Contains meaning) (sprintf "and %s is explained" state)
 
         testCase "--check and --detailed are switches the Manager declares" <| fun () ->
             let usage = Cli.usage ManagerCli.spec
