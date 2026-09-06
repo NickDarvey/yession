@@ -41,6 +41,20 @@ type LaunchActivity =
 /// How long a session may go unused before the Manager stops it, as configured.
 module IdleWindow =
 
+    /// Back to the vocabulary `parse` accepts: `30m`, `90s`, `2h`, or `never`.
+    ///
+    /// The encode side, and it earns its place the same way the webhook codec's does — a
+    /// report that printed the resolved value as a `TimeSpan` said `1800000`, a number whose
+    /// unit a reader has to guess and would guess wrong. What a report shows must be what an
+    /// operator could type back, so `parse (describe w) = w` is the property, and the largest
+    /// whole unit is what makes the rendering the one they would have written.
+    let describe (window: TimeSpan option) : string =
+        match window with
+        | None -> "never"
+        | Some w when w.TotalHours >= 1.0 && w.TotalHours % 1.0 = 0.0 -> sprintf "%gh" w.TotalHours
+        | Some w when w.TotalMinutes >= 1.0 && w.TotalMinutes % 1.0 = 0.0 -> sprintf "%gm" w.TotalMinutes
+        | Some w -> sprintf "%gs" w.TotalSeconds
+
     /// Parse what `--idle-timeout` was given. Blank is `None` — reaping off, the default,
     /// because stopping a session the operator did not ask to have stopped is not a
     /// behaviour to acquire by upgrading. The option being ABSENT is answered by its caller,

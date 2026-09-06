@@ -147,6 +147,62 @@ let tests =
                 | Error message -> Expect.isTrue (message.Contains bad) (sprintf "names %A back" bad)
                 | Ok port -> failwithf "expected %A to be refused, got port %d" bad port
 
+        // `--check`: what the report SAYS, over values a boot has already resolved. The
+        // rendering is the half worth pinning — the resolution is every other case in this
+        // file, and a report that cannot be read is a report nobody believes.
+        testCase "the report says what every setting came to" <| fun () ->
+            let report : ManagerCli.Report =
+                { Version = "1.2.3"
+                  TrustRule = "trusted-headers"
+                  Secrets = "durable"
+                  Port = 8321
+                  DataDir = "/srv/yession"
+                  DefaultSession = "local-session"
+                  IdleTimeout = "00:30:00"
+                  Spawn = "/nix/store/x/bin/yession-session"
+                  Addressing = [ "addressing", "fronted"; "  manager", "https://host.ts.net:8321" ]
+                  Webhooks = [ "github"; "shop@1=x-shop-hmac:base64" ]
+                  Inherited = [ "YESSION_MANAGER_URL"; "YESSION_PROXY_PORT" ] }
+            let text = ManagerCli.Report.render report
+            for expected in
+                [ "yession-manager 1.2.3"; "trusted-headers"; "8321"; "/srv/yession"; "00:30:00"
+                  "https://host.ts.net:8321"; "shop@1=x-shop-hmac:base64"; "YESSION_PROXY_PORT" ] do
+                Expect.isTrue (text.Contains expected) (sprintf "the report says %s" expected)
+
+        testCase "a setting that is empty says so in words, never as a blank" <| fun () ->
+            // A label with nothing after it reads as a rendering fault, which is the wrong
+            // thing for a report whose whole job is to be believed. Asserted as the PROMISE
+            // — every labelled line says something — rather than against the column the
+            // labels happen to be padded to, which is a layout a redesign is free to move.
+            let report : ManagerCli.Report =
+                { Version = "1.2.3"; TrustRule = "none"; Secrets = "ephemeral"; Port = 0
+                  DataDir = ".yession"; DefaultSession = "local-session"
+                  IdleTimeout = "never (sessions are not reaped)"; Spawn = "node app/SessionMain.js"
+                  Addressing = [ "addressing", "loopback" ]; Webhooks = []; Inherited = [] }
+            let text = ManagerCli.Report.render report
+            for label in [ "webhooks"; "inherited" ] do
+                match text.Split '\n' |> Array.tryFind (fun l -> l.Trim().StartsWith label) with
+                | None -> failwithf "the report has no %s line at all" label
+                | Some found ->
+                    let after = found.Trim().Substring(label.Length).Trim ()
+                    Expect.notEqual after "" (sprintf "%s says something, even when it is empty" label)
+
+        testCase "an idle window is reported in the vocabulary the option accepts" <| fun () ->
+            // `parse (describe w) = w`, because a report shows what an operator could type
+            // back. Rendered as a TimeSpan it read `1800000` — a number whose unit a reader
+            // has to guess, and would guess wrong.
+            for text in [ "90s"; "30m"; "2h"; "45s" ] do
+                let window =
+                    match Yession.Manager.IdleWindow.parse text with
+                    | Ok w -> w
+                    | Error e -> failwithf "%s did not parse: %s" text e
+                Expect.equal (Yession.Manager.IdleWindow.describe window) text (sprintf "%s round-trips" text)
+            Expect.equal (Yession.Manager.IdleWindow.describe None) "never" "and absence has a word"
+
+        testCase "--check is a switch the Manager declares" <| fun () ->
+            Expect.isTrue ((Cli.usage ManagerCli.spec).Contains "--check") "so --help names it"
+            Expect.isTrue (Cli.isSet ManagerCli.checkOption (Cli.parse ManagerCli.spec [| "--check" |] |> function Ok p -> p | Error e -> failwith e)) "and it parses"
+
         // Retirements: a setting that MOVED, and an environment that has not caught up.
         testCase "a retired variable the environment still sets is found, and named with its option" <| fun () ->
             let retirements = [ { Retirements.Was = "YESSION_PORT"; Retirements.Now = "--port" } ]
