@@ -284,16 +284,45 @@ let
       cp ${node-datachannel}/build/Release/node_datachannel.node \
          "$out/libexec/yession/node_modules/node-datachannel/build/Release/node_datachannel.node"
 
+      # The commands this package offers are the ones the MANIFEST offers, read out of the
+      # staged package.json this phase has just copied in. `packagedBins` in tasks.fsx is
+      # therefore the one list: a command added there is packaged by npm, wrapped here, and —
+      # because the install check below runs everything in `$out/bin` — smoked in both, with no
+      # second place to remember. Two hand-written wrappers used to sit here instead, which is
+      # how a bin came to be shipped by two packages and booted by neither.
+      #
+      # Read in the BUILD rather than during evaluation, so nothing needs import-from-derivation
+      # and no consumer has to allow it.
+      #
+      # Every bin takes the same decorations today. One that needs its own would need a case in
+      # this loop, which is a visible edit at the point it is added rather than a wrapper
+      # quietly missing.
+      #
       # tasks.fsx's yession-manager shim sets YESSION_SPAWN_MAIN and spawns `node session.js`,
       # which inherits YESSION_BIN_CLAUDE from this wrapper.
-      makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession-session" \
-        --add-flags "$out/libexec/yession/bin/yession-session.js" \
-        --set-default YESSION_BIN_CLAUDE ${claude-code}/bin/claude \
-        --set-default YESSION_BIN_GIT ${pkgs.git}/bin/git ${srtToolFlags}
-      makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession-manager" \
-        --add-flags "$out/libexec/yession/bin/yession-manager.js" \
-        --set-default YESSION_BIN_CLAUDE ${claude-code}/bin/claude \
-        --set-default YESSION_BIN_GIT ${pkgs.git}/bin/git ${srtToolFlags}
+      # String concatenation rather than a template literal: `${"$"}{…}` is nix interpolation
+      # inside this string, and escaping it past two languages to say what `+` says plainly is
+      # how a build script becomes unreadable.
+      ${pkgs.nodejs_24}/bin/node -e '
+        const { bin } = require(process.argv[1])
+        for (const [name, entry] of Object.entries(bin)) console.log(name + "\t" + entry)
+      ' "$out/libexec/yession/package.json" > bins.tsv
+
+      # A manifest offering nothing would make everything after it vacuous: no wrapper to fail,
+      # and an install check that loops over an empty `$out/bin` and passes.
+      test -s bins.tsv || { echo "the staged manifest offers no commands to wrap"; exit 1; }
+
+      # Read from a FILE rather than piped into `while`: a pipeline runs the loop in a subshell,
+      # where a makeWrapper that failed is reported as the pipeline failing and names the node
+      # that produced the list instead of the wrapper that could not be made.
+      while IFS="$(printf '\t')" read -r name entry; do
+        makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/$name" \
+          --add-flags "$out/libexec/yession/$entry" \
+          --set-default YESSION_BIN_CLAUDE ${claude-code}/bin/claude \
+          --set-default YESSION_BIN_GIT ${pkgs.git}/bin/git ${srtToolFlags}
+      done < bins.tsv
+      rm bins.tsv
+
       runHook postInstall
     '';
     dontStrip = true;
