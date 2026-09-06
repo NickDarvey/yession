@@ -84,8 +84,19 @@ jobs:
         with:
           name: yession
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      # `nixpkgs#devenv` resolves through the flake registry to the nixpkgs-unstable CHANNEL,
+      # so which devenv CI ran was a moving target: the toolchain could change under this
+      # repository with no commit, and two runs of one commit could disagree about it.
+      # devenv.lock already names an immutable nixpkgs for the dev shell, so the CLI is taken
+      # from there rather than pinned a second time here — one pin, moved by `devenv update`
+      # alone, and a CLI that can never disagree with the shell it evaluates about which
+      # nixpkgs they are. The url is captured before it is used, because a substitution read
+      # inline has its exit status discarded (tasks.fsx's version policy tells that story).
       - name: Install devenv
-        run: nix profile install nixpkgs#devenv
+        run: |
+          set -euo pipefail
+          url="$(jq -er '.nodes.nixpkgs.locked.url' devenv.lock)"
+          nix profile install "tarball+$url#devenv"
       # Quoted: the name contains a colon-space, which is a mapping separator in a bare scalar.
       - name: "Compute version (1.0.0-beta.<n>, or a +semver: marker bump)"
         id: version
