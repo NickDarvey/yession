@@ -779,6 +779,17 @@ Async.StartImmediate (
         // rule every other GitHub verb follows. The poller appends its own transitions:
         // the baseline it compares against is only durable because what advanced it was
         // recorded, so a driver that could forget the append must not exist.
+        //
+        // ONE ledger for github.com's budget, made here and handed to both callers below.
+        // A GitHub allowance belongs to a credential rather than to a process, so what a
+        // reply reports includes what every other session holding it has spent — which is
+        // why reading the provider's own counter needs no coordination and a count of our
+        // own would need all of it.
+        let githubLedger = Resilience.Ledger.create ()
+        let githubLooking (spend: Resilience.Spend) =
+            GitHubPrs.fetchOver
+                (Interop.envOr "YESSION_GITHUB_API_URL" "https://api.github.com")
+                (GitHubPrs.Spending.over githubLedger (fun () -> System.DateTimeOffset.UtcNow) spend)
         do
             let recordPrTransitions
                 (watcher: ActorRef)
@@ -810,7 +821,9 @@ Async.StartImmediate (
                 PrWatches.create
                     GitHubPrs.provider
                     (fun () -> System.DateTimeOffset.UtcNow)
-                    (GitHubPrs.fetchOver (Interop.envOr "YESSION_GITHUB_API_URL" "https://api.github.com"))
+                    // Background: a watch yields the reserve, because the person asking for
+                    // something is the one who should get the last of an hour's budget.
+                    (githubLooking Resilience.Background)
                     resolveGitHubToken
                     (fun actor -> reportGitHubNetworkFailure actor "pull request poll")
                     recordPrTransitions
@@ -835,7 +848,8 @@ Async.StartImmediate (
                                 ()
                             })
                         watchesNow
-                        (GitHubPrs.fetchOver (Interop.envOr "YESSION_GITHUB_API_URL" "https://api.github.com"))
+                        // Foreground: somebody typed this, and the reserve is what it is for.
+                        (githubLooking Resilience.Foreground)
                         resolveGitHubToken
                         reconcileWatches)
         // The query registry (Plan 15): every read-only view this session declares, in
