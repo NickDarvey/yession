@@ -177,19 +177,14 @@ jobs:
         with:
           name: yession
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-      - name: Build the Nix package
+      # The build IS the smoke: the derivation's `installCheckPhase` runs every bin it wrapped
+      # (`--version`) and boots the Manager to its readiness line, so a package that cannot
+      # start is a build that fails. This step used to boot it again in bash — a second copy of
+      # the readiness line and the Manager's options, which had already drifted from the one in
+      # `nix/packages.nix` (it passed no `--secrets ephemeral`) and which nothing could catch,
+      # because a step here runs only after a merge.
+      - name: Build the Nix package (its install check boots every bin)
         run: nix build .#yession --print-build-logs
-      # nix-only job (no devenv, no dotnet), so the readiness check is inline tool-glue rather
-      # than tasks.fsx's boot-smoke verb: run each built bin with ephemeral ports and assert it
-      # announces itself. (`nix build .#yession` above is pure — it never touches the devenv
-      # input — so this job proves the real `nix profile install` path.)
-      - name: Boot smoke (both surfaces serve)
-        run: |
-          out="$(timeout 30 ./result/bin/yession-manager \
-            --data-dir "$(mktemp -d)" --port 0 2>&1 || true)"
-          echo "$out" | grep -q "management UI at" \
-            || { echo "the Nix package did not boot:"; echo "$out"; exit 1; }
-          echo "nix package boot smoke passed"
 
   release:
     # `bench` is here so its artifact exists to download, NOT so it can stop the release. The

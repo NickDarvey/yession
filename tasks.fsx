@@ -878,7 +878,7 @@ let private nodeBudgetMs (caps: Set<string>) =
     // hang detector's line, not an expectation.
     + allowing "Dogfood" 3_600_000
 
-// Build the installable from the WORKING TREE and boot it.
+// Build the installable from the WORKING TREE, which boots it: the derivation checks itself.
 //
 // Every nix build CI runs goes through a flake, and a flake source copy is what git tracks —
 // so no CI job has ever built the tree a developer actually has, and nothing outside this gate
@@ -886,16 +886,15 @@ let private nodeBudgetMs (caps: Set<string>) =
 // derivation; a NuGet FOD hash that no longer matches what a restore produces). release.yml's
 // package-nix job stays the check of the pure consumer route; this is the check of yours.
 let private buildNixPackage () =
-    let out =
-        run "nix" [ "build"; "--extra-experimental-features"; "nix-command"
-                    "--file"; "nix/worktree.nix"; "nix"
-                    "--no-link"; "--print-out-paths"; "--print-build-logs" ]
-    let outPath = out.Split '\n' |> Array.last |> fun s -> s.Trim ()
-    // A build is not a boot: the wrapped bins resolve their runtime node_modules and the native
-    // addons out of the store paths this derivation assembled, and only running them proves it.
-    // Every bin the package declares gets booted — a wrapper the derivation forgot to make is a
-    // missing file here, and a wrapper that cannot find its addon is a dead process.
-    bootSmoke managerReady (Path.Combine (outPath, "bin/yession-manager")) managerSmokeArgs
+    // A build IS a boot: the derivation's `installCheckPhase` runs every bin it wrapped and
+    // serves the Manager, so the wrapped bins resolving their runtime node_modules and their
+    // native addons out of the store is proven by this build succeeding. It used to be booted
+    // again here from the returned store path — a second copy of an invocation the derivation
+    // owns, and the reason `--print-out-paths` was asked for.
+    run "nix" [ "build"; "--extra-experimental-features"; "nix-command"
+                "--file"; "nix/worktree.nix"; "nix"
+                "--no-link"; "--print-build-logs" ]
+    |> ignore
 
 // A full `verify` spends its first ~80 seconds in restore, build, Fable and stage — tools that
 // are either silent or so chatty their own progress reads as scrollback, so the run looks
