@@ -292,6 +292,93 @@ let private deadlineTests =
             }
     ]
 
+// --- What a provider says is left ----------------------------------------------------------
+
+let private atMinute (n: float) = DateTimeOffset (2026, 1, 1, 0, 0, 0, TimeSpan.Zero) |> fun t -> t.AddMinutes n
+let private noon = atMinute 0.0
+let private reserving (n: int) : Resilience.Limits = { Reserve = n }
+
+let private quotaTests =
+    testList "A budget read from the provider" [
+        testCase "nothing read yet allows the very call that would tell us" <| fun () ->
+            for spend in [ Resilience.Background; Resilience.Foreground ] do
+                Expect.equal
+                    (Resilience.Quota.decide noon (reserving 100) spend Resilience.Unknown)
+                    Resilience.Go
+                    "a ledger that refused until it had evidence would refuse the call that brings it"
+
+        testCase "background stops at the reserve; work somebody asked for spends it" <| fun () ->
+            // One pooled budget, and the poller draws on it every few seconds while nobody
+            // watches. Without this it is the poller that spends the request a person is
+            // waiting on.
+            let nearlyOut = Resilience.Seen (50, atMinute 30.0)
+            Expect.equal
+                (Resilience.Quota.decide noon (reserving 100) Resilience.Background nearlyOut)
+                (Resilience.Hold (atMinute 30.0))
+                "background yields what is left"
+            Expect.equal
+                (Resilience.Quota.decide noon (reserving 100) Resilience.Foreground nearlyOut)
+                Resilience.Go
+                "and the reserve is exactly what foreground work is for"
+
+        testCase "a window that has turned over is not a budget" <| fun () ->
+            // A spent number from a window in the past is not news about this one, and
+            // waiting on it is waiting for a moment that has been and gone.
+            Expect.equal
+                (Resilience.Quota.decide noon (reserving 0) Resilience.Background (Resilience.Seen (0, atMinute -1.0)))
+                Resilience.Go
+                "the reading is stale, not binding"
+
+        testCase "a spent budget holds until the moment the provider named" <| fun () ->
+            // GitHub's documented remedy for a primary limit: do not retry until the moment
+            // x-ratelimit-reset names. A delay invented here would be a second opinion.
+            Expect.equal
+                (Resilience.Quota.decide noon (reserving 0) Resilience.Foreground (Resilience.Seen (0, atMinute 42.0)))
+                (Resilience.Hold (atMinute 42.0))
+                "the provider's own moment, not a backoff"
+
+        testCase "a reply that said nothing about the budget leaves the reading alone" <| fun () ->
+            // Headers for another of the provider's buckets, or none at all: that is a reply
+            // which did not mention the budget, never evidence that the budget is unknown.
+            let held = Resilience.Seen (4000, atMinute 30.0)
+            Expect.equal (Resilience.Allowance.observed Resilience.Unknown held) held "unchanged"
+
+        testCase "within one window the smaller reading wins" <| fun () ->
+            // Replies to concurrent calls settle in whatever order the network gives them,
+            // and believing a larger number that arrived late is how a client spends what it
+            // has already spent.
+            let window = atMinute 30.0
+            Expect.equal
+                (Resilience.Allowance.observed (Resilience.Seen (4900, window)) (Resilience.Seen (4800, window)))
+                (Resilience.Seen (4800, window))
+                "a straggler cannot hand budget back"
+
+        testCase "a later window replaces the reading, and an earlier one is a straggler" <| fun () ->
+            let held = Resilience.Seen (10, atMinute 30.0)
+            Expect.equal
+                (Resilience.Allowance.observed (Resilience.Seen (5000, atMinute 90.0)) held)
+                (Resilience.Seen (5000, atMinute 90.0))
+                "the window turned over and the budget with it"
+            Expect.equal
+                (Resilience.Allowance.observed (Resilience.Seen (5000, atMinute -30.0)) held)
+                held
+                "a reply from a window already gone teaches nothing"
+
+        testCase "one ledger per credential, so every caller reads what the last one spent" <| fun () ->
+            // The cell is the only stateful part, and this is what it buys: the poller learns
+            // what the verb just spent without either being told about the other.
+            let ledger = Resilience.Ledger.create ()
+            Expect.equal
+                (Resilience.Ledger.permit ledger noon (reserving 100) Resilience.Background)
+                Resilience.Go
+                "nothing read yet"
+            Resilience.Ledger.observed ledger (Resilience.Seen (50, atMinute 30.0))
+            Expect.equal
+                (Resilience.Ledger.permit ledger noon (reserving 100) Resilience.Background)
+                (Resilience.Hold (atMinute 30.0))
+                "the next caller reads what that reply said"
+    ]
+
 // --- Breakers -----------------------------------------------------------------------------
 
 /// A clock the test moves by hand, so an open-then-recover sequence is asserted without
@@ -1393,6 +1480,7 @@ let tests =
         guardTests
         verdictTests
         httpTests
+        quotaTests
         deadlineTests
         breakerTests
         classificationTests
