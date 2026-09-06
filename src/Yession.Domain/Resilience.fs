@@ -218,6 +218,122 @@ module Resilience =
             | Answered (status, _) when status >= 500 || status = 408 || status = 429 -> Retry
             | Answered _ -> Fatal
 
+    // --- What a provider says is left ------------------------------------------------------
+
+    /// What a provider last said about the budget behind a credential.
+    ///
+    /// READ, never kept: this is the provider's own counter as of its last reply, not a tally
+    /// maintained here. That distinction is the whole design. A count of our own would have to
+    /// know every rule the provider prices requests by — GitHub does not charge for a
+    /// conditional request that answers 304, does charge for the redirect it serves on a
+    /// renamed repo, and charges once more for the request that follows it — and any rule we
+    /// failed to learn would show up as a tally that drifts from the truth in the direction of
+    /// spending more than we think. The header is already right, and it is already SHARED: a
+    /// budget belongs to a credential rather than to a process, so a reply here reports what
+    /// every other process holding that credential has spent too, with nothing to coordinate.
+    ///
+    /// Two states and no third, because remaining and reset are only meaningful together — a
+    /// number with no window to wait for is a hold nobody can end.
+    type Allowance =
+        /// No reply has been read yet.
+        | Unknown
+        /// What the last reply said: how many are left, and when the window turns over.
+        | Seen of remaining: int * resets: DateTimeOffset
+
+    /// What a call is FOR, which is the only thing that decides whether it may spend the last
+    /// of a budget.
+    ///
+    /// One pooled allowance means a poller can starve the verb a person is waiting on: they
+    /// draw on the same number, and the poller draws on it every few seconds while nobody
+    /// watches. So background work stops early and leaves a reserve, and work somebody asked
+    /// for spends it.
+    type Spend =
+        | Background
+        | Foreground
+
+    /// Whether a call may be made now, and when to come back if not. A moment rather than a
+    /// delay, because the provider names a moment and everything downstream schedules on one.
+    type Permit =
+        | Go
+        | Hold of until: DateTimeOffset
+
+    /// How much of a budget background work must leave for everything else.
+    type Limits = { Reserve : int }
+
+    module Allowance =
+
+        /// Fold a reply's reading into what was held.
+        ///
+        /// A reply that said nothing (no headers, or headers for another of the provider's
+        /// buckets) teaches nothing and leaves the held reading alone — it is not evidence
+        /// that the budget is unknown, only that this reply did not mention it.
+        ///
+        /// Within one window a budget only falls, so the SMALLER reading wins: replies to
+        /// concurrent calls settle in whatever order the network gives them, and believing a
+        /// larger number that arrived late is how a client spends what it has already spent.
+        /// A later window replaces the reading outright, and an earlier one is a straggler
+        /// from a window that has already turned over.
+        let observed (reading: Allowance) (held: Allowance) : Allowance =
+            match reading, held with
+            | Unknown, _ -> held
+            | _, Unknown -> reading
+            | Seen (fresh, freshResets), Seen (kept, keptResets) ->
+                if freshResets > keptResets then reading
+                elif freshResets < keptResets then held
+                else Seen (min fresh kept, keptResets)
+
+    module Quota =
+
+        /// May a call of this class go now?
+        ///
+        /// Unknown allows: no reply has been read, so there is no evidence to hold on, and a
+        /// ledger that refused until it had some would refuse the very call that would get it.
+        /// A window that has turned over allows for the same reason — a spent number from a
+        /// window in the past is not news about this one, and waiting on it is waiting for a
+        /// moment that has been and gone.
+        let decide (now: DateTimeOffset) (limits: Limits) (spend: Spend) (allowance: Allowance) : Permit =
+            match allowance with
+            | Unknown -> Go
+            | Seen (_, resets) when resets <= now -> Go
+            | Seen (remaining, resets) ->
+                let floor = match spend with | Background -> limits.Reserve | Foreground -> 0
+                if remaining > floor then Go else Hold resets
+
+    /// One credential's ledger: the last reading, kept.
+    ///
+    /// The only stateful thing here, and deliberately the smallest — a cell holding one
+    /// `Allowance`. It is created at the composition root and handed to everything that
+    /// spends, so a process holds ONE reading per credential rather than one per caller:
+    /// the poller learns what the verb just spent, and the verb learns what the poller did.
+    ///
+    /// Every decision over it stays a pure function of the reading (`Quota.decide`), which is
+    /// what keeps the whole rule in the cheap tier: the cell only remembers.
+    type Ledger =
+        private
+            { /// What the last reply said.
+              Read : unit -> Allowance
+              /// Fold in what a reply just said.
+              Observed : Allowance -> unit }
+
+    module Ledger =
+
+        let create () : Ledger =
+            let mutable held = Unknown
+            { Read = fun () -> held
+              Observed = fun reading -> held <- Allowance.observed reading held }
+
+        /// What a reply taught. Called for EVERY reply, including the ones that cost nothing:
+        /// a conditional request answering 304 is free and still carries the counter, so a
+        /// cadence that spends nothing still keeps the reading current.
+        let observed (ledger: Ledger) (reading: Allowance) : unit = ledger.Observed reading
+
+        /// What the ledger says about a call of this class, right now.
+        let permit (ledger: Ledger) (now: DateTimeOffset) (limits: Limits) (spend: Spend) : Permit =
+            Quota.decide now limits spend (ledger.Read ())
+
+        /// What it is holding, for whoever reports rather than decides.
+        let reading (ledger: Ledger) : Allowance = ledger.Read ()
+
     // --- The circuit ----------------------------------------------------------------------
 
     /// What a breaker did, for whoever is watching a resource rather than a call. A refusal
