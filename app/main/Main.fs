@@ -19,6 +19,7 @@ module Yession.Host.Main
 // (Step 25).
 
 open Yession.Domain
+open Yession.Domain.Link
 open Yession.Host
 
 // What this bin accepts is `ManagerCli.spec` — a value, so the rule that every retirement
@@ -111,6 +112,53 @@ let private sessionCommand, sessionArgs =
     match Cli.valueOf ManagerCli.spawnBinOption args with
     | None -> nodePath, [ Interop.envOr "YESSION_SPAWN_MAIN" "app/SessionMain.js" ]
     | Some binary -> binary, []
+
+// `--check`: resolve, report, stop. It sits HERE, after every resolution above and before
+// anything is created, because the report is of resolved values and the refusals on the way
+// to it are the check's own first half — a configuration that cannot be resolved never
+// reaches this line, and says why.
+let private checkReport () =
+    let addressing =
+        match publicAccess with
+        | Loopback -> [ "addressing", "loopback (nothing fronted; remote browsers cannot reach a session)" ]
+        | Fronted (manager, sessions) ->
+            [ "addressing", "fronted"
+              "  manager", ManagerOrigin.value manager
+              "  sessions", SessionTemplate.value sessions ]
+    let secrets =
+        match Cli.valueOf ManagerCli.secretsOption args with
+        | Some mode -> mode
+        // What absence RESOLVES to, spelled out. The name of the default is the one thing a
+        // report must not leave as "unset": it is the answer to the question being asked.
+        | None -> "durable where this host has a credential manager, in-memory where it has none"
+    // Decoded and re-encoded, so what is printed is what the relay will serve rather than
+    // what was typed. A declaration that could not be decoded refused the boot above.
+    let webhooks =
+        Cli.valuesOf ManagerCli.webhookOption args
+        |> WebhookRelay.EndpointSpec.decodeAll
+        |> Result.map (List.map WebhookRelay.EndpointSpec.encode)
+        |> Result.defaultValue []
+    let inherited =
+        Interop.envNames ()
+        |> Array.filter (fun name -> name.StartsWith "YESSION_")
+        |> List.ofArray
+    let report : ManagerCli.Report =
+        { Version = Version.current
+          TrustRule = strategy.Name
+          Secrets = secrets
+          Port = managerPort
+          DataDir = dataDir
+          DefaultSession = defaultSession
+          IdleTimeout = Yession.Manager.IdleWindow.describe idleTimeout
+          Spawn = String.concat " " (sessionCommand :: sessionArgs)
+          Addressing = addressing
+          Webhooks = webhooks
+          Inherited = inherited }
+    ManagerCli.Report.render report
+
+if Cli.isSet ManagerCli.checkOption args then
+    printfn "%s" (checkReport ())
+    Interop.exit 0
 
 Async.StartImmediate(
     async {

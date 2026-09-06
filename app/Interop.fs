@@ -230,6 +230,12 @@ let envOr (name: string) (fallback: string) : string = jsNative
 [<Emit("process.env[$0] = $1")>]
 let setEnv (name: string) (value: string) : unit = jsNative
 
+/// Every variable name in this process's environment, sorted. NAMES only, and that is the
+/// point: a report can say which are present without reading any of them, so this is not a
+/// second reader of anything — `envOr` remains the one way a value is read.
+[<Emit("Object.keys(process.env).sort()")>]
+let envNames () : string array = jsNative
+
 /// How this deployment is reached from outside: the two operator
 /// variables, parsed into the one value that decides both the Manager's public origin
 /// and where sessions live. Error = a combination that cannot be deployed; every caller
