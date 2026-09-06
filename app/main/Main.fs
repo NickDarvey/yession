@@ -21,36 +21,9 @@ module Yession.Host.Main
 open Yession.Domain
 open Yession.Host
 
-// What this bin accepts, declared once. `--version` and `--help` answer from here before
-// any configuration is read — no data directory, no ports, no sessions launched — and an
-// unknown option or a missing value stops the boot with the reason and the usage, rather
-// than being ignored into a deny-everything Manager.
-let private authOption =
-    Cli.value "auth" "rule" "how a request's subject is established: none, localhost, trusted-headers"
-
-let private secretsOption =
-    Cli.value "secrets" "mode" "whether secrets persist across restarts: durable, ephemeral"
-
-let private portOption =
-    Cli.value "port" "port" "the port the Manager listens on; 0 lets the OS choose (default 8321)"
-
-let private dataDirOption =
-    Cli.value "data-dir" "path" "where this Manager keeps its state (default .yession)"
-
-let private idleTimeoutOption =
-    Cli.value "idle-timeout" "window" "stop a session unused for this long: 90s, 30m, 2h (default never)"
-
-let private defaultSessionOption =
-    Cli.value "default-session" "id" "the session ensured and launched at boot (default local-session)"
-
-let private spawnBinOption =
-    Cli.value "spawn-bin" "command" "the command that runs a session (default this Node on the packaged entry)"
-
-let private cli =
-    Cli.spec
-        "yession-manager"
-        [ authOption; secretsOption; portOption; dataDirOption; idleTimeoutOption
-          defaultSessionOption; spawnBinOption ]
+// What this bin accepts is `ManagerCli.spec` — a value, so the rule that every retirement
+// points at a real option can be checked against the same list this parses.
+let private cli = ManagerCli.spec
 
 let private args = Cli.parseOrExit cli Version.current
 
@@ -71,12 +44,12 @@ let private expect =
 // (`Launch.Variable`) — one name meaning two different things in two processes, on opposite
 // sides of the trust boundary.
 let private defaultSession =
-    Cli.valueOf defaultSessionOption args |> Option.defaultValue (SessionId.value SessionId.local)
-let private dataDir = Cli.valueOf dataDirOption args |> Option.defaultValue ".yession"
+    Cli.valueOf ManagerCli.defaultSessionOption args |> Option.defaultValue (SessionId.value SessionId.local)
+let private dataDir = Cli.valueOf ManagerCli.dataDirOption args |> Option.defaultValue ".yession"
 // Where the management UI answers. Parsed by `ManagerPort.ofName`, beside the port it
 // configures and where the cheap tier can reach it, for the reason `--secrets` is.
 let private managerPort =
-    match ProcessManager.ManagerPort.ofName (Cli.valueOf portOption args) with
+    match ProcessManager.ManagerPort.ofName (Cli.valueOf ManagerCli.portOption args) with
     | Ok port -> port
     | Error e -> Cli.rejectValue cli e
 
@@ -88,7 +61,7 @@ let private idleTimeout =
     // Not given is answered HERE, rather than handed down as an empty string: absence is the
     // default (reaping off), and spelling it `""` would ask the parser to rediscover from a
     // value what this already knows from the option.
-    match Cli.valueOf idleTimeoutOption args with
+    match Cli.valueOf ManagerCli.idleTimeoutOption args with
     | None -> None
     | Some given ->
         match Yession.Manager.IdleWindow.parse given with
@@ -101,7 +74,7 @@ let private idleTimeout =
 // No `--auth` means nobody authenticates — choosing a trust rule is deliberate, and an
 // unknown name fails the boot loudly rather than defaulting to anything.
 let private strategy =
-    match Yession.Oidc.Strategy.ofName (Cli.valueOf authOption args) with
+    match Yession.Oidc.Strategy.ofName (Cli.valueOf ManagerCli.authOption args) with
     | Ok s -> s
     | Error e -> Cli.rejectValue cli e
 
@@ -110,7 +83,7 @@ let private strategy =
 // async below. Parsed up here beside `--auth` so an unknown value refuses the boot before
 // anything else is touched.
 let private secretsMode =
-    match ProcessManager.SecretsMode.ofName (Cli.valueOf secretsOption args) with
+    match ProcessManager.SecretsMode.ofName (Cli.valueOf ManagerCli.secretsOption args) with
     | Ok m -> m
     | Error e -> Cli.rejectValue cli e
 
@@ -135,7 +108,7 @@ let private nodePath : string = Fable.Core.Util.jsNative
 // like `YESSION_BIN_*`, not a decision an operator takes — a shim that had to append an
 // argument would also have to know whether the operator had already given one.
 let private sessionCommand, sessionArgs =
-    match Cli.valueOf spawnBinOption args with
+    match Cli.valueOf ManagerCli.spawnBinOption args with
     | None -> nodePath, [ Interop.envOr "YESSION_SPAWN_MAIN" "app/SessionMain.js" ]
     | Some binary -> binary, []
 
@@ -173,7 +146,8 @@ Async.StartImmediate(
                     Public = publicAccess
                     OnEvent = telemetry.Log
                     Strategy = Some strategy
-                    Secrets = Some secretsBacking }
+                    Secrets = Some secretsBacking
+                    Webhooks = Cli.valuesOf ManagerCli.webhookOption args }
                 (Some ManagerUi.tryHandle)
 
         // Ensure the default session exists (an existing registration is resume).

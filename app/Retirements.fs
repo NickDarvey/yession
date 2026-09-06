@@ -30,7 +30,12 @@ let manager : Retirement list =
       retired "YESSION_DATA_DIR" "--data-dir"
       retired "YESSION_IDLE_TIMEOUT" "--idle-timeout"
       retired "YESSION_DEFAULT_SESSION" "--default-session"
-      retired "YESSION_SPAWN_BIN" "--spawn-bin" ]
+      retired "YESSION_SPAWN_BIN" "--spawn-bin"
+      // The per-endpoint signature scheme moved INTO the option that declares the endpoint
+      // (`--webhook name=header:encoding:prefix`), so it no longer has a variable of its
+      // own to retire: `YESSION_WEBHOOK_SIGNATURE_<NAME>` was only ever read for a name
+      // this one listed, and a deployment that set one set this too.
+      retired "YESSION_WEBHOOK_ENDPOINTS" "--webhook" ]
 
 /// Every retirement `lookup` still finds a value for. Reported together, not one per boot:
 /// a deployment that moved one of these moved all of them at the same time, and finding out

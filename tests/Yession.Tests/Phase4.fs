@@ -1708,23 +1708,66 @@ let private hookRelayTests =
     let aBody = """{"repository":{"full_name":"trinketworks/yession"},"number":7}"""
 
     testList "The hook relay" [
-        testCase "a declaration names endpoints, and a rotation is optional" <| fun () ->
-            let parsed = WebhookRelay.parseEndpoints "github, ci@2" (fun _ -> "") |> expect
+        testCase "one option declares an endpoint, its rotation and its signature" <| fun () ->
+            let parsed =
+                WebhookRelay.EndpointSpec.decodeAll [ "github"; "ci@2"; "shop@1=x-shop-hmac:base64:v1=" ]
+                |> expect
             Expect.equal
                 (parsed |> List.map (fun e -> e.Name, e.Rotation))
-                [ "github", 0; "ci", 2 ]
-                "both endpoints, and the one that named a rotation kept it"
+                [ "github", 0; "ci", 2; "shop", 1 ]
+                "each endpoint, with the rotation it named or none"
+            Expect.equal
+                (parsed |> List.map (fun e -> e.Signature.Header))
+                [ "x-hub-signature-256"; "x-hub-signature-256"; "x-shop-hmac" ]
+                "and the signature it named, or WebSub's"
+
+        testCase "a prefix may hold the = that separates the signature off" <| fun () ->
+            // `sha256=` is the DEFAULT prefix, so a grammar that split on the last `=`
+            // would be unable to write down its own default.
+            match WebhookRelay.EndpointSpec.decode "github=x-hub-signature-256:hex:sha256=" with
+            | Ok spec -> Expect.equal spec.Signature.Prefix "sha256=" "the whole prefix, = included"
+            | Error e -> failwithf "expected a decode, got: %s" e
+
+        testCase "a declaration round-trips through the codec" <| fun () ->
+            // The property no parser test can state: a decoder that drops a field, or an
+            // encoder that cannot express one the decoder accepts, is red here.
+            let specs : WebhookRelay.EndpointSpec list =
+                [ { Name = "github"; Rotation = 0; Signature = WebhookRelay.SignatureSpec.webSub }
+                  { Name = "ci-2"; Rotation = 7
+                    Signature = { Header = "x-sig"; Encoding = "base64"; Prefix = "" } }
+                  { Name = "shop_a"; Rotation = 1
+                    Signature = { Header = "x-shop-hmac"; Encoding = "hex"; Prefix = "v1=" } } ]
+            for spec in specs do
+                let text = WebhookRelay.EndpointSpec.encode spec
+                match WebhookRelay.EndpointSpec.decode text with
+                | Ok back -> Expect.equal back spec (sprintf "%s round-trips" text)
+                | Error e -> failwithf "%s did not decode: %s" text e
+
+        testCase "encoding canonicalises, so the page shows a line worth copying" <| fun () ->
+            // The other direction deliberately does NOT hold: what absence already means is
+            // not written back out.
+            let encodeOf raw = WebhookRelay.EndpointSpec.decode raw |> expect |> WebhookRelay.EndpointSpec.encode
+            Expect.equal (encodeOf "github@0") "github" "rotation 0 is what absence means"
+            Expect.equal (encodeOf "github=x-hub-signature-256:hex:sha256=") "github" "and so is the default signature"
+            Expect.equal (encodeOf "shop=x-shop-hmac:base64:") "shop=x-shop-hmac:base64" "an empty prefix loses its colon"
 
         testCase "an endpoint name that could not be a path segment is refused" <| fun () ->
-            // It is a URL path segment and an environment-variable suffix at once.
-            Expect.isError (WebhookRelay.parseEndpoints "git hub" (fun _ -> "")) "a space is neither"
+            // It is a URL path segment and a field of this grammar at once.
+            Expect.isError (WebhookRelay.EndpointSpec.decode "git hub") "a space is neither"
+
+        testCase "one endpoint declared twice is refused, never resolved" <| fun () ->
+            // Two declarations of one name disagree about its rotation or its signature, and
+            // picking either silently serves a secret nobody asked for.
+            Expect.isError
+                (WebhookRelay.EndpointSpec.decodeAll [ "github"; "github@1" ])
+                "the same name twice"
 
         testCase "a signature spec that is not header:encoding is refused" <| fun () ->
-            Expect.isError (WebhookRelay.SignatureSpec.parse "x-sig") "one field is not a spec"
+            Expect.isError (WebhookRelay.SignatureSpec.decode "x-sig") "one field is not a spec"
 
         testCase "a digest encoding the relay cannot produce is refused at boot" <| fun () ->
             // Rather than at the first delivery, which is when nobody is looking.
-            Expect.isError (WebhookRelay.SignatureSpec.parse "x-sig:base32") "hex and base64 are what Node digests"
+            Expect.isError (WebhookRelay.SignatureSpec.decode "x-sig:base32") "hex and base64 are what Node digests"
 
         testCase "a rotation accepts the secret before it, so no delivery is refused mid-rotation" <| fun () ->
             match WebhookRelay.endpointsFor kek [ spec "github" 2 ] with

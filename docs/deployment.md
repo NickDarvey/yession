@@ -251,8 +251,8 @@ The Manager takes signed deliveries and hands them to sessions that asked, witho
 them: a session declares a filter over paths, the Manager matches
 ([ADR](decisions/2026-08-29-the-manager-relays-hooks-it-cannot-read.md)).
 
-```
-YESSION_WEBHOOK_ENDPOINTS=github
+```sh
+yession-manager --webhook github --webhook linear
 ```
 
 Each is served at `<YESSION_MANAGER_URL>/hooks/<name>`, so this needs a fronted deployment.
@@ -263,17 +263,26 @@ under an ephemeral store: a secret that changed every restart would break delive
 Rotate by bumping the counter; both the new secret and the one before are accepted until you
 bump again:
 
+```sh
+yession-manager --webhook github@1
 ```
-YESSION_WEBHOOK_ENDPOINTS=github@1
-```
+
+The manager page shows each endpoint's declaration back to you, canonicalised — which is
+where the current rotation is visible at all, since it appears in neither the address nor
+the secret nor the header.
 
 Verification is HMAC-SHA256 over the raw body, hex, in `X-Hub-Signature-256` behind `sha256=`
-(the WebSub convention: GitHub, Shopify, Linear). Override per endpoint as
-`header:encoding:prefix`:
+(the WebSub convention: GitHub, Shopify, Linear). Override it per endpoint, in the same
+option, after an `=`:
 
+```sh
+yession-manager --webhook 'shopify=x-shopify-hmac-sha256:base64:'
 ```
-YESSION_WEBHOOK_SIGNATURE_GITHUB=x-shopify-hmac-sha256:base64:
-```
+
+The grammar is `name[@rotation][=header:encoding[:prefix]]`. A name is letters, digits, `-`
+and `_`, so neither separator can appear in one; the signature splits on its first two
+colons only, so a prefix may hold anything — `sha256=` included, which is why the option
+splits on its FIRST `=`.
 
 Not supported: schemes signing a timestamped string (Stripe `<t>.<body>`, Slack
 `v0:<ts>:<body>`) — those need the scheme, not configuration.

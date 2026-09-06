@@ -178,21 +178,15 @@ let tests =
                 Expect.isTrue (message.Contains r.Now) (sprintf "and its option %s" r.Now)
 
         testCase "every option a retirement points at is one the Manager declares" <| fun () ->
-            // The two halves are written in different files, and a retirement naming an option
-            // that does not exist would send an operator to a flag the parser refuses.
-            let manager =
-                Cli.spec
-                    "yession-manager"
-                    [ Cli.value "port" "port" ""; Cli.value "data-dir" "path" ""
-                      Cli.value "idle-timeout" "window" ""; Cli.value "default-session" "id" ""
-                      Cli.value "spawn-bin" "command" "" ]
-            let usage = Cli.usage manager
+            // Against the bin's OWN spec, not a copy of it. This case first went red for the
+            // wrong reason: it listed the options by hand, so the first retirement added
+            // after it was written broke a check that was supposed to be watching for
+            // exactly that. A list you have to keep in step is not a check, it is a second
+            // list — which is why `ManagerCli.spec` is a value.
+            let usage = Cli.usage ManagerCli.spec
             for r in Retirements.manager do
                 Expect.isTrue (usage.Contains (r.Now + " <")) (sprintf "%s is a declared option" r.Now)
 
-        // The other place a retired name outlives its variable, and the one no pull request
-        // could see: `release.yml` runs on master only, so its stale `YESSION_PORT=0` boot
-        // smoke was green through every PR and failed the release, twice, after the merge.
         testCase "the detector sees an assignment and lets a mention be" <| fun () ->
             let retirements = [ { Retirements.Was = "YESSION_PORT"; Retirements.Now = "--port" } ]
             let assigned = Retirements.assignedIn retirements
