@@ -15,6 +15,7 @@
     <Compile Include="Assets.fs" />
     <Compile Include="Cli.fs" />
     <Compile Include="Retirements.fs" />
+    <Compile Include="ManagerCli.fs" />
     <Compile Include="Sse.fs" />
     <Compile Include="WebRtc.fs" />
     <Compile Include="Ssr.fs" />
