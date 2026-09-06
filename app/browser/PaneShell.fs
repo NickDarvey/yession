@@ -190,7 +190,15 @@ let revealMessage (messageId: string) : unit =
             // `revealBlock`, whose comment this is the other half of.
             item.classList.remove [| "animate-reveal" |]
             reflow item
-            item.classList.add [| "animate-reveal" |]))
+            item.classList.add [| "animate-reveal" |]
+            // Take the reader's CURSOR there, not just their eye — a keyboard reader who asked
+            // to be taken to a message and was left with focus on the control that scrolled
+            // away has been shown the message and stranded away from it. The rail and the reply
+            // ref both come through here, so both move focus by this one line. The article is
+            // already centred and visible above, so `focus()` finds nothing to scroll and does
+            // not fight that placement; `tabindex="-1"` is what lets it land on an article at
+            // all — focusable on purpose, never a Tab stop.
+            item.focus ()))
 
 /// Put focus back on one item's actions control, once the menu it opened has gone.
 ///
