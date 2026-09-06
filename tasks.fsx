@@ -429,6 +429,16 @@ let private yessionSessionBinJs = """#!/usr/bin/env node
 import('../session.js')
 """
 
+/// The commands the package offers, and the entry each one runs.
+///
+/// ONE list: the manifest's `bin` map is rendered from it and every smoke walks it, so a command
+/// added here is packaged AND checked with no second place to remember. It used to be a literal
+/// inside the manifest that nothing else could read, which is how `yession-session` came to be
+/// shipped by two packages and booted by neither.
+let private packagedBins =
+    [ "yession-manager", "bin/yession-manager.js"
+      "yession-session", "bin/yession-session.js" ]
+
 // package.json — runtime deps are exactly the externals; npm resolves their platform-native
 // optionalDependencies (node-datachannel's addon, the SDK's native `claude`) on install.
 let private packageJson (version: string) =
@@ -438,8 +448,7 @@ let private packageJson (version: string) =
   "description": "Local-first runtime where humans and AI agents collaborate inside a shared session.",
   "type": "module",
   "bin": {
-    "yession-manager": "bin/yession-manager.js",
-    "yession-session": "bin/yession-session.js"
+%s
   },
   "files": ["bin/", "manager.js", "session.js", "assets/", "README.md"],
   "engines": { "node": ">=24" },
@@ -454,6 +463,9 @@ let private packageJson (version: string) =
 }
 """
         version
+        (packagedBins
+         |> List.map (fun (name, entry) -> sprintf "    \"%s\": \"%s\"" name entry)
+         |> String.concat ",\n")
         (depVersion "@anthropic-ai/claude-agent-sdk")
         (depVersion "@anthropic-ai/sandbox-runtime")
         (depVersion "@napi-rs/keyring")
@@ -523,6 +535,24 @@ let providerReady = "MCP at"
 let managerSmokeArgs (dataDir: string) =
     [ "--secrets"; "ephemeral"; "--data-dir"; dataDir; "--port"; "0" ]
 
+/// Every command the package offers answers `--version`.
+///
+/// The cheap half of a smoke, and the only half some bins can have: `yession-session` cannot
+/// boot without a launch envelope a Manager mints, so asking it to serve would test the envelope
+/// rather than the shim. What this proves is that the shim exists, that its entry resolves, and
+/// that the bundle behind it loads — which is what was missing when a package shipped a bin
+/// nothing ever ran. It asks the product's own contract (`Cli.fs` gives every bin `--version`
+/// from one boundary) rather than an affordance invented for a build.
+///
+/// The nix package asks the same question of its own wrappers, in the derivation that makes them
+/// (`nix/packages.nix`). This is the npm side of it, for the two artefacts nix never sees: the
+/// staged tree and a clean install of the tarball.
+let versionSmoke (what: string) (commandFor: string -> string * string list) =
+    for name, _ in packagedBins do
+        let command, arguments = commandFor name
+        let version = run command (arguments @ [ "--version" ])
+        printfn "version-smoke: %s %s -> %s" what name version
+
 // Reused by `package`, `install-smoke`, and CI's nix-package job: spawn the given command with
 // an ephemeral data dir + port 0, and assert it prints `ready` before a deadline. A bin that
 // cannot boot never passes the gate.
@@ -565,8 +595,10 @@ let bootSmoke (ready: string) (command: string) (arguments: string -> string lis
 let package (version: string) =
     restore ()
     stage version
-    // Boot the packaged bin shim (it self-sets YESSION_SPAWN_MAIN); externals resolve from the
-    // repo node_modules two levels up from dist/npm.
+    // Every shim the manifest offers runs, then the Manager's boots (it self-sets
+    // YESSION_SPAWN_MAIN); externals resolve from the repo node_modules two levels up from
+    // dist/npm.
+    versionSmoke "staged" (fun name -> "node", [ Path.Combine (pkg, "bin/" + name + ".js") ])
     bootSmoke managerReady "node" (fun dataDir -> [ Path.Combine (pkg, "bin/yession-manager.js") ] @ managerSmokeArgs dataDir)
     let packed = runIn pkg "npm" [ "pack"; "--pack-destination"; dist ] |> fun out -> out.Split('\n') |> Array.last
     printfn "packaged dist/%s" (Path.GetFileName (packed.Trim ()))
@@ -592,6 +624,9 @@ let installSmoke (tgz: string) =
     if not (Directory.Exists ndcRelease && (Directory.GetFiles (ndcRelease, "*.node")).Length > 0) then
         failwith "install-smoke: node-datachannel addon was not built"
 
+    // Over what npm ACTUALLY linked into .bin, so a manifest that offers a command npm did not
+    // install is a failure here rather than a missing command on somebody's PATH.
+    versionSmoke "installed" (fun name -> Path.Combine (prefix, "node_modules/.bin/" + name), [])
     bootSmoke managerReady "node" (fun dataDir -> [ Path.Combine (prefix, "node_modules/.bin/yession-manager") ] @ managerSmokeArgs dataDir)
     printfn "install-smoke: native deps resolved and the installed package booted"
 
