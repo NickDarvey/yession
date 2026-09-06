@@ -297,6 +297,72 @@ let
       runHook postInstall
     '';
     dontStrip = true;
+
+    # Every bin this derivation makes is RUN here, so a wrapper that cannot start is a build
+    # that fails rather than a package somebody installs.
+    #
+    # It lives on the derivation because the derivation is what makes the wrappers: a check
+    # that has to be REMEMBERED by whoever builds is a check the next caller does not run, and
+    # this one had two callers who each wrote their own — `release.yml`'s package-nix job in
+    # bash and `tasks.fsx`'s `buildNixPackage` in F#. They had already drifted (only one passed
+    # `--secrets ephemeral`), and when the Manager's variables became options the bash copy was
+    # the one nothing could catch, because a step in release.yml runs only after a merge. Both
+    # are deleted; this is the one that cannot be skipped, and it covers the consumer's `nix
+    # build .#yession` and the worktree build `check Nix` drives, because they are this
+    # derivation.
+    doInstallCheck = true;
+    installCheckPhase = ''
+      runHook preInstallCheck
+      export HOME="$TMPDIR/home"
+      mkdir -p "$HOME"
+
+      # Every bin answers `--version` — the product gives one to each of them from a single
+      # boundary (`Cli.fs`), so this asks its own contract rather than an affordance invented
+      # for a build. It proves the wrapper exists, that node resolves through it, and that the
+      # bundle loads. Over `$out/bin/*` rather than a list written here, so a bin added later
+      # is smoked without anyone remembering to add it.
+      # Captured into a variable rather than interpolated into the echo: a command
+      # substitution inside a larger word has its exit status DISCARDED, so a bin that failed
+      # would print an empty version and pass. (The same shape once published a `v` tag — the
+      # story is at the top of tasks.fsx.) An assignment carries the status, so `set -e` stops
+      # the build.
+      for bin in "$out"/bin/*; do
+        version="$("$bin" --version)"
+        echo "smoke: $(basename "$bin") --version -> $version"
+      done
+
+      # The Manager gets a real boot on top, because "the wrapper starts" and "the surface
+      # serves" are different facts and only the second is what an install is for. Ephemeral
+      # secrets and a scratch data dir for the reason `tasks.fsx`'s `managerSmokeArgs` passes
+      # them everywhere else: a smoke has no business minting a KEK, and a build has no
+      # credential manager to mint one in.
+      #
+      # `yession-session` deliberately gets no more than its `--version`: it cannot start
+      # without a launch envelope minted by a Manager, so booting it here would test the
+      # envelope this phase would have to invent rather than the wrapper.
+      log="$TMPDIR/manager.log"
+      "$out/bin/yession-manager" --secrets ephemeral --data-dir "$TMPDIR/data" --port 0 > "$log" 2>&1 &
+      manager=$!
+      served=
+      # Polled to a deadline rather than run under a fixed `timeout`: a boot that works takes
+      # about a second, and a smoke every build pays for should cost that rather than the
+      # thirty seconds a wait-for-the-timeout shape costs whether it worked or not.
+      for _ in $(seq 1 300); do
+        if grep -q 'management UI at' "$log"; then served=1; break; fi
+        kill -0 $manager 2>/dev/null || break
+        sleep 0.1
+      done
+      kill $manager 2>/dev/null || true
+      wait $manager 2>/dev/null || true
+      if [ -z "$served" ]; then
+        echo "the Manager did not serve. It said:"
+        cat "$log"
+        exit 1
+      fi
+      echo "smoke: yession-manager served the management UI"
+
+      runHook postInstallCheck
+    '';
     meta.mainProgram = "yession-manager";
   };
 
