@@ -81,6 +81,10 @@ jobs:
           set -euo pipefail
           url="$(jq -er '.nodes.nixpkgs.locked.url' devenv.lock)"
           nix profile install "tarball+$url#devenv"
+      # Before anything depends on the shell, and retried: see the action for the failure it
+      # absorbs and why one warm-up covers a whole job.
+      - name: Warm the devenv shell
+        uses: ./.github/actions/devenv-warm
       # The Docker integration suite talks to the daemon (dockerode over the local socket). This
       # job runs on the VM host (no `container:` key), so the preinstalled daemon is reachable
       # directly — and `verify` asks for Docker, so an unreachable one fails the gate rather
