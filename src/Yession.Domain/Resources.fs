@@ -117,25 +117,49 @@ module ResourceLeaf =
         // and a mount at one target collide like two mounts would.
         | Volume (_, at) -> MountTarget at
 
-    /// One line a person reads. The approval prompt is built from these, so it says what
-    /// will be materialised rather than a summary of it.
+    /// A variable's value is the one part of a grant that is arbitrary text, so it is the
+    /// one part that can carry whatever a reader is splitting a list of grants on. Quoted
+    /// exactly when it would otherwise be ambiguous, so the ordinary `env:CI=1` stays bare
+    /// and only the line that needs the ceremony pays for it.
+    let private quotedValue (value: string) : string =
+        let awkward c = System.Char.IsWhiteSpace c || c = '"' || c = '\\' || c = ';'
+        if value |> Seq.exists awkward then
+            "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+        else value
+
+    /// One grant, in the notation. Every leaf is `kind:rest`, and the kind is the first
+    /// thing a reader — or a model — matches on, before it knows anything else about the
+    /// line.
+    ///
+    /// It was a sentence, and the sentence was doing two jobs at once: naming this grant,
+    /// and explaining what its kind means, on every line, forever. What a kind MEANS is said
+    /// once, in the legend beside the surface (`GrantNotation`), which is also where the
+    /// words only ever true of ONE kind now live — a volume's sharing is what a person
+    /// weighs, and it is a fact about volumes rather than about this volume. What a line has
+    /// to carry is which grant this is, and a list of forty of them is read down its kinds.
+    ///
+    /// `path:` covers a file and a directory alike, deliberately. Telling them apart needs a
+    /// stat, this module has no IO by rule, and a cache directory a tool has yet to create is
+    /// an ordinary grant — while the kernel does not make the distinction either. Two
+    /// prefixes would be a claim about the filesystem that nothing here can back.
     let describe (leaf: ResourceLeaf) : string =
         match leaf with
         | Mount mount ->
-            let how =
+            let mode =
                 match mount.Mode with
-                | ResourceMountMode.Read -> "read-only"
-                | ResourceMountMode.Write -> "writable"
-                | ResourceMountMode.Overlay -> "writable over a read-only copy"
-            if mount.At = mount.From then sprintf "%s, %s" mount.From how
-            else sprintf "%s at %s, %s" mount.From mount.At how
-        | Socket path -> sprintf "the socket at %s" path
-        | Endpoint host -> sprintf "reaches %s" host
-        | Variable (name, value) -> sprintf "%s=%s" name value
-        | Exec path -> sprintf "runs %s" path
-        // The sharing is what a person weighing this needs to hear, not the mechanism.
-        | Volume (name, at) ->
-            sprintf "the volume '%s' at %s — persistent, and shared with every sandbox on this host that holds it" name at
+                | ResourceMountMode.Read -> "ro"
+                | ResourceMountMode.Write -> "rw"
+                | ResourceMountMode.Overlay -> "ovl"
+            // The mode is written even when it is the operator's default, because a reader
+            // works out what a grant allows from the line rather than from what is missing
+            // off the end of it.
+            if mount.At = mount.From then sprintf "path:%s:%s" mount.From mode
+            else sprintf "path:%s>%s:%s" mount.From mount.At mode
+        | Socket path -> sprintf "sock:%s" path
+        | Endpoint host -> sprintf "net:%s" host
+        | Variable (name, value) -> sprintf "env:%s=%s" name (quotedValue value)
+        | Exec path -> sprintf "exec:%s" path
+        | Volume (name, at) -> sprintf "vol:%s>%s" name at
 
     /// Every colliding pair in a set of leaves.
     ///
@@ -211,9 +235,16 @@ module ResourceClosure =
     /// renders a leaf without the mark is a surface that under-states — and the second
     /// renderer (what a host makes of the same leaf, below) is where that would have
     /// happened. The mark belongs to the leaf, not to the sentence around it.
+    ///
+    /// A PREFIX, and it was a trailing `(sensitive)`. A grant can be followed by what this
+    /// host made of it (`~>`, below), and a mark at the end of that lands on the host's
+    /// answer rather than on the grant it is about — the stranding this function exists to
+    /// prevent, arriving by the one author who is not a person. It also sorts: `!` precedes
+    /// every character a grant can start with, so any list of these opens with the grants
+    /// somebody has to decide about.
     let mark (sensitivity: Sensitivity) (line: string) : string =
         match sensitivity with
-        | Sensitivity.Sensitive -> sprintf "%s (sensitive)" line
+        | Sensitivity.Sensitive -> "!" + line
         | Sensitivity.Ordinary -> line
 
     /// What a selection NAMES, one line per leaf, sensitive ones marked.
@@ -328,15 +359,16 @@ module RealisedClosure =
     /// PATH are the same grant on every backend, and this is the whole platform knowledge in
     /// the module.
     ///
-    /// The words are what the SANDBOX ends up holding, not the mechanism that could not hold
-    /// it — "any unix socket on this host" is what a person weighs, and "seccomp-bpf cannot
-    /// read a path out of user-space memory" is not.
+    /// What a coarsening SAYS is what the sandbox ends up holding, in the same notation the
+    /// grant was written in and widened by `*` — `sock:*` is what a person weighs, and
+    /// "seccomp-bpf cannot read a path out of user-space memory" is not. A withholding says
+    /// a reason instead, because there is no grant left to name.
     let private scoping (leaf: ResourceLeaf) : (HostDistinction * LeafRealisation) option =
         match leaf with
         | Socket _ ->
-            Some (HostDistinction.SocketsByPath, LeafRealisation.Coarsened "any unix socket on this host")
+            Some (HostDistinction.SocketsByPath, LeafRealisation.Coarsened "sock:*")
         | Endpoint _ ->
-            Some (HostDistinction.EgressByHost, LeafRealisation.Coarsened "anywhere on the network")
+            Some (HostDistinction.EgressByHost, LeafRealisation.Coarsened "net:*")
         | Mount mount ->
             match mount.Mode with
             | ResourceMountMode.Overlay ->
@@ -400,15 +432,18 @@ module RealisedClosure =
     /// consent prompt and another in the timeline would be two answers to the one that
     /// matters.
     /// Takes the leaf ALREADY described, so that a mark put on the grant stays on the grant:
-    /// "the socket at /run/docker.sock (sensitive) — this host cannot scope that ...", never a
-    /// sentence with the mark stranded at the end of it.
+    /// `!sock:/run/docker.sock ~> sock:*`, never a line with the mark stranded past what the
+    /// host had to say.
+    ///
+    /// ONE operator for both outcomes, reading "so the sandbox gets": what follows it is
+    /// either the wider grant, or `nothing` and why. Two operators would be two things to
+    /// learn for one question — what does this host actually give — and the answer to it is
+    /// always whatever is to the right of the arrow.
     let private line (described: string) (outcome: LeafRealisation) : string =
         match outcome with
         | LeafRealisation.AsAsked -> described
-        | LeafRealisation.Coarsened got ->
-            sprintf "%s — this host cannot scope that, so the sandbox gets %s" described got
-        | LeafRealisation.Withheld because ->
-            sprintf "%s — not granted: %s" described because
+        | LeafRealisation.Coarsened got -> sprintf "%s ~> %s" described got
+        | LeafRealisation.Withheld because -> sprintf "%s ~> nothing: %s" described because
 
     /// One difference, said. Public because a policy carries its differences as pairs — the
     /// backend has to act on them, not read them — and whoever reports one is holding the
@@ -425,9 +460,9 @@ module RealisedClosure =
     ///
     /// `ResourceClosure.describe` renders what the selection NAMED, which is what the
     /// operator wrote and the repo picked. Consent is a different question, because the host
-    /// is a third author and the only one that can widen: a person shown `the socket at
-    /// /run/docker.sock` on a host that cannot scope one has consented to a scope that does
-    /// not exist there, and the sandbox holds every socket. So the lines a person says yes to
+    /// is a third author and the only one that can widen: a person shown `sock:/run/docker.sock`
+    /// on a host that cannot scope one has consented to a scope that does not exist there,
+    /// and the sandbox holds every socket. So the lines a person says yes to
     /// are these, and what they bind to changes when the host does.
     ///
     /// The mark rides through unchanged. A coarsened sensitive leaf is MORE worth marking
@@ -445,6 +480,75 @@ module RealisedClosure =
                     (ResourceLeaf.describe leaf)
             line named outcome)
         |> List.sort
+
+/// The legend for the notation the three renderers above write: what a kind is, said once,
+/// wherever grants are shown.
+///
+/// A token can be short because the words a sentence used to spend on its kind are HERE
+/// instead — including the ones that were only ever true of one kind and were being paid for
+/// on every line of every other. The volume is what decides it: "persistent, and shared with
+/// every sandbox on this host that holds it" is exactly what somebody weighing that grant
+/// needs, and it is a fact about volumes, so it belongs beside the list and not inside the
+/// forty lines that are not volumes.
+///
+/// Exhaustive by construction: an entry is a `match` on a leaf of that kind, so a seventh
+/// primitive does not compile until somebody has written what its token means (warnings are
+/// errors, repo-wide). A legend a kind can go quietly missing from is a decoder ring with a
+/// hole in it — and the hole would be in the surface a person consents on.
+module GrantNotation =
+
+    /// One kind's shape and meaning. `[..]` is optional, `A|B` is a choice, and the capitals
+    /// are what the operator wrote.
+    let private kind (leaf: ResourceLeaf) : string * string =
+        match leaf with
+        | Mount _ ->
+            "path:PATH[>AT]:ro|rw|ovl",
+            "a file or directory, read-only, writable, or writable over a read-only copy, \
+             with >AT the place the sandbox sees it"
+        | Socket _ -> "sock:PATH", "a unix socket"
+        | Endpoint _ -> "net:HOST", "that host may be reached over the network"
+        | Volume _ ->
+            "vol:NAME>AT",
+            "a named volume at AT, which persists and is shared with every sandbox on this \
+             host that holds it"
+        | Variable _ ->
+            "env:NAME=VALUE",
+            "an environment variable, its value quoted where it carries anything that could \
+             read as the end of the grant"
+        | Exec _ -> "exec:PATH", "an executable, on PATH"
+
+    /// One leaf per kind. What makes `kind` a total match over the vocabulary rather than a
+    /// list somebody keeps in step with it.
+    let private kinds : ResourceLeaf list =
+        [ Mount { From = "/nix"; At = "/nix"; Mode = ResourceMountMode.Read }
+          Socket "/run/docker.sock"
+          Endpoint "registry.npmjs.org"
+          Volume ("yession-nix", "/nix")
+          Variable ("CI", "1")
+          Exec "/usr/bin/git" ]
+
+    /// The two marks, which are not kinds: one is what the operator said about a grant, the
+    /// other what this host made of it. Last, because that is the order a line is read in.
+    let private marks : (string * string) list =
+        [ "!GRANT", "sensitive, which is the operator saying this one is worth being told about"
+          "GRANT ~> OTHER",
+          "this host cannot scope GRANT, so the sandbox gets OTHER instead, where * is any of \
+           that kind, and \"~> nothing\" is not granted here followed by why" ]
+
+    /// Every entry, in reading order.
+    let legend : (string * string) list = (kinds |> List.map kind) @ marks
+
+    /// The legend as prose, for a tool description — where a model reads it and there is no
+    /// table to draw. The same list, so the two audiences cannot be told different things.
+    ///
+    /// One SENTENCE per entry, ended by its full stop rather than joined by a separator: a
+    /// meaning is free text and the day one of them contains the separator is the day the
+    /// legend reads as an entry nobody wrote.
+    let sentence : string =
+        legend
+        |> List.map (fun (shape, meaning) -> sprintf "%s — %s." shape meaning)
+        |> String.concat " "
+        |> sprintf "Grants are written in one notation. %s"
 
 /// An operator's whole vocabulary, AFTER validation.
 ///

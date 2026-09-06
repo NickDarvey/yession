@@ -392,7 +392,9 @@ let private queryDef : QueryDef =
       Description =
         "The sandboxes commands can run in, each with the backend confining it, what it \
          runs, whether it is up, and which credentials were forwarded into it and by whom. \
-         Read from the processes themselves."
+         Read from the processes themselves. A degraded row says what this host could not \
+         give exactly. "
+        + GrantNotation.sentence
       Shape =
         Rows
             [ QueryColumn.create "name" "name"

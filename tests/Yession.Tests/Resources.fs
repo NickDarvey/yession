@@ -581,7 +581,7 @@ let tests =
                 |> List.pick (fun (column, cell) -> if column = key then Some cell else None)
             match cellOf "nix" "grants" with
             | CellText grants ->
-                Expect.isTrue (grants.Contains "/nix,") (sprintf "the mount it reaches, said: %s" grants)
+                Expect.isTrue (grants.Contains "path:/nix:ro") (sprintf "the mount it reaches, said: %s" grants)
                 Expect.isTrue (grants.Contains "daemon-socket") (sprintf "and the socket, said: %s" grants)
             | other -> failwithf "expected text, got %A" other
 
@@ -605,6 +605,66 @@ let tests =
 
         // --- what a person is shown --------------------------------------------------------
 
+        // The notation itself, pinned as a whole. Its red means "the notation changed", which
+        // is a thing to decide rather than a thing to fix — every surface that shows a grant
+        // shows these words, and a person who has learned to read one has learned the others.
+        //
+        // A file and a directory are ONE kind on purpose: telling them apart needs a stat,
+        // the module has no IO, and the kernel does not make the distinction either.
+        testCase "a grant is written as its kind, then what it names" <| fun () ->
+            Expect.equal
+                ([ Mount { From = "/nix"; At = "/nix"; Mode = ResourceMountMode.Read }
+                   Mount { From = "/h/.npm"; At = "/root/.npm"; Mode = ResourceMountMode.Overlay }
+                   Mount { From = "/w"; At = "/w"; Mode = ResourceMountMode.Write }
+                   Socket "/run/docker.sock"
+                   Endpoint "registry.npmjs.org"
+                   Volume ("yession-nix", "/nix")
+                   Variable ("CI", "1")
+                   Exec "/usr/bin/git" ]
+                 |> List.map ResourceLeaf.describe)
+                [ "path:/nix:ro"
+                  "path:/h/.npm>/root/.npm:ovl"
+                  "path:/w:rw"
+                  "sock:/run/docker.sock"
+                  "net:registry.npmjs.org"
+                  "vol:yession-nix>/nix"
+                  "env:CI=1"
+                  "exec:/usr/bin/git" ]
+                "the notation"
+
+        // A variable's value is the one part of a grant that is arbitrary text, so it is the
+        // one part that can carry whatever a reader splits a list of grants on. Quoted only
+        // where it has to be: an `env:` line that wore quotes every time would teach people
+        // to read past them, which is how the one that means something gets missed.
+        testCase "a value that could be mistaken for the end of a grant is quoted" <| fun () ->
+            Expect.equal
+                ([ Variable ("A", "1")
+                   Variable ("B", "a b")
+                   Variable ("C", "x;y")
+                   Variable ("D", "say \"hi\"") ]
+                 |> List.map ResourceLeaf.describe)
+                [ "env:A=1"; "env:B=\"a b\""; "env:C=\"x;y\""; "env:D=\"say \\\"hi\\\"\"" ]
+                "quoted exactly where it is ambiguous"
+
+        // The legend is what makes a short token readable, so a kind the notation writes and
+        // the legend does not describe is a token nobody can decode. The compiler covers the
+        // other direction — an entry is a match on a leaf, so a seventh primitive does not
+        // build until it has one — and this covers the half the compiler cannot see: that the
+        // shape written in the legend is the shape the renderer actually emits.
+        testCase "the legend names every kind the notation writes" <| fun () ->
+            for leaf in
+                [ Mount { From = "/nix"; At = "/nix"; Mode = ResourceMountMode.Read }
+                  Socket "/run/docker.sock"
+                  Endpoint "registry.npmjs.org"
+                  Volume ("yession-nix", "/nix")
+                  Variable ("CI", "1")
+                  Exec "/usr/bin/git" ] do
+                let written = ResourceLeaf.describe leaf
+                let kind = written.Substring (0, written.IndexOf ':' + 1)
+                Expect.isTrue
+                    (GrantNotation.legend |> List.exists (fun (shape, _) -> shape.StartsWith kind))
+                    (sprintf "%s is written but the legend does not say what %s means" written kind)
+
         // A leaf that materialises and was never shown is the fault this module exists to
         // prevent. Counts leaves and marks; never the wording, which is a design and moves.
         check "every leaf in a closure is described, and every sensitive one is marked" <| fun () ->
@@ -619,7 +679,7 @@ let tests =
                     (Set.count (ResourceClosure.leaves closure))
                     "one line per leaf, and no leaf without one"
                 Expect.equal
-                    (lines |> List.filter (fun line -> line.Contains "(sensitive)") |> List.length)
+                    (lines |> List.filter (fun line -> line.StartsWith "!") |> List.length)
                     (Set.count (ResourceClosure.sensitiveLeaves closure))
                     "and every sensitive leaf carries the mark"
             }
@@ -773,7 +833,7 @@ let tests =
                     (Set.count (ResourceClosure.leaves closure))
                     "one line per leaf, including the ones this host withheld"
                 Expect.equal
-                    (lines |> List.filter (fun line -> line.Contains "(sensitive)") |> List.length)
+                    (lines |> List.filter (fun line -> line.StartsWith "!") |> List.length)
                     (Set.count (ResourceClosure.sensitiveLeaves closure))
                     "and the host changed no leaf's mark"
             }
@@ -831,7 +891,7 @@ let tests =
             match asked.Granted, named with
             | [ line ], [ grant ] ->
                 Expect.isTrue (line.StartsWith grant) (sprintf "the grant is still named, said: %s" line)
-                Expect.isTrue (line.Contains "any unix socket") (sprintf "and said to come out wider, said: %s" line)
+                Expect.isTrue (line.Contains "~> sock:*") (sprintf "and said to come out wider, said: %s" line)
             | granted, _ -> failwithf "expected one line, got %A" granted
 
         // The other half, and the reason the first is not vacuous: where the host narrows
