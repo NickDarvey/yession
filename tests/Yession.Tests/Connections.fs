@@ -2523,6 +2523,9 @@ type private StubGitHubApi =
       SetPr : string -> unit
       SetCheckRuns : string -> unit
       SetStatus : int -> unit
+      /// The rate-limit headers every reply carries: remaining, reset (epoch seconds) and
+      /// the bucket they describe. `None` serves a reply with none at all.
+      SetAllowance : (int * int64 * string) option -> unit
       Requests : ResizeArray<string * string option> }
 
 let private startStubGitHubApi () : Async<StubGitHubApi> =
@@ -2532,22 +2535,31 @@ let private startStubGitHubApi () : Async<StubGitHubApi> =
         let mutable prVersion = 1
         let mutable checksVersion = 1
         let mutable status = 200
+        let mutable allowance : (int * int64 * string) option = None
         let requests = ResizeArray<string * string option> ()
+        let withAllowance (pairs: (string * obj) list) =
+            match allowance with
+            | None -> pairs
+            | Some (remaining, resets, resource) ->
+                pairs
+                @ [ "x-ratelimit-remaining", box (string remaining)
+                    "x-ratelimit-reset", box (string resets)
+                    "x-ratelimit-resource", box resource ]
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
             let path = req.url.Split('?').[0]
             requests.Add (path, Interop.headerOf req "authorization")
             let body, version = if path.Contains "/check-runs" then checksBody, checksVersion else prBody, prVersion
             let etag = sprintf "\"v%d\"" version
             if status <> 200 then
-                res.writeHead (status, Fable.Core.JsInterop.createObj [ "content-type", box "application/json" ]) |> ignore
+                res.writeHead (status, Fable.Core.JsInterop.createObj (withAllowance [ "content-type", box "application/json" ])) |> ignore
                 res.``end`` """{"message":"nope"}"""
             elif Interop.headerOf req "if-none-match" = Some etag then
-                res.writeHead (304, Fable.Core.JsInterop.createObj [ "etag", box etag ]) |> ignore
+                res.writeHead (304, Fable.Core.JsInterop.createObj (withAllowance [ "etag", box etag ])) |> ignore
                 res.``end`` ""
             else
                 res.writeHead (
                     200,
-                    Fable.Core.JsInterop.createObj [ "content-type", box "application/json"; "etag", box etag ])
+                    Fable.Core.JsInterop.createObj (withAllowance [ "content-type", box "application/json"; "etag", box etag ]))
                 |> ignore
                 res.``end`` body
         let server = Interop.createServer handler
@@ -2558,15 +2570,83 @@ let private startStubGitHubApi () : Async<StubGitHubApi> =
               SetPr = (fun body -> prBody <- body; prVersion <- prVersion + 1)
               SetCheckRuns = (fun body -> checksBody <- body; checksVersion <- checksVersion + 1)
               SetStatus = (fun s -> status <- s)
+              SetAllowance = (fun a -> allowance <- a)
               Requests = requests }
     }
+
+/// A `Spending` over a real ledger, so a case can watch what a reply taught it.
+let private spendingOver (ledger: Resilience.Ledger) (now: DateTimeOffset) (spend: Resilience.Spend) =
+    GitHubPrs.Spending.over ledger (fun () -> now) spend
+
+let private prBudgetTests =
+    testList "what a look spends" [
+        testCaseAsync "every reply teaches the ledger what github said is left" <|
+            async {
+                // Read, never counted: the header is the provider's own counter, and it is
+                // shared — this reply reports what every other session holding the same
+                // credential has spent too.
+                let! stub = startStubGitHubApi ()
+                let resets = DateTimeOffset (2026, 1, 1, 1, 0, 0, TimeSpan.Zero)
+                stub.SetAllowance (Some (4321, resets.ToUnixTimeSeconds (), "core"))
+                let ledger = Resilience.Ledger.create ()
+                let fetch = GitHubPrs.fetchOver stub.Url (spendingOver ledger resets Resilience.Background)
+                let! _ = fetch (Some "token-abc") prOne PrWatches.PrEtags.none None
+                Expect.equal
+                    (Resilience.Ledger.reading ledger)
+                    (Resilience.Seen (4321, resets))
+                    "what the reply said, folded in"
+            }
+
+        testCaseAsync "a reply about another of github's buckets teaches nothing" <|
+            async {
+                // GitHub prices `core`, `search` and `graphql` separately. A reading from a
+                // bucket these endpoints do not draw on would describe a budget nobody here
+                // spends.
+                let! stub = startStubGitHubApi ()
+                let resets = DateTimeOffset (2026, 1, 1, 1, 0, 0, TimeSpan.Zero)
+                stub.SetAllowance (Some (7, resets.ToUnixTimeSeconds (), "search"))
+                let ledger = Resilience.Ledger.create ()
+                let fetch = GitHubPrs.fetchOver stub.Url (spendingOver ledger resets Resilience.Background)
+                let! _ = fetch (Some "token-abc") prOne PrWatches.PrEtags.none None
+                Expect.equal (Resilience.Ledger.reading ledger) Resilience.Unknown "not this budget"
+            }
+
+        testCaseAsync "a look it cannot afford is never made, and says when to come back" <|
+            async {
+                // The whole point of reading the counter: the hold costs no request to
+                // discover, and it is the same value the poller already schedules around.
+                let! stub = startStubGitHubApi ()
+                let now = DateTimeOffset (2026, 1, 1, 0, 0, 0, TimeSpan.Zero)
+                let resets = now.AddMinutes 30.0
+                let ledger = Resilience.Ledger.create ()
+                Resilience.Ledger.observed ledger (Resilience.Seen (10, resets))
+                let fetch = GitHubPrs.fetchOver stub.Url (spendingOver ledger now Resilience.Background)
+                match! fetch (Some "token-abc") prOne PrWatches.PrEtags.none None with
+                | PrWatches.PrFetchFailed (PrWatches.PrRateLimited (Some until)) ->
+                    Expect.equal (int64 until) (resets.ToUnixTimeSeconds ()) "the moment github named"
+                | other -> failwithf "expected the look to be held, got %A" other
+                Expect.equal stub.Requests.Count 0 "and nothing was asked of github to find out"
+            }
+
+        testCaseAsync "the same budget still lets through what somebody is waiting on" <|
+            async {
+                let! stub = startStubGitHubApi ()
+                let now = DateTimeOffset (2026, 1, 1, 0, 0, 0, TimeSpan.Zero)
+                let ledger = Resilience.Ledger.create ()
+                Resilience.Ledger.observed ledger (Resilience.Seen (10, now.AddMinutes 30.0))
+                let fetch = GitHubPrs.fetchOver stub.Url (spendingOver ledger now Resilience.Foreground)
+                match! fetch (Some "token-abc") prOne PrWatches.PrEtags.none None with
+                | PrWatches.PrChanged _ -> Expect.isTrue (stub.Requests.Count > 0) "the reserve is what this is for"
+                | other -> failwithf "expected the look to go through, got %A" other
+            }
+    ]
 
 let private prFetchTests =
     testList "pull request endpoints" [
         testCaseAsync "a first look reads the pull request and its checks" <|
             async {
                 let! stub = startStubGitHubApi ()
-                let fetch = GitHubPrs.fetchOver stub.Url
+                let fetch = GitHubPrs.fetchOver stub.Url GitHubPrs.Spending.unmetered
                 match! fetch (Some "token-abc") prOne PrWatches.PrEtags.none None with
                 | PrWatches.PrChanged (snapshot, etags) ->
                     Expect.equal snapshot.State PrOpen "open"
@@ -2583,7 +2663,7 @@ let private prFetchTests =
         testCaseAsync "a second look with the same etag costs a 304 and says nothing changed" <|
             async {
                 let! stub = startStubGitHubApi ()
-                let fetch = GitHubPrs.fetchOver stub.Url
+                let fetch = GitHubPrs.fetchOver stub.Url GitHubPrs.Spending.unmetered
                 match! fetch (Some "token-abc") prOne PrWatches.PrEtags.none None with
                 | PrWatches.PrChanged (snapshot, etags) ->
                     match! fetch (Some "token-abc") prOne etags (Some snapshot) with
@@ -2595,7 +2675,7 @@ let private prFetchTests =
         testCaseAsync "check runs that move on an unchanged pull request still reach the caller" <|
             async {
                 let! stub = startStubGitHubApi ()
-                let fetch = GitHubPrs.fetchOver stub.Url
+                let fetch = GitHubPrs.fetchOver stub.Url GitHubPrs.Spending.unmetered
                 let! first = fetch (Some "token-abc") prOne PrWatches.PrEtags.none None
                 let etags, seen =
                     match first with
@@ -2614,7 +2694,7 @@ let private prFetchTests =
         testCaseAsync "a pull request that moves on its own keeps the rollup its checks last reported" <|
             async {
                 let! stub = startStubGitHubApi ()
-                let fetch = GitHubPrs.fetchOver stub.Url
+                let fetch = GitHubPrs.fetchOver stub.Url GitHubPrs.Spending.unmetered
                 let! first = fetch (Some "token-abc") prOne PrWatches.PrEtags.none None
                 let etags, seen =
                     match first with
@@ -2633,7 +2713,7 @@ let private prFetchTests =
         testCaseAsync "auto merge, armed and disarmed, reaches the next look" <|
             async {
                 let! stub = startStubGitHubApi ()
-                let fetch = GitHubPrs.fetchOver stub.Url
+                let fetch = GitHubPrs.fetchOver stub.Url GitHubPrs.Spending.unmetered
                 // The default body carries no auto_merge at all, which is the same fact as
                 // a null one: nothing is going to merge this without a person.
                 match! fetch (Some "token-abc") prOne PrWatches.PrEtags.none None with
@@ -2654,7 +2734,7 @@ let private prFetchTests =
         testCaseAsync "a merge at the provider reaches the next look" <|
             async {
                 let! stub = startStubGitHubApi ()
-                let fetch = GitHubPrs.fetchOver stub.Url
+                let fetch = GitHubPrs.fetchOver stub.Url GitHubPrs.Spending.unmetered
                 let! first = fetch (Some "token-abc") prOne PrWatches.PrEtags.none None
                 let etags, seen =
                     match first with
@@ -2669,7 +2749,7 @@ let private prFetchTests =
         testCaseAsync "a 401 is the credential's failure, and a 404 is not" <|
             async {
                 let! stub = startStubGitHubApi ()
-                let fetch = GitHubPrs.fetchOver stub.Url
+                let fetch = GitHubPrs.fetchOver stub.Url GitHubPrs.Spending.unmetered
                 stub.SetStatus 401
                 match! fetch (Some "stale") prOne PrWatches.PrEtags.none None with
                 | PrWatches.PrFetchFailed PrWatches.PrUnauthorized -> ()
@@ -2703,7 +2783,7 @@ let private prWatchVerbTests =
                 GitHubPrs.provider
                 (fun actor event -> async { let! _ = log.Append actor event in () })
                 watchesNow
-                (GitHubPrs.fetchOver stub.Url)
+                (GitHubPrs.fetchOver stub.Url GitHubPrs.Spending.unmetered)
                 (fun _ -> async { return Some "token-abc" })
                 applied.Add
         service, log, applied
@@ -2792,6 +2872,7 @@ let tests =
         Tag.needs "Connection control routes" [ Tag.Ports ] (fun () -> routeTests)
         Tag.needs "GitHub sign-in routes" [ Tag.Ports ] (fun () -> githubRouteTests)
         Tag.needs "Pull request endpoints" [ Tag.Ports ] (fun () -> prFetchTests)
+        Tag.needs "What a look spends" [ Tag.Ports ] (fun () -> prBudgetTests)
         Tag.needs "Watching a pull request" [ Tag.Ports ] (fun () -> prWatchVerbTests)
         Tag.needs "Per-actor credentials E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)
     ]

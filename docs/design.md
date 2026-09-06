@@ -167,6 +167,12 @@ as one:
   `Breaker` is the question after the policy's — not "is this call worth making
   again" but "is this RESOURCE worth calling at all just now" — held per resource
   and composed outside `guard`, so it counts settled failures rather than attempts.
+  A rate limit is the question none of those ask, because it is answerable before the
+  call: `Quota` holds the provider's OWN counter (`Allowance`), read from its replies
+  rather than tallied here — GitHub's budget belongs to a credential, not a process,
+  so one session's reply already reports what every other session holding it spent —
+  and `Spend` decides who may take the last of it, so a poller cannot spend the
+  request a person is waiting on.
   What an HTTP answer means for any of it is said once, in `Resilience.Http.verdict`,
   so a 503 means the same thing to every leg that reads one and a leg still owns
   what is peculiar to it by composing over that rather than answering it again;
