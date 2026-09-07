@@ -561,13 +561,13 @@ let foldTests =
                         (cell WorkSandboxes.unavailable)
                         (recordingGate (ResizeArray<GatedCall> ()))
                         log
-                        (granting [ "/nix, read-only"; "reaches cache.nixos.org" ])
+                        (granting [ "path:/nix:ro"; "net:cache.nixos.org" ])
                 do! folded.Fold None
                 let! page = log.Read None System.Int32.MaxValue
                 match page.Events |> List.choose (fun e -> match e.Event with SessionEvent.RepoCapabilitiesChanged c -> Some c | _ -> None) with
                 | [ note ] ->
                     Expect.equal note.Repo r "the repo whose file asked"
-                    Expect.equal note.Granted [ "/nix, read-only"; "reaches cache.nixos.org" ] "the whole set, in the words a person is shown"
+                    Expect.equal note.Granted [ "path:/nix:ro"; "net:cache.nixos.org" ] "the whole set, in the words a person is shown"
                     Expect.equal note.Actor (ActorRef.Configured r) "attributed to the file, like everything else it asks for"
                 | other -> failwithf "expected one note, got %A" other
             }
@@ -586,14 +586,14 @@ let foldTests =
                         (cell WorkSandboxes.unavailable)
                         (recordingGate (ResizeArray<GatedCall> ()))
                         log
-                        (granting [ "/nix, read-only" ])
+                        (granting [ "path:/nix:ro" ])
                 do! folded.Fold None
                 do! folded.Fold None
                 do! folded.Fold None
                 let! page = log.Read None System.Int32.MaxValue
                 let notes =
                     page.Events |> List.choose (fun e -> match e.Event with SessionEvent.RepoCapabilitiesChanged c -> Some c.Granted | _ -> None)
-                Expect.equal notes [ [ "/nix, read-only" ] ] "three folds, one thing to say"
+                Expect.equal notes [ [ "path:/nix:ro" ] ] "three folds, one thing to say"
             }
 
         // The case the whole note exists for: a checkout widening what it holds.
@@ -602,7 +602,7 @@ let foldTests =
                 let r = repo "octo/hello"
                 let dir = checkout r (Some "version: 2\nsandboxes:\n  dev:\n    uses: [ nix ]\n")
                 let log = foldLog ()
-                let mutable granted = [ "/nix, read-only" ]
+                let mutable granted = [ "path:/nix:ro" ]
                 let folded =
                     RepoSandboxes.create
                         dir
@@ -612,14 +612,15 @@ let foldTests =
                         log
                         (granting granted)
                 do! folded.Fold None
-                granted <- [ "/nix, read-only"; "reaches anywhere (sensitive)" ]
+                granted <- [ "path:/nix:ro"; "!net:anywhere" ]
                 do! folded.Fold None
                 let! page = log.Read None System.Int32.MaxValue
                 let notes =
                     page.Events |> List.choose (fun e -> match e.Event with SessionEvent.RepoCapabilitiesChanged c -> Some c.Granted | _ -> None)
                 Expect.equal (List.length notes) 2 "the widening is news"
-                Expect.isTrue
-                    (notes |> List.last |> List.exists (fun line -> line.Contains "sensitive"))
+                Expect.equal
+                    (notes |> List.last)
+                    [ "path:/nix:ro"; "!net:anywhere" ]
                     "and the second note carries the whole set, so a person reads what it is now rather than what moved"
             }
 
@@ -634,7 +635,7 @@ let foldTests =
                 let folded =
                     RepoSandboxes.create
                         dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable)
-                        (recordingGate seen) (foldLog ()) (granting [ "/nix, read-only" ])
+                        (recordingGate seen) (foldLog ()) (granting [ "path:/nix:ro" ])
                 do! folded.Fold None
                 Expect.equal seen.Count 1 "the declaration reached the gate"
             }
@@ -647,7 +648,7 @@ let foldTests =
                 let folded =
                     RepoSandboxes.create
                         dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable)
-                        (recordingGate seen) (foldLog ()) (sensitively [ "reaches anywhere (sensitive)" ])
+                        (recordingGate seen) (foldLog ()) (sensitively [ "!net:anywhere" ])
                 do! folded.Fold None
                 Expect.equal seen.Count 0 "nothing was started"
                 match folded.Outcomes () with
@@ -659,7 +660,7 @@ let foldTests =
                             (problem.Contains "approve")
                             (sprintf "the row says what is waited on, said: %s" problem)
                         Expect.isTrue
-                            (problem.Contains "reaches anywhere")
+                            (problem.Contains "net:anywhere")
                             "and what is being asked for, so the answer is beside the question"
                 | other -> failwithf "expected one row, got %A" other
             }
@@ -678,10 +679,10 @@ let foldTests =
                 let folded =
                     RepoSandboxes.create
                         dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable)
-                        (recordingGate seen) log (sensitively [ "reaches anywhere (sensitive)" ])
+                        (recordingGate seen) log (sensitively [ "!net:anywhere" ])
                 do! folded.Fold None
                 let ada = UserRef (UserId.create "ada" |> expect)
-                let! approved = folded.Approve ada r [ "reaches anywhere (sensitive)" ]
+                let! approved = folded.Approve ada r [ "!net:anywhere" ]
                 Expect.equal approved (Ok ()) "a signed-in person may consent"
                 Expect.equal seen.Count 1 "and that alone starts it"
             }
@@ -696,8 +697,8 @@ let foldTests =
                     RepoSandboxes.create
                         dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable)
                         (recordingGate (ResizeArray<GatedCall> ())) (foldLog ())
-                        (sensitively [ "reaches anywhere (sensitive)" ])
-                match! folded.Approve ActorRef.Agent r [ "reaches anywhere (sensitive)" ] with
+                        (sensitively [ "!net:anywhere" ])
+                match! folded.Approve ActorRef.Agent r [ "!net:anywhere" ] with
                 | Ok () -> failwith "the agent must not be able to consent"
                 | Error e -> Expect.isTrue (e.Contains "a person") (sprintf "and is told why, said: %s" e)
             }
@@ -715,9 +716,9 @@ let foldTests =
                     RepoSandboxes.create
                         dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable)
                         (recordingGate (ResizeArray<GatedCall> ())) log
-                        (sensitively [ "reaches anywhere (sensitive)" ])
+                        (sensitively [ "!net:anywhere" ])
                 let anonymous = PeerRef (PeerId.create "peer-1" |> expect)
-                let! approved = folded.Approve anonymous r [ "reaches anywhere (sensitive)" ]
+                let! approved = folded.Approve anonymous r [ "!net:anywhere" ]
                 Expect.equal approved (Ok ()) "a person at a browser is a person"
                 let! page = log.Read None System.Int32.MaxValue
                 match page.Events |> List.choose (fun e -> match e.Event with SessionEvent.RepoCapabilitiesApproved a -> Some a.Actor | _ -> None) with
@@ -736,13 +737,13 @@ let foldTests =
                     RepoSandboxes.create
                         dir (cell (Some (reposOver dir [ r ]))) (cell WorkSandboxes.unavailable)
                         (recordingGate (ResizeArray<GatedCall> ())) (foldLog ())
-                        (sensitively [ "reaches anywhere (sensitive)" ])
+                        (sensitively [ "!net:anywhere" ])
                 let ada = UserRef (UserId.create "ada" |> expect)
                 match! folded.Approve ada r [ "reaches nowhere much" ] with
                 | Ok () -> failwith "consent to a set that is not what is asked must not stand"
                 | Error e ->
                     Expect.isTrue (e.Contains "changed since you looked") (sprintf "and says so, said: %s" e)
-                    Expect.isTrue (e.Contains "reaches anywhere") "naming what it asks for now"
+                    Expect.isTrue (e.Contains "net:anywhere") "naming what it asks for now"
             }
 
         // Both sides fold the same log: the Process to know what to gate, a client to know
@@ -754,12 +755,12 @@ let foldTests =
                 SessionEvent.RepoCapabilitiesChanged
                     { RepoCapabilitiesChanged.MessageId = MessageId.create "m1" |> expect
                       RepoCapabilitiesChanged.Repo = r
-                      RepoCapabilitiesChanged.Granted = [ "reaches anywhere (sensitive)" ]
+                      RepoCapabilitiesChanged.Granted = [ "!net:anywhere" ]
                       RepoCapabilitiesChanged.Sensitive = true
                       RepoCapabilitiesChanged.Actor = ActorRef.Configured r }
             Expect.equal
                 (RepoApprovals.pending [ asked ])
-                [ r, [ "reaches anywhere (sensitive)" ] ]
+                [ r, [ "!net:anywhere" ] ]
                 "somebody has to decide about it"
 
         testCase "an ordinary ask is never pending, however often it changes" <| fun () ->
@@ -771,7 +772,7 @@ let foldTests =
                       RepoCapabilitiesChanged.Granted = granted
                       RepoCapabilitiesChanged.Sensitive = false
                       RepoCapabilitiesChanged.Actor = ActorRef.Configured r }
-            Expect.equal (RepoApprovals.pending [ asked [ "/nix, read-only" ]; asked [ "/nix, read-only"; "/opt" ] ]) [] "nothing to ask"
+            Expect.equal (RepoApprovals.pending [ asked [ "path:/nix:ro" ]; asked [ "path:/nix:ro"; "path:/opt:ro" ] ]) [] "nothing to ask"
 
         testCase "an approval settles the set it names" <| fun () ->
             let r = repo "octo/hello"
@@ -780,7 +781,7 @@ let foldTests =
                 SessionEvent.RepoCapabilitiesChanged
                     { RepoCapabilitiesChanged.MessageId = MessageId.create "m1" |> expect
                       RepoCapabilitiesChanged.Repo = r
-                      RepoCapabilitiesChanged.Granted = [ "reaches anywhere (sensitive)" ]
+                      RepoCapabilitiesChanged.Granted = [ "!net:anywhere" ]
                       RepoCapabilitiesChanged.Sensitive = true
                       RepoCapabilitiesChanged.Actor = ActorRef.Configured r }
             let approved granted =
@@ -789,10 +790,10 @@ let foldTests =
                       RepoCapabilitiesApproved.Repo = r
                       RepoCapabilitiesApproved.Granted = granted
                       RepoCapabilitiesApproved.Actor = ada }
-            Expect.equal (RepoApprovals.pending [ asked; approved [ "reaches anywhere (sensitive)" ] ]) [] "settled"
+            Expect.equal (RepoApprovals.pending [ asked; approved [ "!net:anywhere" ] ]) [] "settled"
             Expect.equal
                 (RepoApprovals.pending [ asked; approved [ "something else entirely" ] ])
-                [ r, [ "reaches anywhere (sensitive)" ] ]
+                [ r, [ "!net:anywhere" ] ]
                 "an approval of something else leaves the ask standing"
 
         // The case the whole rule exists for: yes to one set is not yes to a wider one.
@@ -810,14 +811,14 @@ let foldTests =
                 SessionEvent.RepoCapabilitiesApproved
                     { RepoCapabilitiesApproved.MessageId = MessageId.create "m2" |> expect
                       RepoCapabilitiesApproved.Repo = r
-                      RepoCapabilitiesApproved.Granted = [ "reaches anywhere (sensitive)" ]
+                      RepoCapabilitiesApproved.Granted = [ "!net:anywhere" ]
                       RepoCapabilitiesApproved.Actor = ada }
             Expect.equal
                 (RepoApprovals.pending
-                    [ asked [ "reaches anywhere (sensitive)" ]
+                    [ asked [ "!net:anywhere" ]
                       approved
-                      asked [ "reaches anywhere (sensitive)"; "/etc, read-only" ] ])
-                [ r, [ "reaches anywhere (sensitive)"; "/etc, read-only" ] ]
+                      asked [ "!net:anywhere"; "path:/etc:ro" ] ])
+                [ r, [ "!net:anywhere"; "path:/etc:ro" ] ]
                 "the old yes does not cover the new ask"
 
         testCaseAsync "a session with no repos service folds nothing rather than failing" <|

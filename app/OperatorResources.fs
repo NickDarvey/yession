@@ -119,7 +119,10 @@ let private queryDef : QueryDef =
         "What this host offers a sandbox, as the operator declared it. Each row is a name a \
          repo may select, and what selecting it finally grants — which is the whole closure, \
          not the line written beside the name. A resource is sensitive when something it \
-         reaches is, however deeply."
+         reaches is, however deeply. "
+        // The legend travels with the answer, because this is where a model meets the
+        // notation and there is no panel beside it to read one off.
+        + GrantNotation.sentence
       Shape =
         Rows
             [ QueryColumn.create "resource" "resource"

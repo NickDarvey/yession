@@ -511,7 +511,7 @@ let private sandboxPolicyTests =
             Expect.equal policy.Sockets [ "/run/docker.sock" ] "still granted"
             match policy.Realisation with
             | [ Socket "/run/docker.sock", LeafRealisation.Coarsened got ] ->
-                Expect.isTrue (got.Contains "any unix socket") (sprintf "and said, as: %s" got)
+                Expect.equal got "sock:*" "and said, as any socket on this host"
             | other -> failwithf "expected one coarsened socket, got %A" other
             let config = Sandboxes.SrtSandbox.configFor (toolsWithRuntime []) policy
             Expect.isTrue config.AllowAllUnixSockets "and the backend does the wider thing it said it would"
